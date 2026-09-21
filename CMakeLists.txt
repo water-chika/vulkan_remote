@@ -53,12 +53,29 @@ target_include_directories(vulkan_remoting_wire PUBLIC
 target_compile_features(vulkan_remoting_wire PUBLIC cxx_std_17)
 set_target_properties(vulkan_remoting_wire PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-add_executable(vulkan_remoting_server server/server.cpp)
+add_executable(vulkan_remoting_server
+    server/main.cpp
+    server/session.cpp
+    server/handlers_instance.cpp
+    server/handlers_device.cpp
+    server/handlers_memory.cpp
+    server/handlers_command.cpp
+    server/handlers_wsi.cpp
+)
 target_link_libraries(vulkan_remoting_server PRIVATE vulkan_remoting_wire Vulkan::Vulkan)
 
 # The client links Vulkan::Headers, never the loader: it is the driver the
 # loader talks to, so linking the loader would be circular.
-add_library(vulkan_remoting_icd SHARED client/icd.cpp client/icd_device.cpp client/remote_objects.cpp)
+add_library(vulkan_remoting_icd SHARED
+    client/icd.cpp
+    client/physical_device.cpp
+    client/device.cpp
+    client/memory.cpp
+    client/commands.cpp
+    client/wsi.cpp
+    client/entry_table.cpp
+    client/remote_objects.cpp
+)
 target_link_libraries(vulkan_remoting_icd PRIVATE vulkan_remoting_wire Vulkan::Headers)
 
 # The probe links no Vulkan at all, which keeps it honest about what actually
