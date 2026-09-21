@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 namespace remoting {
@@ -39,7 +40,18 @@ bool read_all(int fd, void* data, size_t size) {
             continue;
         }
         if (n < 0 && errno == EINTR) continue;
-        return false;  // 0 is an orderly shutdown, which mid-message is an error.
+        // A client with SO_RCVTIMEO (see connect_to) sees EAGAIN/EWOULDBLOCK
+        // here if the peer went quiet mid-message: worth telling apart from an
+        // orderly shutdown (n == 0), because one means "wedged or dead" and
+        // the other means "closed the connection on purpose".
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            fprintf(stderr, "remoting: recv timed out waiting for the peer; treating it as dead\n");
+        } else if (n == 0) {
+            fprintf(stderr, "remoting: peer closed the connection\n");
+        } else {
+            fprintf(stderr, "remoting: recv failed: %s\n", strerror(errno));
+        }
+        return false;
     }
     return true;
 }
@@ -101,6 +113,16 @@ int connect_to(const std::string& host, uint16_t port) {
     // follow-up that cannot arrive, because the caller is blocked on the reply.
     const int one = 1;
     ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+
+    // Only the client connects out (the server accepts), so this is the client's
+    // socket. Without a receive timeout, a dead or wedged server leaves the
+    // client blocked in recv() forever - every Vulkan call becomes an
+    // unkillable hang instead of a reported error. 30s is generous enough that
+    // a legitimately slow call over a real network still completes.
+    struct timeval timeout;
+    timeout.tv_sec = 30;
+    timeout.tv_usec = 0;
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     return fd;
 }
 

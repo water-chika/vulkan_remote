@@ -3,6 +3,13 @@
 //
 // One Server::serve(fd) call handles one client end-to-end, and owns that
 // client's ObjectTables: a second client gets its own table, its own ids.
+// main()'s accept loop gives each connection its own thread so several of
+// these can run at once - a single process legitimately holds more than one
+// VkInstance open at a time (a cached default instance plus a short-lived
+// custom one, which the Vulkan CTS does routinely), and serving connections
+// one at a time here meant the second one waited in the kernel's accept
+// queue for as long as the first stayed open, which for a long-lived
+// instance was forever.
 //
 // Recording commands (every vkCmd*, plus vkUpdateDescriptorSets, vkDestroy*,
 // vkFreeMemory and vkResetFences) arrive with no reply expected: the client
@@ -60,8 +67,11 @@ void on_signal(int) { g_stop.store(true); }
 
 // Set to the current connection's oneway_errors counter for the duration of
 // Server::serve(); the debug callback runs on this thread synchronously
-// inside whatever Vulkan call triggered it, so this is safe without locking.
-uint32_t* g_current_error_counter = nullptr;
+// inside whatever Vulkan call triggered it. thread_local because serve() now
+// runs concurrently for multiple clients (see the accept loop in main()): a
+// plain global here would let one client's errors get counted against
+// another's, or a UAF once the first thread's oneway_errors goes out of scope.
+thread_local uint32_t* g_current_error_counter = nullptr;
 
 VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
                                               VkDebugUtilsMessageTypeFlagsEXT,
@@ -554,6 +564,16 @@ void handle_DownloadMappedMemory(Ctx& c) {
     VkDevice device = c.tables.devices.get(device_id);
     const uint32_t count = c.reader.u32();
 
+    // recv_message already refuses a payload over 64MB (see wire.cpp), so no
+    // genuine request needs more ranges than that could possibly encode; a
+    // huge count here is either a desynchronised reader or a bogus size (see
+    // below) and must be rejected before it sizes an allocation, not after.
+    constexpr uint32_t kMaxRanges = 64u * 1024u * 1024u / 24u;
+    if (count > kMaxRanges) {
+        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        return;
+    }
+
     struct Range {
         uint64_t memory_id;
         uint64_t offset;
@@ -568,6 +588,20 @@ void handle_DownloadMappedMemory(Ctx& c) {
     if (!c.reader.ok() || device == VK_NULL_HANDLE) {
         c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
         return;
+    }
+
+    // A range's size travels the wire as a bare uint64 (see
+    // RemoteDevice::download_mapped), so VK_WHOLE_SIZE (client bug fixed
+    // there) or any other oversized value would otherwise reach here intact
+    // and turn into a multi-exabyte std::vector construction, which throws
+    // std::length_error and kills the server. This is the same 64MB ceiling
+    // recv_message already applies to a whole message.
+    constexpr uint64_t kMaxRangeSize = 64ull * 1024u * 1024u;
+    for (const Range& range : ranges) {
+        if (range.size > kMaxRangeSize) {
+            c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+            return;
+        }
     }
 
     c.writer.u32(static_cast<uint32_t>(Status::Ok));
@@ -2090,8 +2124,20 @@ int main(int argc, char** argv) {
         }
         const int one = 1;
         ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-        server.serve(fd);
-        ::close(fd);
+        // One VkInstance is one connection, and a single process can hold
+        // several open at once (CTS's CustomInstanceTest keeps its default
+        // instance alive while asking for a differently-configured one for a
+        // single test). Serving connections one at a time here meant the
+        // second one sat in the kernel's accept queue forever while the
+        // first stayed open, and the client blocked in vkCreateInstance
+        // forever too - a wedge, not a crash, but just as fatal to a run.
+        // ObjectTables are already per-connection (see objects.hpp) so
+        // handing each connection its own thread costs nothing but a
+        // detached std::thread.
+        std::thread([&server, fd] {
+            server.serve(fd);
+            ::close(fd);
+        }).detach();
     }
 
     server.stop_wayland();

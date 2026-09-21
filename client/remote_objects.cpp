@@ -54,9 +54,24 @@ bool RemoteDevice::download_mapped(const VkMappedMemoryRange* ranges, uint32_t c
     request.handle(remote_id);
     request.u32(count);
     for (uint32_t i = 0; i < count; ++i) {
-        request.handle(id_from_handle(ranges[i].memory));
+        const uint64_t memory_id = id_from_handle(ranges[i].memory);
+        VkDeviceSize size = ranges[i].size;
+        // vkInvalidateMappedMemoryRanges allows VK_WHOLE_SIZE here just as
+        // vkMapMemory does; unlike MapMemory (see above) this range's size
+        // never gets resolved against the actual mapping before now, so
+        // UINT64_MAX would otherwise go straight over the wire and the
+        // server would try to size a std::vector with it.
+        if (size == VK_WHOLE_SIZE) {
+            for (const MappedRange& mapped_range : mapped) {
+                if (mapped_range.memory_id == memory_id) {
+                    size = mapped_range.size - (ranges[i].offset - mapped_range.offset);
+                    break;
+                }
+            }
+        }
+        request.handle(memory_id);
         request.u64(ranges[i].offset);
-        request.u64(ranges[i].size);
+        request.u64(size);
     }
 
     std::vector<char> reply;
