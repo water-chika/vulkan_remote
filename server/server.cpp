@@ -11,6 +11,20 @@
 // m_oneway_errors and hands the count back in the next reply that does wait
 // for one (vkQueueSubmit, vkDeviceWaitIdle) - see remote_objects.hpp on the
 // client side for where that count is read and printed.
+//
+// --wayland embeds a WaylandProxy (wayland/proxy_server.hpp) so a client's
+// vkCreateWaylandSurfaceKHR has something real to name. It runs on its own
+// thread, not interleaved into serve()'s blocking recv loop, because that
+// loop blocks in recv() on the client socket for however long the
+// application takes between calls - the compositor connection and the
+// proxy_client link both need pumping far more often than that. libwayland's
+// prepare_read/read_events handshake is designed for exactly this: one
+// thread dispatching the default queue while the driver's WSI code
+// dispatches a private queue of its own on another thread. The only shared
+// state that is genuinely ours - WaylandProxy's object table - gets its own
+// mutex (see proxy_server.hpp).
+
+#define VK_USE_PLATFORM_WAYLAND_KHR
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -23,14 +37,18 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
+#include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <vulkan/vulkan.h>
 
 #include "marshal.hpp"
 #include "objects.hpp"
+#include "proxy_server.hpp"
 #include "remoting_commands.inl"
 #include "wire.hpp"
 
@@ -62,7 +80,7 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(VkDebugUtilsMessageSeverityFlagBit
 
 class Server {
    public:
-    bool init_vulkan(bool validate) {
+    bool init_vulkan(bool validate, bool want_wayland) {
         VkApplicationInfo app_info{};
         app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
         app_info.pApplicationName = "vulkan-remoting-server";
@@ -88,6 +106,14 @@ class Server {
                         "server: --validate requested but VK_LAYER_KHRONOS_validation is not "
                         "available; continuing without it\n");
             }
+        }
+
+        // Only requested with --wayland: without a WaylandProxy to name a
+        // window, the offscreen path must see the exact same instance it
+        // always has, extension for extension.
+        if (want_wayland) {
+            extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
+            extensions.push_back(VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME);
         }
 
         VkInstanceCreateInfo create_info{};
@@ -137,6 +163,7 @@ class Server {
     }
 
     ~Server() {
+        stop_wayland();
         if (m_messenger != VK_NULL_HANDLE) {
             auto destroy_fn = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
                 vkGetInstanceProcAddr(m_instance, "vkDestroyDebugUtilsMessengerEXT"));
@@ -144,6 +171,34 @@ class Server {
         }
         if (m_instance != VK_NULL_HANDLE) vkDestroyInstance(m_instance, nullptr);
     }
+
+    // Starts the embedded Wayland proxy and its pump thread. See the header
+    // comment for why this runs on its own thread rather than being folded
+    // into serve()'s blocking recv loop.
+    bool start_wayland(uint16_t port) {
+        m_wayland = std::make_unique<WaylandProxy>();
+        if (!m_wayland->start(port)) {
+            m_wayland.reset();
+            return false;
+        }
+        m_wayland_thread = std::thread([this] {
+            while (!g_stop.load()) {
+                if (!m_wayland->poll()) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        });
+        return true;
+    }
+
+    void stop_wayland() {
+        if (m_wayland_thread.joinable()) {
+            g_stop.store(true);
+            m_wayland_thread.join();
+        }
+    }
+
+    WaylandProxy* wayland() const { return m_wayland.get(); }
+    VkInstance instance() const { return m_instance; }
 
     // Handles cross the wire as indices, never as pointers. A VkPhysicalDevice
     // is a host pointer; sending its bits would be meaningless remotely and
@@ -169,6 +224,8 @@ class Server {
     VkInstance m_instance = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT m_messenger = VK_NULL_HANDLE;
     std::vector<VkPhysicalDevice> m_physical_devices;
+    std::unique_ptr<WaylandProxy> m_wayland;
+    std::thread m_wayland_thread;
 };
 
 // Shared by every case handler below; declared once per connection in
@@ -1180,6 +1237,278 @@ void handle_EnumerateDeviceExtensionProperties(Ctx& c, Server& server) {
     if (swapchain) remoting::write_ExtensionProperties(c.writer, *swapchain);
 }
 
+// ---------------------------------------------------------------------------
+// WSI: Wayland surface, surface queries, swapchain
+// ---------------------------------------------------------------------------
+
+void handle_CreateWaylandSurfaceKHR(Ctx& c, Server& server) {
+    const uint32_t app_object_id = c.reader.u32();
+    if (!c.reader.ok()) {
+        c.writer.u32(static_cast<uint32_t>(Status::Ok));
+        c.writer.i32(VK_ERROR_INITIALIZATION_FAILED);
+        c.writer.handle(0);
+        return;
+    }
+
+    WaylandProxy* wayland = server.wayland();
+    if (!wayland) {
+        fprintf(stderr,
+                "server: vkCreateWaylandSurfaceKHR requested but the server was not started "
+                "with --wayland\n");
+        c.writer.u32(static_cast<uint32_t>(Status::Ok));
+        c.writer.i32(VK_ERROR_INITIALIZATION_FAILED);
+        c.writer.handle(0);
+        return;
+    }
+
+    wl_surface* surface = wayland->surface_for_client_id(app_object_id);
+    if (!surface) {
+        // Naming the wrong window is worse than refusing outright, so this
+        // never falls back to inventing one.
+        fprintf(stderr,
+                "server: vkCreateWaylandSurfaceKHR: application object id %u is not a wl_surface "
+                "the proxy has seen\n",
+                app_object_id);
+        c.writer.u32(static_cast<uint32_t>(Status::Ok));
+        c.writer.i32(VK_ERROR_INITIALIZATION_FAILED);
+        c.writer.handle(0);
+        return;
+    }
+
+    VkWaylandSurfaceCreateInfoKHR info{};
+    info.sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR;
+    info.display = wayland->display();
+    info.surface = surface;
+
+    VkSurfaceKHR vk_surface = VK_NULL_HANDLE;
+    const VkResult result = vkCreateWaylandSurfaceKHR(server.instance(), &info, nullptr, &vk_surface);
+    c.writer.u32(static_cast<uint32_t>(Status::Ok));
+    c.writer.i32(result);
+    c.writer.handle(result == VK_SUCCESS ? c.tables.surfaces.add(vk_surface) : 0);
+}
+
+void handle_DestroySurfaceKHR(Ctx& c, Server& server) {
+    const uint64_t id = c.reader.handle();
+    VkSurfaceKHR surface = c.tables.surfaces.take(id);
+    if (!c.reader.ok()) {
+        mark_oneway_error(c);
+        return;
+    }
+    if (surface != VK_NULL_HANDLE) vkDestroySurfaceKHR(server.instance(), surface, nullptr);
+}
+
+void handle_GetPhysicalDeviceWaylandPresentationSupportKHR(Ctx& c, Server& server) {
+    const uint64_t pd_id = c.reader.handle();
+    VkPhysicalDevice physdev = server.physical_device_from_id(pd_id);
+    const uint32_t family = c.reader.u32();
+    if (!c.reader.ok() || physdev == VK_NULL_HANDLE) {
+        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        return;
+    }
+    // The application's own wl_display is meaningless here (see icd.cpp);
+    // the real question - can this device present to *a* Wayland surface at
+    // all - is answered against the proxy's own compositor connection, if
+    // there is one.
+    VkBool32 supported = VK_FALSE;
+    WaylandProxy* wayland = server.wayland();
+    if (wayland) {
+        supported = vkGetPhysicalDeviceWaylandPresentationSupportKHR(physdev, family,
+                                                                      wayland->display());
+    }
+    c.writer.u32(static_cast<uint32_t>(Status::Ok));
+    c.writer.u32(supported ? 1 : 0);
+}
+
+void handle_GetPhysicalDeviceSurfaceSupportKHR(Ctx& c, Server& server) {
+    const uint64_t pd_id = c.reader.handle();
+    VkPhysicalDevice physdev = server.physical_device_from_id(pd_id);
+    const uint32_t family = c.reader.u32();
+    const uint64_t surf_id = c.reader.handle();
+    VkSurfaceKHR surface = c.tables.surface(surf_id);
+    if (!c.reader.ok() || physdev == VK_NULL_HANDLE) {
+        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        return;
+    }
+    VkBool32 supported = VK_FALSE;
+    const VkResult result = vkGetPhysicalDeviceSurfaceSupportKHR(physdev, family, surface, &supported);
+    c.writer.u32(static_cast<uint32_t>(Status::Ok));
+    c.writer.i32(result);
+    c.writer.u32(supported ? 1 : 0);
+}
+
+void handle_GetPhysicalDeviceSurfaceCapabilitiesKHR(Ctx& c, Server& server) {
+    const uint64_t pd_id = c.reader.handle();
+    VkPhysicalDevice physdev = server.physical_device_from_id(pd_id);
+    const uint64_t surf_id = c.reader.handle();
+    VkSurfaceKHR surface = c.tables.surface(surf_id);
+    if (!c.reader.ok() || physdev == VK_NULL_HANDLE) {
+        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        return;
+    }
+    VkSurfaceCapabilitiesKHR caps{};
+    const VkResult result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physdev, surface, &caps);
+    c.writer.u32(static_cast<uint32_t>(Status::Ok));
+    c.writer.i32(result);
+    remoting::write_SurfaceCapabilitiesKHR(c.writer, caps);
+}
+
+void handle_GetPhysicalDeviceSurfaceFormatsKHR(Ctx& c, Server& server) {
+    const uint64_t pd_id = c.reader.handle();
+    VkPhysicalDevice physdev = server.physical_device_from_id(pd_id);
+    const uint64_t surf_id = c.reader.handle();
+    VkSurfaceKHR surface = c.tables.surface(surf_id);
+    if (!c.reader.ok() || physdev == VK_NULL_HANDLE) {
+        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        return;
+    }
+    uint32_t count = 0;
+    VkResult result = vkGetPhysicalDeviceSurfaceFormatsKHR(physdev, surface, &count, nullptr);
+    std::vector<VkSurfaceFormatKHR> formats(count);
+    if (result == VK_SUCCESS && count > 0) {
+        result = vkGetPhysicalDeviceSurfaceFormatsKHR(physdev, surface, &count, formats.data());
+    }
+    c.writer.u32(static_cast<uint32_t>(Status::Ok));
+    c.writer.i32(result);
+    c.writer.u32(count);
+    for (uint32_t i = 0; i < count; ++i) remoting::write_SurfaceFormatKHR(c.writer, formats[i]);
+}
+
+void handle_GetPhysicalDeviceSurfacePresentModesKHR(Ctx& c, Server& server) {
+    const uint64_t pd_id = c.reader.handle();
+    VkPhysicalDevice physdev = server.physical_device_from_id(pd_id);
+    const uint64_t surf_id = c.reader.handle();
+    VkSurfaceKHR surface = c.tables.surface(surf_id);
+    if (!c.reader.ok() || physdev == VK_NULL_HANDLE) {
+        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        return;
+    }
+    uint32_t count = 0;
+    VkResult result = vkGetPhysicalDeviceSurfacePresentModesKHR(physdev, surface, &count, nullptr);
+    std::vector<VkPresentModeKHR> modes(count);
+    if (result == VK_SUCCESS && count > 0) {
+        result = vkGetPhysicalDeviceSurfacePresentModesKHR(physdev, surface, &count, modes.data());
+    }
+    c.writer.u32(static_cast<uint32_t>(Status::Ok));
+    c.writer.i32(result);
+    c.writer.u32(count);
+    for (uint32_t i = 0; i < count; ++i) c.writer.i32(static_cast<int32_t>(modes[i]));
+}
+
+void handle_CreateSwapchainKHR(Ctx& c) {
+    const uint64_t device_id = c.reader.handle();
+    VkDevice device = c.tables.devices.get(device_id);
+    Arena arena;
+    VkSwapchainCreateInfoKHR info{};
+    if (!c.reader.ok() || device == VK_NULL_HANDLE ||
+        !remoting::read_SwapchainCreateInfoKHR(c.reader, arena, c.tables, &info)) {
+        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        return;
+    }
+    VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+    const VkResult result = vkCreateSwapchainKHR(device, &info, nullptr, &swapchain);
+    c.writer.u32(static_cast<uint32_t>(Status::Ok));
+    c.writer.i32(result);
+    c.writer.handle(result == VK_SUCCESS ? c.tables.swapchains.add(swapchain) : 0);
+}
+
+void handle_DestroySwapchainKHR(Ctx& c) {
+    const uint64_t device_id = c.reader.handle();
+    VkDevice device = c.tables.devices.get(device_id);
+    const uint64_t swp_id = c.reader.handle();
+    VkSwapchainKHR swapchain = c.tables.swapchains.take(swp_id);
+    if (!c.reader.ok() || device == VK_NULL_HANDLE) {
+        mark_oneway_error(c);
+        return;
+    }
+    if (swapchain != VK_NULL_HANDLE) vkDestroySwapchainKHR(device, swapchain, nullptr);
+    c.tables.swapchain_image_ids.erase(swp_id);
+}
+
+void handle_GetSwapchainImagesKHR(Ctx& c) {
+    const uint64_t device_id = c.reader.handle();
+    VkDevice device = c.tables.devices.get(device_id);
+    const uint64_t swp_id = c.reader.handle();
+    VkSwapchainKHR swapchain = c.tables.swapchain(swp_id);
+    if (!c.reader.ok() || device == VK_NULL_HANDLE || swapchain == VK_NULL_HANDLE) {
+        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        return;
+    }
+    uint32_t count = 0;
+    VkResult result = vkGetSwapchainImagesKHR(device, swapchain, &count, nullptr);
+    std::vector<VkImage> images(count);
+    if (result == VK_SUCCESS && count > 0) {
+        result = vkGetSwapchainImagesKHR(device, swapchain, &count, images.data());
+    }
+
+    // Idempotent on the real driver, but Table::add is not - see objects.hpp.
+    auto& cached = c.tables.swapchain_image_ids[swp_id];
+    if (cached.empty()) {
+        for (VkImage img : images) cached.push_back(c.tables.images.add(img));
+    }
+
+    c.writer.u32(static_cast<uint32_t>(Status::Ok));
+    c.writer.i32(result);
+    c.writer.u32(count);
+    for (uint32_t i = 0; i < count; ++i) c.writer.handle(i < cached.size() ? cached[i] : 0);
+}
+
+void handle_AcquireNextImageKHR(Ctx& c) {
+    const uint64_t device_id = c.reader.handle();
+    VkDevice device = c.tables.devices.get(device_id);
+    const uint64_t swp_id = c.reader.handle();
+    VkSwapchainKHR swapchain = c.tables.swapchain(swp_id);
+    const uint64_t timeout = c.reader.u64();
+    const uint64_t sem_id = c.reader.handle();
+    VkSemaphore semaphore = c.tables.semaphore(sem_id);
+    const uint64_t fence_id = c.reader.handle();
+    VkFence fence = c.tables.fence(fence_id);
+    if (!c.reader.ok() || device == VK_NULL_HANDLE) {
+        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        return;
+    }
+    uint32_t image_index = 0;
+    const VkResult result =
+        vkAcquireNextImageKHR(device, swapchain, timeout, semaphore, fence, &image_index);
+    c.writer.u32(static_cast<uint32_t>(Status::Ok));
+    c.writer.i32(result);
+    c.writer.u32(image_index);
+}
+
+void handle_QueuePresentKHR(Ctx& c) {
+    const uint64_t queue_id = c.reader.handle();
+    VkQueue queue = c.tables.queues.get(queue_id);
+    const uint32_t wait_count = c.reader.u32();
+    std::vector<VkSemaphore> waits(wait_count);
+    for (uint32_t i = 0; i < wait_count; ++i) waits[i] = c.tables.semaphore(c.reader.handle());
+    const uint32_t swp_count = c.reader.u32();
+    std::vector<VkSwapchainKHR> swapchains(swp_count);
+    std::vector<uint32_t> indices(swp_count);
+    for (uint32_t i = 0; i < swp_count; ++i) {
+        swapchains[i] = c.tables.swapchain(c.reader.handle());
+        indices[i] = c.reader.u32();
+    }
+    if (!c.reader.ok() || queue == VK_NULL_HANDLE) {
+        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        return;
+    }
+
+    std::vector<VkResult> per_swapchain(swp_count, VK_SUCCESS);
+    VkPresentInfoKHR info{};
+    info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    info.waitSemaphoreCount = wait_count;
+    info.pWaitSemaphores = wait_count ? waits.data() : nullptr;
+    info.swapchainCount = swp_count;
+    info.pSwapchains = swp_count ? swapchains.data() : nullptr;
+    info.pImageIndices = swp_count ? indices.data() : nullptr;
+    info.pResults = swp_count ? per_swapchain.data() : nullptr;
+
+    const VkResult result = vkQueuePresentKHR(queue, &info);
+    c.writer.u32(static_cast<uint32_t>(Status::Ok));
+    c.writer.i32(result);
+    c.writer.u32(swp_count);
+    for (uint32_t i = 0; i < swp_count; ++i) c.writer.i32(static_cast<int32_t>(per_swapchain[i]));
+}
+
 }  // namespace
 
 void Server::serve(int fd) {
@@ -1331,8 +1660,79 @@ void Server::serve(int fd) {
                 break;
             }
 
+            case remoting::Opcode::vkGetPhysicalDeviceImageFormatProperties: {
+                const uint64_t id = reader.handle();
+                VkPhysicalDevice device = physical_device_from_id(id);
+                const int32_t format = reader.i32();
+                const int32_t type = reader.i32();
+                const int32_t tiling = reader.i32();
+                const uint32_t usage = reader.u32();
+                const uint32_t flags = reader.u32();
+                if (!reader.ok() || device == VK_NULL_HANDLE) {
+                    reply_status(fd, opcode, remoting::Status::DecodeError);
+                    break;
+                }
+                VkImageFormatProperties props{};
+                const VkResult result = vkGetPhysicalDeviceImageFormatProperties(
+                    device, static_cast<VkFormat>(format), static_cast<VkImageType>(type),
+                    static_cast<VkImageTiling>(tiling), static_cast<VkImageUsageFlags>(usage),
+                    static_cast<VkImageCreateFlags>(flags), &props);
+                writer.u32(static_cast<uint32_t>(remoting::Status::Ok));
+                writer.i32(static_cast<int32_t>(result));
+                writer.bytes(&props, sizeof(props));
+                reply(fd, opcode, writer);
+                break;
+            }
+
             case remoting::Opcode::vkEnumerateDeviceExtensionProperties:
                 handle_EnumerateDeviceExtensionProperties(c, *this);
+                reply(fd, opcode, writer);
+                break;
+
+            case remoting::Opcode::vkCreateWaylandSurfaceKHR:
+                handle_CreateWaylandSurfaceKHR(c, *this);
+                reply(fd, opcode, writer);
+                break;
+            case remoting::Opcode::vkDestroySurfaceKHR:
+                handle_DestroySurfaceKHR(c, *this);
+                break;
+            case remoting::Opcode::vkGetPhysicalDeviceWaylandPresentationSupportKHR:
+                handle_GetPhysicalDeviceWaylandPresentationSupportKHR(c, *this);
+                reply(fd, opcode, writer);
+                break;
+            case remoting::Opcode::vkGetPhysicalDeviceSurfaceSupportKHR:
+                handle_GetPhysicalDeviceSurfaceSupportKHR(c, *this);
+                reply(fd, opcode, writer);
+                break;
+            case remoting::Opcode::vkGetPhysicalDeviceSurfaceCapabilitiesKHR:
+                handle_GetPhysicalDeviceSurfaceCapabilitiesKHR(c, *this);
+                reply(fd, opcode, writer);
+                break;
+            case remoting::Opcode::vkGetPhysicalDeviceSurfaceFormatsKHR:
+                handle_GetPhysicalDeviceSurfaceFormatsKHR(c, *this);
+                reply(fd, opcode, writer);
+                break;
+            case remoting::Opcode::vkGetPhysicalDeviceSurfacePresentModesKHR:
+                handle_GetPhysicalDeviceSurfacePresentModesKHR(c, *this);
+                reply(fd, opcode, writer);
+                break;
+            case remoting::Opcode::vkCreateSwapchainKHR:
+                handle_CreateSwapchainKHR(c);
+                reply(fd, opcode, writer);
+                break;
+            case remoting::Opcode::vkDestroySwapchainKHR:
+                handle_DestroySwapchainKHR(c);
+                break;
+            case remoting::Opcode::vkGetSwapchainImagesKHR:
+                handle_GetSwapchainImagesKHR(c);
+                reply(fd, opcode, writer);
+                break;
+            case remoting::Opcode::vkAcquireNextImageKHR:
+                handle_AcquireNextImageKHR(c);
+                reply(fd, opcode, writer);
+                break;
+            case remoting::Opcode::vkQueuePresentKHR:
+                handle_QueuePresentKHR(c);
                 reply(fd, opcode, writer);
                 break;
 
@@ -1641,6 +2041,8 @@ int main(int argc, char** argv) {
     std::string address = "0.0.0.0";
     uint16_t port = 24680;
     bool validate = false;
+    bool want_wayland = false;
+    uint16_t wayland_port = 24681;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -1650,8 +2052,14 @@ int main(int argc, char** argv) {
             port = static_cast<uint16_t>(atoi(argv[++i]));
         } else if (arg == "--validate") {
             validate = true;
+        } else if (arg == "--wayland") {
+            want_wayland = true;
+        } else if (arg == "--wayland-port" && i + 1 < argc) {
+            wayland_port = static_cast<uint16_t>(atoi(argv[++i]));
         } else if (arg == "--help") {
-            printf("usage: %s [--address ADDR] [--port PORT] [--validate]\n", argv[0]);
+            printf("usage: %s [--address ADDR] [--port PORT] [--validate] [--wayland] "
+                   "[--wayland-port PORT]\n",
+                   argv[0]);
             return 0;
         }
     }
@@ -1661,7 +2069,12 @@ int main(int argc, char** argv) {
     signal(SIGPIPE, SIG_IGN);
 
     Server server;
-    if (!server.init_vulkan(validate)) return 1;
+    if (!server.init_vulkan(validate, want_wayland)) return 1;
+
+    // Without --wayland the server behaves exactly as it always has: no
+    // VK_KHR_surface/VK_KHR_wayland_surface were even requested above, so the
+    // offscreen path is untouched.
+    if (want_wayland && !server.start_wayland(wayland_port)) return 1;
 
     const int listen_fd = listen_on(address, port);
     if (listen_fd < 0) return 1;
@@ -1681,6 +2094,7 @@ int main(int argc, char** argv) {
         ::close(fd);
     }
 
+    server.stop_wayland();
     ::close(listen_fd);
     fprintf(stderr, "server: stopped\n");
     return 0;

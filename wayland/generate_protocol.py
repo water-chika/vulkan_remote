@@ -222,6 +222,9 @@ def main():
     parser.add_argument('--linux-dmabuf-xml',
                          default='/usr/share/wayland-protocols/unstable/linux-dmabuf/'
                                  'linux-dmabuf-unstable-v1.xml')
+    parser.add_argument('--xdg-decoration-xml',
+                         default='/usr/share/wayland-protocols/unstable/xdg-decoration/'
+                                 'xdg-decoration-unstable-v1.xml')
     parser.add_argument('--wire-output', required=True,
                          help='wire-format tables, no libwayland dependency (used by both proxy halves)')
     parser.add_argument('--wl-interfaces-output', required=True,
@@ -229,7 +232,7 @@ def main():
     args = parser.parse_args()
 
     paths = [args.wayland_xml, args.xdg_shell_xml]
-    for optional in (args.viewporter_xml, args.linux_dmabuf_xml):
+    for optional in (args.viewporter_xml, args.linux_dmabuf_xml, args.xdg_decoration_xml):
         if optional and os.path.isfile(optional):
             paths.append(optional)
         elif optional:

@@ -85,7 +85,10 @@ bool WaylandProxy::start(uint16_t tcp_port) {
     wl_proxy* display_proxy = reinterpret_cast<wl_proxy*>(real_display_);
     wl_proxy_add_dispatcher(display_proxy, &WaylandProxy::generic_dispatcher, this,
                              reinterpret_cast<void*>(static_cast<uintptr_t>(1)));
-    objects_[1] = {"wl_display", 1, display_proxy};
+    {
+        std::lock_guard<std::mutex> lock(objects_mutex_);
+        objects_[1] = {"wl_display", 1, display_proxy};
+    }
 
     listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd_ < 0) {
@@ -144,6 +147,7 @@ void WaylandProxy::drop_link(const char* why) {
 }
 
 wl_surface* WaylandProxy::surface_for_client_id(uint32_t client_object_id) const {
+    std::lock_guard<std::mutex> lock(objects_mutex_);
     auto it = objects_.find(client_object_id);
     if (it == objects_.end() || it->second.interface != "wl_surface") return nullptr;
     return reinterpret_cast<wl_surface*>(it->second.proxy);
@@ -154,6 +158,10 @@ wl_surface* WaylandProxy::surface_for_client_id(uint32_t client_object_id) const
 int WaylandProxy::generic_dispatcher(const void* implementation, void* target, uint32_t opcode,
                                       const wl_message* /*msg*/, wl_argument* args) {
     WaylandProxy* self = const_cast<WaylandProxy*>(static_cast<const WaylandProxy*>(implementation));
+    // Held for the whole call: this only ever runs on the pump thread, but
+    // surface_for_client_id can read objects_ concurrently from whichever
+    // thread owns the embedding server's Vulkan calls.
+    std::lock_guard<std::mutex> lock(self->objects_mutex_);
     wl_proxy* proxy = static_cast<wl_proxy*>(target);
     const char* iface_name = wl_proxy_get_class(proxy);
 
@@ -284,10 +292,24 @@ bool WaylandProxy::handle_request_frame(const std::vector<uint8_t>& wire_bytes,
     const uint16_t size = static_cast<uint16_t>(header2 >> 16);
     if (size != wire_bytes.size()) return false;
 
+    // Held for the whole call, same reasoning as generic_dispatcher above.
+    std::lock_guard<std::mutex> lock(objects_mutex_);
+
     auto obj_it = objects_.find(object_id);
     if (obj_it == objects_.end()) {
         fprintf(stderr, "wayland_proxy_server: request on unknown object %u\n", object_id);
         return false;
+    }
+    if (obj_it->second.proxy == nullptr) {
+        // An inert stub (see the NewId case below): nothing to marshal a
+        // request through, so just make it look like the object quietly
+        // works, apart from a destructor actually removing it. Refusing
+        // outright would drop the whole link over one optional interface a
+        // client only probed speculatively.
+        const wire::InterfaceSpec* stub_iface = wire::find_interface(obj_it->second.interface);
+        const wire::MessageSpec* stub_spec = wire::find_message(stub_iface, /*is_event=*/false, opcode);
+        if (stub_spec && stub_spec->is_destructor) objects_.erase(obj_it);
+        return true;
     }
     const wire::InterfaceSpec* iface = wire::find_interface(obj_it->second.interface);
     const wire::MessageSpec* spec = wire::find_message(iface, /*is_event=*/false, opcode);
@@ -356,9 +378,22 @@ bool WaylandProxy::handle_request_frame(const std::vector<uint8_t>& wire_bytes,
                 const bool dynamic_bind = arg.new_id_version != 0;
                 new_obj_interface = lookup_wl_interface(arg.str);
                 if (!new_obj_interface) {
-                    fprintf(stderr, "wayland_proxy_server: unknown target interface '%s' for %s.%s\n",
-                            arg.str.c_str(), obj_it->second.interface.c_str(), spec->name);
-                    return false;
+                    // A protocol extension outside this proxy's generated
+                    // tables (e.g. an optional global a client only probes
+                    // speculatively, like xdg-decoration). There is no
+                    // wl_interface to marshal a request through, so the
+                    // object becomes an inert stub rather than the whole
+                    // link dying over one unsupported global - see the
+                    // stub check at the top of this function.
+                    fprintf(stderr,
+                            "wayland_proxy_server: unsupported target interface '%s' for %s.%s; "
+                            "object %u becomes an inert stub\n",
+                            arg.str.c_str(), obj_it->second.interface.c_str(), spec->name, app_new_id);
+                    objects_[app_new_id] = {arg.str,
+                                            dynamic_bind ? arg.new_id_version
+                                                         : wl_proxy_get_version(obj_it->second.proxy),
+                                            nullptr};
+                    return true;
                 }
                 new_obj_version = dynamic_bind ? arg.new_id_version : wl_proxy_get_version(obj_it->second.proxy);
                 if (dynamic_bind) {
@@ -399,6 +434,8 @@ bool WaylandProxy::handle_request_frame(const std::vector<uint8_t>& wire_bytes,
         wl_proxy_add_dispatcher(result, &WaylandProxy::generic_dispatcher, this,
                                  reinterpret_cast<void*>(static_cast<uintptr_t>(app_new_id)));
         objects_[app_new_id] = {new_obj_interface->name, new_obj_version, result};
+        fprintf(stderr, "wayland_proxy_server: registered app id %u as %s\n", app_new_id,
+                new_obj_interface->name);
     }
     if (spec->is_destructor) {
         objects_.erase(object_id);

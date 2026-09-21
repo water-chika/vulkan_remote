@@ -1018,6 +1018,129 @@ VKAPI_ATTR void VKAPI_CALL CmdPushConstants(VkCommandBuffer handle, VkPipelineLa
     cb->device->instance->connection.send_oneway(Opcode::vkCmdPushConstants, request);
 }
 
+// ---------------------------------------------------------------------------
+// WSI: swapchain
+// ---------------------------------------------------------------------------
+
+VKAPI_ATTR VkResult VKAPI_CALL CreateSwapchainKHR(VkDevice handle,
+                                                  const VkSwapchainCreateInfoKHR* pCreateInfo,
+                                                  const VkAllocationCallbacks*,
+                                                  VkSwapchainKHR* pSwapchain) {
+    RemoteDevice* device = to_device(handle);
+    Writer request;
+    request.handle(device->remote_id);
+    write_SwapchainCreateInfoKHR(request, *pCreateInfo);
+    std::vector<char> reply;
+    if (!device->instance->connection.round_trip(Opcode::vkCreateSwapchainKHR, request, &reply)) {
+        return VK_ERROR_DEVICE_LOST;
+    }
+    Reader r = payload_reader(reply);
+    const VkResult result = static_cast<VkResult>(r.i32());
+    const uint64_t id = r.handle();
+    if (!r.ok()) return VK_ERROR_DEVICE_LOST;
+    if (result == VK_SUCCESS) *pSwapchain = handle_from_id<VkSwapchainKHR>(id);
+    return result;
+}
+
+VKAPI_ATTR void VKAPI_CALL DestroySwapchainKHR(VkDevice handle, VkSwapchainKHR swapchain,
+                                               const VkAllocationCallbacks*) {
+    if (swapchain == VK_NULL_HANDLE) return;
+    RemoteDevice* device = to_device(handle);
+    Writer request;
+    request.handle(device->remote_id);
+    request.handle(id_from_handle(swapchain));
+    device->instance->connection.send_oneway(Opcode::vkDestroySwapchainKHR, request);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL GetSwapchainImagesKHR(VkDevice handle, VkSwapchainKHR swapchain,
+                                                     uint32_t* pCount, VkImage* pImages) {
+    RemoteDevice* device = to_device(handle);
+    Writer request;
+    request.handle(device->remote_id);
+    request.handle(id_from_handle(swapchain));
+    std::vector<char> reply;
+    if (!device->instance->connection.round_trip(Opcode::vkGetSwapchainImagesKHR, request,
+                                                 &reply)) {
+        return VK_ERROR_DEVICE_LOST;
+    }
+    Reader r = payload_reader(reply);
+    const VkResult result = static_cast<VkResult>(r.i32());
+    const uint32_t count = r.u32();
+    std::vector<uint64_t> ids(count);
+    for (uint32_t i = 0; i < count; ++i) ids[i] = r.handle();
+    if (!r.ok()) return VK_ERROR_DEVICE_LOST;
+
+    // These ids name real driver images the client never created and must
+    // never destroy (the spec says so); they behave like any other image id
+    // to the rest of this file, which is why they need no bookkeeping beyond
+    // being handed back as VkImage handles.
+    if (pImages == nullptr) {
+        *pCount = count;
+        return result;
+    }
+    const uint32_t to_write = *pCount < count ? *pCount : count;
+    for (uint32_t i = 0; i < to_write; ++i) pImages[i] = handle_from_id<VkImage>(ids[i]);
+    *pCount = to_write;
+    return to_write < count ? VK_INCOMPLETE : result;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL AcquireNextImageKHR(VkDevice handle, VkSwapchainKHR swapchain,
+                                                   uint64_t timeout, VkSemaphore semaphore,
+                                                   VkFence fence, uint32_t* pImageIndex) {
+    RemoteDevice* device = to_device(handle);
+    Writer request;
+    request.handle(device->remote_id);
+    request.handle(id_from_handle(swapchain));
+    request.u64(timeout);
+    request.handle(id_from_handle(semaphore));
+    request.handle(id_from_handle(fence));
+    std::vector<char> reply;
+    if (!device->instance->connection.round_trip(Opcode::vkAcquireNextImageKHR, request, &reply)) {
+        return VK_ERROR_DEVICE_LOST;
+    }
+    Reader r = payload_reader(reply);
+    const VkResult result = static_cast<VkResult>(r.i32());
+    *pImageIndex = r.u32();
+    return r.ok() ? result : VK_ERROR_DEVICE_LOST;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL QueuePresentKHR(VkQueue handle,
+                                               const VkPresentInfoKHR* pPresentInfo) {
+    RemoteQueue* queue = to_queue(handle);
+    RemoteDevice* device = queue->device;
+
+    // Same reason as vkQueueSubmit: the server must see whatever the
+    // application wrote through its mappings before this present can show
+    // it, and a present is exactly the kind of call an application waits on
+    // the timing of - it must not be turned into a fire-and-forget one.
+    device->flush_mapped();
+
+    Writer request;
+    request.handle(queue->remote_id);
+    request.u32(pPresentInfo->waitSemaphoreCount);
+    for (uint32_t i = 0; i < pPresentInfo->waitSemaphoreCount; ++i) {
+        request.handle(id_from_handle(pPresentInfo->pWaitSemaphores[i]));
+    }
+    request.u32(pPresentInfo->swapchainCount);
+    for (uint32_t i = 0; i < pPresentInfo->swapchainCount; ++i) {
+        request.handle(id_from_handle(pPresentInfo->pSwapchains[i]));
+        request.u32(pPresentInfo->pImageIndices[i]);
+    }
+
+    std::vector<char> reply;
+    if (!device->instance->connection.round_trip(Opcode::vkQueuePresentKHR, request, &reply)) {
+        return VK_ERROR_DEVICE_LOST;
+    }
+    Reader r = payload_reader(reply);
+    const VkResult result = static_cast<VkResult>(r.i32());
+    const uint32_t count = r.u32();
+    for (uint32_t i = 0; i < count; ++i) {
+        const VkResult per_swapchain = static_cast<VkResult>(r.i32());
+        if (pPresentInfo->pResults) pPresentInfo->pResults[i] = per_swapchain;
+    }
+    return r.ok() ? result : VK_ERROR_DEVICE_LOST;
+}
+
 }  // namespace
 }  // namespace remoting
 
@@ -1103,6 +1226,11 @@ const DeviceEntry* get_device_entries(size_t* count) {
         D(CmdCopyImageToBuffer),
         D(CmdClearColorImage),
         D(CmdPushConstants),
+        D(CreateSwapchainKHR),
+        D(DestroySwapchainKHR),
+        D(GetSwapchainImagesKHR),
+        D(AcquireNextImageKHR),
+        D(QueuePresentKHR),
 #undef D
     };
     *count = sizeof(kEntries) / sizeof(kEntries[0]);

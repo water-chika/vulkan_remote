@@ -150,6 +150,21 @@ target_link_libraries(vulkan_remoting_wayland_proxy_server PUBLIC
 )
 target_compile_features(vulkan_remoting_wayland_proxy_server PUBLIC cxx_std_17)
 
+# The server embeds WaylandProxy directly (see server/server.cpp's --wayland
+# flag) and pumps it on its own thread, so it needs both the proxy library
+# and threading support that the earlier vulkan_remoting_server target
+# definition (above) did not yet have available.
+find_package(Threads REQUIRED)
+target_link_libraries(vulkan_remoting_server PRIVATE
+    vulkan_remoting_wayland_proxy_server
+    Threads::Threads
+)
+
+# The client-side ICD only needs wl_proxy_get_id to name the app's surface
+# (see client/icd.cpp); it never opens its own Wayland connection.
+target_link_libraries(vulkan_remoting_icd PRIVATE ${WAYLAND_CLIENT_LIBRARIES})
+target_include_directories(vulkan_remoting_icd PRIVATE ${WAYLAND_CLIENT_INCLUDE_DIRS})
+
 add_executable(vulkan_remoting_wayland_test_harness wayland/test_harness.cpp)
 target_link_libraries(vulkan_remoting_wayland_test_harness PRIVATE
     vulkan_remoting_wayland_proxy_server

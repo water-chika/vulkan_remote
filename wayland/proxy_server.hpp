@@ -10,6 +10,7 @@
 // VK_KHR_wayland_surface call.
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -48,6 +49,16 @@ class WaylandProxy {
 
     // Only meaningful once the app has actually created that surface; nullptr
     // before then or if client_object_id never named a wl_surface.
+    //
+    // Safe to call from another thread while poll() runs on its own: the
+    // embedding server calls this while handling vkCreateWaylandSurfaceKHR on
+    // its own thread, concurrently with whatever poll() is doing on the
+    // pump thread. objects_mutex_ is the only state that actually needs that
+    // protection - libwayland's own prepare_read/read_events handshake is
+    // already safe for one thread to dispatch the default queue while
+    // another thread (here, the real driver's WSI code) dispatches a
+    // private queue of its own, so no further locking is added around the
+    // wl_display itself.
     wl_surface* surface_for_client_id(uint32_t client_object_id) const;
 
    private:
@@ -76,6 +87,11 @@ class WaylandProxy {
     int listen_fd_ = -1;
     int link_fd_ = -1;
 
+    // Guards objects_ (and next_server_side_id_, only ever touched alongside
+    // it): the pump thread mutates it from generic_dispatcher/
+    // handle_request_frame, while surface_for_client_id reads it from
+    // whichever thread owns the embedding process's Vulkan calls.
+    mutable std::mutex objects_mutex_;
     std::unordered_map<uint32_t, ObjectEntry> objects_;  // client_object_id -> local proxy
     uint32_t next_server_side_id_ = 0xff000000;           // for new_id args inside events
 

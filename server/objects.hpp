@@ -15,6 +15,7 @@
 // refusal rather than somebody else's object.
 
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 #include <vulkan/vulkan.h>
@@ -76,6 +77,13 @@ struct ObjectTables final : public HandleResolver {
     Table<VkFence> fences;
     Table<VkSurfaceKHR> surfaces;
     Table<VkSwapchainKHR> swapchains;
+
+    // GetSwapchainImagesKHR is idempotent on the real driver (same VkImages
+    // every call), but Table::add is not - calling it twice for the same
+    // swapchain would hand the client two different ids for one underlying
+    // image. Cached per swapchain id so a second query reuses the first
+    // call's ids instead of growing the table pointlessly.
+    std::unordered_map<uint64_t, std::vector<uint64_t>> swapchain_image_ids;
 
     VkBuffer buffer(uint64_t id) const override { return buffers.get(id); }
     VkImage image(uint64_t id) const override { return images.get(id); }
