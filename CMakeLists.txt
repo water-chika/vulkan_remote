@@ -42,6 +42,8 @@ add_custom_command(
 add_library(vulkan_remoting_wire STATIC
     common/wire.cpp
     common/wire.hpp
+    common/marshal.cpp
+    common/marshal.hpp
     ${CMAKE_CURRENT_BINARY_DIR}/remoting_commands.inl
 )
 target_include_directories(vulkan_remoting_wire PUBLIC
@@ -56,7 +58,7 @@ target_link_libraries(vulkan_remoting_server PRIVATE vulkan_remoting_wire Vulkan
 
 # The client links Vulkan::Headers, never the loader: it is the driver the
 # loader talks to, so linking the loader would be circular.
-add_library(vulkan_remoting_icd SHARED client/icd.cpp)
+add_library(vulkan_remoting_icd SHARED client/icd.cpp client/icd_device.cpp client/remote_objects.cpp)
 target_link_libraries(vulkan_remoting_icd PRIVATE vulkan_remoting_wire Vulkan::Headers)
 
 # The probe links no Vulkan at all, which keeps it honest about what actually
@@ -78,3 +80,111 @@ file(GENERATE
 }
 "
 )
+
+add_executable(vulkan_remoting_offscreen tools/offscreen.cpp)
+target_link_libraries(vulkan_remoting_offscreen PRIVATE Vulkan::Vulkan)
+
+# wayland/: a waypipe-style protocol proxy, split so the replay half lives
+# inside whichever process on machine B also owns the Vulkan driver (see
+# wayland/proxy_server.hpp for why that placement is load-bearing, not
+# incidental). Kept independent of the Vulkan remoting pieces above other
+# than sharing the project's C++17 baseline.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(WAYLAND_CLIENT REQUIRED wayland-client)
+
+if(NOT DEFINED wayland_xml)
+    find_file(wayland_xml NAMES wayland.xml PATHS /usr/share/wayland)
+endif()
+if(NOT DEFINED wayland_xdg_shell_xml)
+    find_file(wayland_xdg_shell_xml NAMES xdg-shell.xml
+        PATHS /usr/share/wayland-protocols/stable/xdg-shell)
+endif()
+if(NOT wayland_xml OR NOT wayland_xdg_shell_xml)
+    message(FATAL_ERROR "wayland.xml / xdg-shell.xml not found; pass -Dwayland_xml= and "
+                         "-Dwayland_xdg_shell_xml=")
+endif()
+
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/protocol_tables.inl
+           ${CMAKE_CURRENT_BINARY_DIR}/wl_protocol_interfaces.inl
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/wayland/generate_protocol.py
+            --wayland-xml ${wayland_xml}
+            --xdg-shell-xml ${wayland_xdg_shell_xml}
+            --wire-output ${CMAKE_CURRENT_BINARY_DIR}/protocol_tables.inl
+            --wl-interfaces-output ${CMAKE_CURRENT_BINARY_DIR}/wl_protocol_interfaces.inl
+    DEPENDS ${wayland_xml} ${wayland_xdg_shell_xml} ${CMAKE_CURRENT_SOURCE_DIR}/wayland/generate_protocol.py
+    COMMENT "Generating Wayland protocol tables"
+)
+add_custom_target(wayland_protocol_tables DEPENDS
+    ${CMAKE_CURRENT_BINARY_DIR}/protocol_tables.inl
+    ${CMAKE_CURRENT_BINARY_DIR}/wl_protocol_interfaces.inl
+)
+
+# No libwayland dependency on purpose: proxy_client (machine A) only ever
+# decodes/re-encodes bytes, so it should not need to link the library that
+# only makes sense where a real compositor connection exists.
+add_library(vulkan_remoting_wayland_wire STATIC wayland/wire.cpp wayland/wire.hpp)
+add_dependencies(vulkan_remoting_wayland_wire wayland_protocol_tables)
+target_include_directories(vulkan_remoting_wayland_wire PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/wayland
+    ${CMAKE_CURRENT_BINARY_DIR}
+)
+target_compile_features(vulkan_remoting_wayland_wire PUBLIC cxx_std_17)
+
+add_executable(vulkan_remoting_wayland_proxy wayland/proxy_client.cpp)
+target_link_libraries(vulkan_remoting_wayland_proxy PRIVATE vulkan_remoting_wayland_wire)
+
+add_library(vulkan_remoting_wayland_proxy_server STATIC
+    wayland/proxy_server.hpp
+    wayland/proxy_server.cpp
+)
+add_dependencies(vulkan_remoting_wayland_proxy_server wayland_protocol_tables)
+target_include_directories(vulkan_remoting_wayland_proxy_server PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/wayland
+    ${CMAKE_CURRENT_BINARY_DIR}
+    ${WAYLAND_CLIENT_INCLUDE_DIRS}
+)
+target_link_libraries(vulkan_remoting_wayland_proxy_server PUBLIC
+    vulkan_remoting_wayland_wire
+    ${WAYLAND_CLIENT_LIBRARIES}
+)
+target_compile_features(vulkan_remoting_wayland_proxy_server PUBLIC cxx_std_17)
+
+add_executable(vulkan_remoting_wayland_test_harness wayland/test_harness.cpp)
+target_link_libraries(vulkan_remoting_wayland_test_harness PRIVATE
+    vulkan_remoting_wayland_proxy_server
+    ${WAYLAND_CLIENT_LIBRARIES}
+)
+
+# xdg-shell client bindings for the throwaway verification client only — the
+# proxy itself never depends on scanner output (see generate_protocol.py).
+enable_language(C)  # wayland-scanner's generated code relies on C's default
+                     # external linkage for const globals; C++ would make
+                     # them internal-linkage and break cross-file symbols.
+find_program(wayland_scanner_exe NAMES wayland-scanner)
+if(NOT wayland_scanner_exe)
+    message(FATAL_ERROR "wayland-scanner not found, needed for wayland/test_client.cpp")
+endif()
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-client-protocol.h
+    COMMAND ${wayland_scanner_exe} client-header ${wayland_xdg_shell_xml}
+            ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-client-protocol.h
+    DEPENDS ${wayland_xdg_shell_xml}
+)
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-protocol.c
+    COMMAND ${wayland_scanner_exe} private-code ${wayland_xdg_shell_xml}
+            ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-protocol.c
+    DEPENDS ${wayland_xdg_shell_xml}
+)
+
+add_executable(vulkan_remoting_wayland_test_client
+    wayland/test_client.cpp
+    ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-protocol.c
+    ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-client-protocol.h
+)
+target_include_directories(vulkan_remoting_wayland_test_client PRIVATE
+    ${WAYLAND_CLIENT_INCLUDE_DIRS}
+    ${CMAKE_CURRENT_BINARY_DIR}
+)
+target_link_libraries(vulkan_remoting_wayland_test_client PRIVATE ${WAYLAND_CLIENT_LIBRARIES})
