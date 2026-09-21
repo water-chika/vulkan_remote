@@ -1,122 +1,110 @@
 # vulkan_remoting
 
-Run Vulkan calls on a machine that owns a GPU, from a machine that does not.
+Run Vulkan on a machine that has no GPU, by forwarding the API to one that has.
 
-The client is a real Vulkan ICD, so the stock Khronos loader drives it. An
-unmodified `vulkaninfo` on a machine with no GPU lists the GPU of another
-machine across the network, because every query it makes is forwarded over a
-TCP socket and answered by the real driver at the far end.
+The client is a real Vulkan ICD, so the stock Khronos loader drives it and
+unmodified programs do not know a socket is involved. `vkcube` renders on
+another machine's GPU through it, and its window appears on that machine's
+compositor.
 
 ```
-  client machine                              server machine
-  (no GPU needed)                             (has the GPU)
+  client machine                                  server machine
+  (no GPU needed)                                 (has the GPU)
 
-  vulkaninfo                                  server
-      |                                          |
-  Vulkan loader                               real ICD (RADV)
-      |                                          |
-  client/icd.cpp  <---- TCP, opcode+payload ---> server/server.cpp
+  vkcube ──► Vulkan loader ──► client/icd  ──TCP──►  server ──► real ICD (RADV)
+     └────► Wayland ──► wayland/proxy_client ──TCP──►  WaylandProxy ──► compositor
 ```
 
 ## Layout
 
 | path | what it is |
 |---|---|
-| `common/wire.{hpp,cpp}` | framing, bounds-checked reader/writer, connect helper |
-| `common/generate_remoting.py` | derives opcodes from `vk.xml`, emits a command-set digest |
-| `client/icd.cpp` | the Vulkan ICD the loader loads |
-| `server/server.cpp` | runs where the GPU is; calls the real driver |
-| `tools/probe.cpp` | links no Vulkan at all; times the round trips |
-| `tests/test_wire.py` | failure-path tests, stdlib only |
+| `common/wire.*` | framing, bounds-checked reader/writer |
+| `common/marshal.*` | struct serialisation; arrays and handles, `pNext` not carried |
+| `common/generate_remoting.py` | opcodes derived from `vk.xml`, plus a command-set digest |
+| `client/` | the ICD: `icd.cpp` entry points, then one file per area |
+| `server/` | `main.cpp`, `session.*` dispatch, `handlers_*.cpp` |
+| `wayland/` | the protocol proxy and its own wire format |
+| `tools/offscreen.cpp` | ordinary Vulkan program used as the regression test |
+| `tools/probe.cpp` | links no Vulkan; times round trips |
 
-Opcodes are not hand-numbered. `generate_remoting.py` sorts the command names
-out of `vk.xml` and hashes the resulting list into `kCommandSetDigest`, which
-both ends exchange at connect. Two builds from different headers therefore
-fail at the handshake rather than silently invoking the wrong command.
+Handlers register themselves by opcode at static initialisation, so adding a
+command touches one file. They are compiled into the executable rather than a
+static library, because a linker may drop an object nobody references and a
+dropped registrar is indistinguishable from an unsupported command at runtime.
 
-## Build
-
-```sh
-cmake -B build && cmake --build build
-```
-
-Start the server on the machine with the GPU, then point the loader at the ICD:
+## Build and run
 
 ```sh
-./build/vulkan_remoting_server --port 24680                 # GPU machine
-VK_DRIVER_FILES=$PWD/build/vulkan_remoting_icd.json vulkaninfo   # other machine
+cmake -B build && cmake --build build -j8
+
+./build/vulkan_remoting_server --validate --wayland          # GPU machine
+VK_DRIVER_FILES=$PWD/build/vulkan_remoting_icd.json \
+VK_REMOTING_HOST=<gpu-machine> vkcube                        # other machine
 ```
 
 ## What works
 
-`vulkaninfo` completes instance creation, `vkEnumeratePhysicalDevices`, and the
-physical-device property, queue-family, memory and feature queries, with no
-unsupported-command hits in the server log. It stops at `vkCreateDevice`, which
-is refused deliberately and with an explanatory message.
+- `tools/offscreen` renders a triangle and reads it back: output is
+  **byte-identical** whether run on the system driver or through this one.
+- `vkcube` runs, with its window on the remote compositor.
+- `dEQP-VK.api.info.*`: 8167 cases, 2038 passed, 0 failed, 0 crashes.
+  `dEQP-VK.api.smoke.*`: 6/6.
+- Server-side validation is clean against the real driver.
 
-Cross-machine: a probe on `arch2.dorm`, which owns no Vulkan stack at all,
-listed `water.n2n`'s RX 9070 XT and its Vega 3.
+## How the hard parts are solved
 
-`tests/test_wire.py` covers the failure paths a local function call does not
-have: short frames, truncated payloads, oversized length fields, a wrong
-digest, an unknown opcode, and a peer that hangs up mid-message.
+**Mapped memory.** `vkMapMemory` must return a pointer the caller can
+dereference, which a socket cannot deliver. The client hands back a shadow
+allocation and moves the bytes at the points where Vulkan says they become
+visible: uploaded before a submit, downloaded at map and invalidate. Two
+opcodes outside the Vulkan command set exist for that, and they are in the
+handshake digest because both peers must agree on them. Coherent memory is
+therefore not coherent in the strict sense — writes land at submit.
+
+**Recording.** Every `vkCmd*` is sent without waiting for a reply, so a
+40-call command buffer costs one round trip instead of forty. The server
+counts errors from those calls and reports the total at the next call that
+does wait.
+
+**Presentation.** A remote GPU can only present to a window it owns, and
+Wayland object ids are meaningless outside the connection that made them — so
+no separate process can name the application's surface. `wayland/` replays the
+application's protocol onto a connection owned by the server process itself,
+which can then create a surface from it. Unlike waypipe it forwards **no
+buffers**, because rendering already happens on that side.
+`vkCreateWaylandSurfaceKHR` sends only `wl_proxy_get_id(surface)`, and the
+server resolves it against the replayed object.
 
 ## What it measures, and what that means
 
-| link | mean | worst | synchronous calls affordable per 16.7 ms frame |
-|---|---|---|---|
-| loopback | 15.8 us | 30.4 us | ~1059 |
-| arch2.dorm -> water.n2n | 7,187.2 us | 17,752.7 us | **2** |
-| apple.water -> water.n2n | 39,204.6 us | 61,812.2 us | **0** |
+| link | round trip | synchronous calls per 16.7 ms frame |
+|---|---|---|
+| loopback | 15.8 us mean | ~1059 |
+| arch2.dorm → water.n2n | 7,187 us mean | **2** |
+| apple.water → water.n2n | 39,205 us mean | **0** |
 
-`arch2 -> water.n2n` costs almost exactly the 7.5 ms ICMP round trip, so the
-time is network latency and nothing else.
+`vkcube` over the real link runs at **under about 7 fps**.
 
-Two synchronous calls per frame is the whole result. A frame of a real game is
-thousands of Vulkan calls. The cost is **per call, not per byte**, so neither
-compressing the payload nor a faster link changes the number meaningfully —
-only removing round trips does, and the round trips are the API.
+Two synchronous calls per frame is the result the project was built to get. A
+frame of a real game is thousands of Vulkan calls, and the cost is **per call,
+not per byte** — so neither compressing the payload nor a faster link changes
+the number. Only removing round trips does, and the round trips are the API.
 
-This is why API remoting is not how remote rendering is done in practice. The
-working answer is to ship finished frames instead: Sunshine/Moonlight, or
-`waypipe` for a Wayland application.
+This is why remote rendering is done by shipping finished frames instead:
+Sunshine/Moonlight, or `waypipe` for a Wayland application. The driver here is
+a way to measure that conclusion rather than assume it.
 
-## The WSI problem, and the cheapest way out
+## Known limitations
 
-`vkcube` never reaches `vkCreateDevice`. It fails earlier, at
-`VK_KHR_surface`, because this ICD advertises no instance extensions. Window
-system integration for a remote GPU has three known shapes:
-
-1. **Host-side WSI with shared memory** — what Mesa's Venus (virtio-gpu) and
-   gfxstream do. Swapchain images are resources the host compositor imports
-   directly. It requires both ends to share physical memory, so it cannot
-   cross a network. This is the wall the earlier gfxstream experiment hit.
-
-2. **Client-side WSI with readback** — the ICD implements the surface and
-   swapchain locally against Wayland shm or X, the server renders offscreen,
-   and `vkQueuePresentKHR` copies the image to a buffer and sends the pixels
-   back. 1920x1080x4 B is 8.3 MB a frame, 60 of those is about 4 Gbit/s
-   uncompressed, so it needs a hardware encoder — at which point it is
-   Sunshine, reimplemented inside a driver, with the per-call latency above
-   still charged on top.
-
-3. **Server-side WSI — the remote window.** Put the window on the machine that
-   owns the GPU. `vkCreateSwapchainKHR` opens a real window there and creates
-   a genuine swapchain on the real device; `vkQueuePresentKHR` becomes a
-   single opcode with no payload, and no pixel ever crosses the socket. The
-   price is that you have to be looking at the GPU machine's monitor.
-
-Option 3 is the cheapest by a wide margin — roughly three opcodes — and is the
-documented next step if this is continued.
-
-It does not, however, remove the work that comes before it: `vkCreateDevice`,
-queues, command pools and buffers, `vkAllocateMemory`, pipelines, and
-`vkMapMemory`. Mapped memory is the genuinely hard one, because a mapped
-pointer must be dereferenceable on the client: it needs a shadow allocation
-plus an explicit flush at unmap and at submit. Vulkan's explicit memory model
-is what makes that tractable at all.
-
-## Status
-
-A study, finished at the point where it had answered its question. The
-measurements above are the answer.
+- `pNext` chains are dropped by the marshaller.
+- Shadow mappings are per-range; two mappings of overlapping memory are not
+  reconciled.
+- Roughly a third of cross-machine `vkcube` runs drop with
+  `event on unknown object N` during registry binding in the proxy. Not
+  isolated.
+- Peer-supplied counts size allocations in some handlers before validation.
+  One such site crashed the server under CTS and was fixed; the pattern
+  deserves a sweep.
+- No dmabuf, data devices or subsurfaces in the proxy. No `VK_KHR_display`,
+  no X11 surfaces.
