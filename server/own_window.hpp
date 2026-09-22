@@ -14,6 +14,7 @@
 // the same reasoning does not apply there, but the "one per surface
 // request" lifetime still does (see session.hpp's create_own_window).
 
+#include <atomic>
 #include <cstdint>
 
 #if defined(_WIN32)
@@ -99,5 +100,40 @@ class OwnWindow {
     xdg_toplevel* toplevel_ = nullptr;
     bool configured_ = false;
 #endif
+
+   public:
+    // Resize tracking, and the reason it needs a pump at all.
+    //
+    // The compositor announces a new size through xdg_toplevel.configure,
+    // which arrives on *this* connection - the server's - because the
+    // server owns the window. The client is blind to it by construction, so
+    // unless the size is recorded here and turned back into something the
+    // Vulkan API can carry (see handlers_wsi.cpp: a VK_SUBOPTIMAL_KHR out of
+    // vkAcquireNextImageKHR, plus a real currentExtent out of
+    // vkGetPhysicalDeviceSurfaceCapabilitiesKHR), a resize can never reach
+    // the application and the surface keeps its original size forever.
+    //
+    // pump() exists because nothing else dispatches this connection. The
+    // Vulkan driver's WSI reads the socket, but dispatches its own event
+    // queue, not the default one these listeners are on, so without an
+    // explicit dispatch the configure sits in the queue unread. It must
+    // never block: it runs on a session thread that still owes a client a
+    // reply.
+    void pump();
+
+    // Test-and-clear, so one resize produces one VK_SUBOPTIMAL_KHR rather
+    // than a permanent "suboptimal" state that would make the client
+    // recreate its swapchain every single frame.
+    bool take_resized() { return resized_.exchange(false); }
+
+    uint32_t width() const { return width_.load(); }
+    uint32_t height() const { return height_.load(); }
+
+   private:
+    // Written from whichever thread dispatches events, read from session
+    // threads.
+    std::atomic<uint32_t> width_{0};
+    std::atomic<uint32_t> height_{0};
+    std::atomic<bool> resized_{false};
 };
 

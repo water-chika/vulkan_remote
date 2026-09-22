@@ -44,8 +44,29 @@ void OwnWindow::surface_configure(void* data, xdg_surface* xdg_surface_obj, uint
     self->configured_ = true;
 }
 
-void OwnWindow::toplevel_configure(void*, xdg_toplevel*, int32_t, int32_t, wl_array*) {}
+void OwnWindow::toplevel_configure(void* data, xdg_toplevel*, int32_t width, int32_t height,
+                                   wl_array*) {
+    // A zero width or height means "you choose" rather than a real size, and
+    // the compositor sends exactly that for the initial configure, so it must
+    // not be mistaken for a resize.
+    if (width <= 0 || height <= 0) return;
+    OwnWindow* self = static_cast<OwnWindow*>(data);
+    const uint32_t w = static_cast<uint32_t>(width);
+    const uint32_t h = static_cast<uint32_t>(height);
+    if (self->width_.exchange(w) != w || self->height_.exchange(h) != h) {
+        self->resized_.store(true);
+    }
+}
 void OwnWindow::toplevel_close(void*, xdg_toplevel*) {}
+
+void OwnWindow::pump() {
+    if (!display_) return;
+    // dispatch_pending only handles what has already been read off the
+    // socket, so it cannot block; the driver's own WSI reading is what puts
+    // events there. The flush pushes out the acks those handlers queued.
+    wl_display_dispatch_pending(display_);
+    wl_display_flush(display_);
+}
 
 OwnWindow::~OwnWindow() {
     if (toplevel_) xdg_toplevel_destroy(toplevel_);

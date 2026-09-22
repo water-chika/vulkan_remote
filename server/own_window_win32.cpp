@@ -101,3 +101,9 @@ bool OwnWindow::create() {
     if (!ok && pump_thread_.joinable()) pump_thread_.join();
     return ok;
 }
+
+// The Win32 window records its size from WM_SIZE inside the pump thread's
+// own message loop, so there is nothing for a session thread to dispatch
+// here - unlike the Wayland path, where the configure would otherwise sit
+// unread (see own_window.hpp). Kept so both platforms present the same API.
+void OwnWindow::pump() {}

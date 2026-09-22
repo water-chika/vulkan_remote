@@ -136,6 +136,7 @@ void handle_CreateWin32SurfaceKHR(Session& c) {
     info.surface = window->surface();
     const VkResult result = vkCreateWaylandSurfaceKHR(c.server.instance(), &info, nullptr, &vk_surface);
 #endif
+    if (result == VK_SUCCESS) c.server.associate_surface(vk_surface, window);
     c.writer.u32(static_cast<uint32_t>(Status::Ok));
     c.writer.i32(result);
     c.writer.handle(result == VK_SUCCESS ? c.tables.surfaces.add(vk_surface) : 0);
@@ -206,6 +207,23 @@ void handle_GetPhysicalDeviceSurfaceCapabilitiesKHR(Session& c) {
     }
     VkSurfaceCapabilitiesKHR caps{};
     const VkResult result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physdev, surface, &caps);
+
+    // For a server-owned window, answer with the size the compositor gave
+    // it. The driver reports currentExtent as 0xFFFFFFFF on Wayland - "the
+    // client chooses" - which is true for a local application that knows how
+    // big its own window is, and useless for a remote one that has no window
+    // at all. Left alone, the client would keep picking its original size
+    // and a resize could never take effect. Only the extent is overridden:
+    // min/maxImageExtent and the rest still come from the driver.
+    if (OwnWindow* window = c.server.window_for_surface(surface)) {
+        const uint32_t w = window->width();
+        const uint32_t h = window->height();
+        if (w != 0 && h != 0) {
+            caps.currentExtent.width = w;
+            caps.currentExtent.height = h;
+        }
+    }
+
     c.writer.u32(static_cast<uint32_t>(Status::Ok));
     c.writer.i32(result);
     remoting::write_SurfaceCapabilitiesKHR(c.writer, caps);
@@ -331,8 +349,22 @@ void handle_AcquireNextImageKHR(Session& c) {
         return;
     }
     uint32_t image_index = 0;
-    const VkResult result =
+    VkResult result =
         vkAcquireNextImageKHR(device, swapchain, timeout, semaphore, fence, &image_index);
+
+    // This is the only moment a resize of a server-owned window can be told
+    // to the client. The window belongs to the server, so the compositor's
+    // configure never reaches the application, and the driver has no reason
+    // to report the swapchain out of date - as far as it is concerned
+    // nothing changed. Reporting VK_SUBOPTIMAL_KHR is what makes a client
+    // recreate its swapchain, at which point it asks for surface
+    // capabilities again and gets the new extent. Only a success is
+    // downgraded: a real error, or an out-of-date the driver raised itself,
+    // already says at least as much and must not be weakened to advice.
+    if (result == VK_SUCCESS && c.server.poll_windows_resized()) {
+        result = VK_SUBOPTIMAL_KHR;
+    }
+
     c.writer.u32(static_cast<uint32_t>(Status::Ok));
     c.writer.i32(result);
     c.writer.u32(image_index);

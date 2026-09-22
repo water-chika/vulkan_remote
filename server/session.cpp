@@ -235,6 +235,32 @@ OwnWindow* Server::create_own_window() {
     return m_own_windows.back().get();
 }
 
+void Server::associate_surface(VkSurfaceKHR surface, OwnWindow* window) {
+    if (surface == VK_NULL_HANDLE || window == nullptr) return;
+    std::lock_guard<std::mutex> lock(m_own_windows_mutex);
+    m_surface_windows[surface] = window;
+}
+
+OwnWindow* Server::window_for_surface(VkSurfaceKHR surface) {
+    if (surface == VK_NULL_HANDLE) return nullptr;
+    std::lock_guard<std::mutex> lock(m_own_windows_mutex);
+    auto it = m_surface_windows.find(surface);
+    return it == m_surface_windows.end() ? nullptr : it->second;
+}
+
+bool Server::poll_windows_resized() {
+    std::lock_guard<std::mutex> lock(m_own_windows_mutex);
+    bool resized = false;
+    for (const auto& window : m_own_windows) {
+        window->pump();
+        // Not `resized = window->take_resized()` and not a short-circuiting
+        // ||: every window has to be cleared, or an unread flag on one of
+        // them would report a resize again on the next call forever.
+        if (window->take_resized()) resized = true;
+    }
+    return resized;
+}
+
 VkPhysicalDevice Server::physical_device_from_id(uint64_t id) const {
     if (id == 0 || id > m_physical_devices.size()) return VK_NULL_HANDLE;
     return m_physical_devices[id - 1];

@@ -33,6 +33,8 @@
 #include <vulkan/vulkan.h>
 
 #include "objects.hpp"
+#include <unordered_map>
+
 #include "own_window.hpp"
 #include "remoting_commands.inl"
 #include "wire.hpp"
@@ -80,6 +82,23 @@ class Server {
     // --wayland, so it never touches m_wayland.
     OwnWindow* create_own_window();
 
+    // Remembers which server-owned window backs a given VkSurfaceKHR, so a
+    // later vkGetPhysicalDeviceSurfaceCapabilitiesKHR on that surface can
+    // answer with the size the compositor actually gave the window rather
+    // than the driver's "you choose" sentinel.
+    void associate_surface(VkSurfaceKHR surface, OwnWindow* window);
+    OwnWindow* window_for_surface(VkSurfaceKHR surface);
+
+    // Dispatches every server-owned window's pending events and reports
+    // whether any of them has been resized since the last call, clearing
+    // that state. Deliberately not per-swapchain: vkAcquireNextImageKHR is
+    // given a swapchain, and nothing here maps one back to its surface, so
+    // with more than one window open this errs towards telling a client its
+    // swapchain is suboptimal when it is another window that moved. That is
+    // harmless - VK_SUBOPTIMAL_KHR is advisory and costs a recreate - while
+    // the opposite error, staying silent, is the bug this exists to fix.
+    bool poll_windows_resized();
+
     // Handles cross the wire as indices, never as pointers. A VkPhysicalDevice
     // is a host pointer; sending its bits would be meaningless remotely and
     // would leak an address, so the client only ever sees 1-based indices.
@@ -104,6 +123,7 @@ class Server {
     // two connections can request one concurrently.
     std::mutex m_own_windows_mutex;
     std::vector<std::unique_ptr<OwnWindow>> m_own_windows;
+    std::unordered_map<VkSurfaceKHR, OwnWindow*> m_surface_windows;
 };
 
 namespace remoting {
