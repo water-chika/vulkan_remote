@@ -37,6 +37,23 @@ using remoting::Status;
 using remoting::mark_oneway_error;
 
 #if !defined(_WIN32)
+#if !defined(_WIN32)
+// A Linux client always asks for a Wayland surface, so it always takes the
+// proxy path and can never exercise the server-owned window that backs
+// vkCreateWin32SurfaceKHR - which is where a Windows tester found a stall
+// that nothing here could reproduce. Setting VK_REMOTING_FORCE_OWN_WINDOW=1
+// on the server makes a Wayland surface go through the own-window path
+// instead, so the same server code can be driven from this machine with
+// stock vkcube. Diagnostics only; the proxy remains the default.
+bool force_own_window() {
+    static const bool forced = [] {
+        const char* value = getenv("VK_REMOTING_FORCE_OWN_WINDOW");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return forced;
+}
+#endif
+
 void handle_CreateWaylandSurfaceKHR(Session& c) {
     const uint32_t app_object_id = c.reader.u32();
     if (!c.reader.ok()) {
@@ -45,6 +62,31 @@ void handle_CreateWaylandSurfaceKHR(Session& c) {
         c.writer.handle(0);
         return;
     }
+
+#if !defined(_WIN32)
+    if (force_own_window()) {
+        OwnWindow* window = c.server.create_own_window();
+        VkSurfaceKHR own_surface = VK_NULL_HANDLE;
+        VkResult own_result = VK_ERROR_INITIALIZATION_FAILED;
+        if (window) {
+            VkWaylandSurfaceCreateInfoKHR info{};
+            info.sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR;
+            info.display = window->display();
+            info.surface = window->surface();
+            own_result = vkCreateWaylandSurfaceKHR(c.server.instance(), &info, nullptr,
+                                                   &own_surface);
+            if (own_result == VK_SUCCESS) c.server.associate_surface(own_surface, window);
+        } else {
+            fprintf(stderr, "server: VK_REMOTING_FORCE_OWN_WINDOW: could not create a "
+                            "server-owned window\n");
+        }
+        c.writer.u32(static_cast<uint32_t>(Status::Ok));
+        c.writer.i32(own_result);
+        c.writer.handle(own_result == VK_SUCCESS ? c.tables.surfaces.add(own_surface) : 0);
+        c.reply();
+        return;
+    }
+#endif
 
     WaylandProxy* wayland = c.server.wayland();
     if (!wayland) {
