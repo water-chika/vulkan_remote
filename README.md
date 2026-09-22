@@ -48,8 +48,12 @@ VK_REMOTING_HOST=<gpu-machine> vkcube                        # other machine
 - `tools/offscreen` renders a triangle and reads it back: output is
   **byte-identical** whether run on the system driver or through this one.
 - `vkcube` runs, with its window on the remote compositor.
-- `dEQP-VK.api.info.*`: 8167 cases, 2038 passed, 0 failed, 0 crashes.
-  `dEQP-VK.api.smoke.*`: 6/6.
+- CTS results drift as the suite grows and commands get implemented, so the
+  pass/fail count is not pinned here. `tests/cts_baseline.txt` is the known-
+  passing set (`dEQP-VK.api.smoke.*` and `dEQP-VK.api.info.*` so far); run
+  `python3 tests/run_cts.py --caselist '<pattern>'` and it reports only the
+  delta against that baseline - regressions fail the run, new passes and the
+  (expected, still large) set of unimplemented commands do not.
 - Server-side validation is clean against the real driver.
 
 ## How the hard parts are solved
