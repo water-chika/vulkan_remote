@@ -108,6 +108,18 @@ struct Session {
 
 inline void mark_oneway_error(Session& s) { ++s.oneway_errors; }
 
+// True when a peer-supplied element count could actually be backed by the
+// bytes still unread. Handlers must consult this *before* sizing a container
+// from the count: the per-element loops below check reader.ok(), but that
+// check runs after the allocation has already been attempted, so it cannot
+// stop a count of 0xFFFFFFFF from throwing length_error or getting the
+// process OOM-killed. min_wire_bytes is the smallest number of bytes one
+// element can possibly consume on the wire, so this stays conservative - it
+// rejects only counts that are impossible, never merely large ones.
+inline bool count_fits(const Reader& reader, uint32_t count, size_t min_wire_bytes) {
+    return count <= reader.remaining() / (min_wire_bytes == 0 ? 1 : min_wire_bytes);
+}
+
 using Handler = void (*)(Session&);
 
 // Inserts into a function-local static map, so registration never depends on

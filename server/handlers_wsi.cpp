@@ -266,9 +266,17 @@ void handle_QueuePresentKHR(Session& c) {
     const uint64_t queue_id = c.reader.handle();
     VkQueue queue = c.tables.queues.get(queue_id);
     const uint32_t wait_count = c.reader.u32();
+    if (!count_fits(c.reader, wait_count, 8)) {
+        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        return;
+    }
     std::vector<VkSemaphore> waits(wait_count);
     for (uint32_t i = 0; i < wait_count; ++i) waits[i] = c.tables.semaphore(c.reader.handle());
     const uint32_t swp_count = c.reader.u32();
+    if (!count_fits(c.reader, swp_count, 12)) {
+        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        return;
+    }
     std::vector<VkSwapchainKHR> swapchains(swp_count);
     std::vector<uint32_t> indices(swp_count);
     for (uint32_t i = 0; i < swp_count; ++i) {

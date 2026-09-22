@@ -84,6 +84,10 @@ void handle_FreeCommandBuffers(Session& c) {
     VkDevice device = c.tables.devices.get(device_id);
     VkCommandPool pool = c.tables.command_pool(c.reader.handle());
     const uint32_t count = c.reader.u32();
+    if (!count_fits(c.reader, count, 8)) {
+        mark_oneway_error(c);
+        return;
+    }
     std::vector<VkCommandBuffer> cbs(count);
     for (uint32_t i = 0; i < count; ++i) cbs[i] = c.tables.command_buffers.take(c.reader.handle());
     if (!c.reader.ok() || device == VK_NULL_HANDLE) {
@@ -167,9 +171,17 @@ void handle_CmdBindDescriptorSets(Session& c) {
     VkPipelineLayout layout = c.tables.pipeline_layout(c.reader.handle());
     const uint32_t first_set = c.reader.u32();
     const uint32_t count = c.reader.u32();
+    if (!count_fits(c.reader, count, 8)) {
+        mark_oneway_error(c);
+        return;
+    }
     std::vector<VkDescriptorSet> sets(count);
     for (uint32_t i = 0; i < count; ++i) sets[i] = c.tables.descriptor_set(c.reader.handle());
     const uint32_t dyn_count = c.reader.u32();
+    if (!count_fits(c.reader, dyn_count, 4)) {
+        mark_oneway_error(c);
+        return;
+    }
     std::vector<uint32_t> offsets(dyn_count);
     for (uint32_t i = 0; i < dyn_count; ++i) offsets[i] = c.reader.u32();
     if (!c.reader.ok() || cb == VK_NULL_HANDLE) {
@@ -184,6 +196,10 @@ void handle_CmdBindVertexBuffers(Session& c) {
     VkCommandBuffer cb = c.tables.command_buffer(c.reader.handle());
     const uint32_t first = c.reader.u32();
     const uint32_t count = c.reader.u32();
+    if (!count_fits(c.reader, count, 16)) {
+        mark_oneway_error(c);
+        return;
+    }
     std::vector<VkBuffer> buffers(count);
     std::vector<VkDeviceSize> offsets(count);
     for (uint32_t i = 0; i < count; ++i) {
@@ -213,6 +229,10 @@ void handle_CmdSetViewport(Session& c) {
     VkCommandBuffer cb = c.tables.command_buffer(c.reader.handle());
     const uint32_t first = c.reader.u32();
     const uint32_t count = c.reader.u32();
+    if (!count_fits(c.reader, count, 4)) {
+        mark_oneway_error(c);
+        return;
+    }
     Arena arena;
     std::vector<VkViewport> viewports(count);
     bool ok = c.reader.ok();
@@ -230,6 +250,10 @@ void handle_CmdSetScissor(Session& c) {
     VkCommandBuffer cb = c.tables.command_buffer(c.reader.handle());
     const uint32_t first = c.reader.u32();
     const uint32_t count = c.reader.u32();
+    if (!count_fits(c.reader, count, 4)) {
+        mark_oneway_error(c);
+        return;
+    }
     Arena arena;
     std::vector<VkRect2D> scissors(count);
     bool ok = c.reader.ok();
@@ -278,18 +302,26 @@ void handle_CmdPipelineBarrier(Session& c) {
 
     Arena arena;
     const uint32_t mem_count = c.reader.u32();
+    // read_MemoryBarrier is read_raw() directly, whose bytes() call consumes
+    // at least a 4-byte length prefix.
+    if (!count_fits(c.reader, mem_count, 4)) {
+        mark_oneway_error(c);
+        return;
+    }
     std::vector<VkMemoryBarrier> mem_barriers(mem_count);
     bool ok = c.reader.ok();
     for (uint32_t i = 0; ok && i < mem_count; ++i) {
         ok = remoting::read_MemoryBarrier(c.reader, arena, c.tables, &mem_barriers[i]);
     }
     const uint32_t buf_count = ok ? c.reader.u32() : 0;
-    std::vector<VkBufferMemoryBarrier> buf_barriers(buf_count);
+    if (ok && !count_fits(c.reader, buf_count, 4)) ok = false;
+    std::vector<VkBufferMemoryBarrier> buf_barriers(ok ? buf_count : 0);
     for (uint32_t i = 0; ok && i < buf_count; ++i) {
         ok = remoting::read_BufferMemoryBarrier(c.reader, arena, c.tables, &buf_barriers[i]);
     }
     const uint32_t img_count = ok ? c.reader.u32() : 0;
-    std::vector<VkImageMemoryBarrier> img_barriers(img_count);
+    if (ok && !count_fits(c.reader, img_count, 4)) ok = false;
+    std::vector<VkImageMemoryBarrier> img_barriers(ok ? img_count : 0);
     for (uint32_t i = 0; ok && i < img_count; ++i) {
         ok = remoting::read_ImageMemoryBarrier(c.reader, arena, c.tables, &img_barriers[i]);
     }
@@ -307,6 +339,10 @@ void handle_CmdCopyBuffer(Session& c) {
     VkBuffer src = c.tables.buffer(c.reader.handle());
     VkBuffer dst = c.tables.buffer(c.reader.handle());
     const uint32_t count = c.reader.u32();
+    if (!count_fits(c.reader, count, 4)) {
+        mark_oneway_error(c);
+        return;
+    }
     Arena arena;
     std::vector<VkBufferCopy> regions(count);
     bool ok = c.reader.ok();
@@ -326,6 +362,10 @@ void handle_CmdCopyBufferToImage(Session& c) {
     VkImage dst = c.tables.image(c.reader.handle());
     const int32_t layout = c.reader.i32();
     const uint32_t count = c.reader.u32();
+    if (!count_fits(c.reader, count, 4)) {
+        mark_oneway_error(c);
+        return;
+    }
     Arena arena;
     std::vector<VkBufferImageCopy> regions(count);
     bool ok = c.reader.ok();
@@ -346,6 +386,10 @@ void handle_CmdCopyImageToBuffer(Session& c) {
     const int32_t layout = c.reader.i32();
     VkBuffer dst = c.tables.buffer(c.reader.handle());
     const uint32_t count = c.reader.u32();
+    if (!count_fits(c.reader, count, 4)) {
+        mark_oneway_error(c);
+        return;
+    }
     Arena arena;
     std::vector<VkBufferImageCopy> regions(count);
     bool ok = c.reader.ok();
@@ -367,13 +411,21 @@ void handle_CmdClearColorImage(Session& c) {
     std::vector<char> color_bytes;
     c.reader.bytes(&color_bytes);
     const uint32_t count = c.reader.u32();
+    if (!count_fits(c.reader, count, 4)) {
+        mark_oneway_error(c);
+        return;
+    }
     std::vector<VkImageSubresourceRange> ranges(count);
-    for (uint32_t i = 0; i < count; ++i) {
+    bool ok = true;
+    for (uint32_t i = 0; ok && i < count; ++i) {
         std::vector<char> raw;
-        if (!c.reader.bytes(&raw) || raw.size() != sizeof(VkImageSubresourceRange)) continue;
+        if (!c.reader.bytes(&raw) || raw.size() != sizeof(VkImageSubresourceRange)) {
+            ok = false;
+            break;
+        }
         memcpy(&ranges[i], raw.data(), sizeof(VkImageSubresourceRange));
     }
-    if (!c.reader.ok() || cb == VK_NULL_HANDLE || color_bytes.size() != sizeof(VkClearColorValue)) {
+    if (!ok || !c.reader.ok() || cb == VK_NULL_HANDLE || color_bytes.size() != sizeof(VkClearColorValue)) {
         mark_oneway_error(c);
         return;
     }

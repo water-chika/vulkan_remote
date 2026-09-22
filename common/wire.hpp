@@ -68,6 +68,14 @@ class Reader {
 
     bool ok() const { return !m_failed; }
 
+    // Bytes not yet consumed. A handler about to size a container from a
+    // peer-supplied count needs this: no count is honest if the elements it
+    // promises cannot fit in what is left of the message. Checking costs
+    // nothing and must happen *before* the allocation, because a vector sized
+    // from 0xFFFFFFFF throws or gets the process OOM-killed long before any
+    // per-element bounds check in the read loop can run.
+    size_t remaining() const { return m_failed ? 0 : m_size - m_pos; }
+
     uint32_t u32() { return read<uint32_t>(); }
     uint64_t u64() { return read<uint64_t>(); }
     int32_t i32() { return read<int32_t>(); }

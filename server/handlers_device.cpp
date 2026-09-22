@@ -72,6 +72,11 @@ void handle_QueueSubmit(Session& c) {
     const uint64_t fence_id = c.reader.handle();
     VkFence fence = c.tables.fence(fence_id);
     const uint32_t submit_count = c.reader.u32();
+    // Each submit reads at least wait_count+cb_count+signal_count = 12 bytes.
+    if (!count_fits(c.reader, submit_count, 12)) {
+        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        return;
+    }
 
     std::vector<VkSubmitInfo> submits(submit_count);
     // Kept alive until vkQueueSubmit returns; one entry per submit so each
@@ -87,8 +92,11 @@ void handle_QueueSubmit(Session& c) {
         s.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 
         const uint32_t wait_count = c.reader.u32();
-        wait_semaphores[i].resize(wait_count);
-        wait_stages[i].resize(wait_count);
+        if (ok && !count_fits(c.reader, wait_count, 12)) ok = false;
+        if (ok) {
+            wait_semaphores[i].resize(wait_count);
+            wait_stages[i].resize(wait_count);
+        }
         for (uint32_t j = 0; j < wait_count && ok; ++j) {
             wait_semaphores[i][j] = c.tables.semaphore(c.reader.handle());
             wait_stages[i][j] = c.reader.u32();
@@ -98,7 +106,8 @@ void handle_QueueSubmit(Session& c) {
         s.pWaitDstStageMask = wait_count ? wait_stages[i].data() : nullptr;
 
         const uint32_t cb_count = c.reader.u32();
-        command_buffers[i].resize(cb_count);
+        if (ok && !count_fits(c.reader, cb_count, 8)) ok = false;
+        if (ok) command_buffers[i].resize(cb_count);
         for (uint32_t j = 0; j < cb_count && ok; ++j) {
             command_buffers[i][j] = c.tables.command_buffer(c.reader.handle());
         }
@@ -106,14 +115,15 @@ void handle_QueueSubmit(Session& c) {
         s.pCommandBuffers = cb_count ? command_buffers[i].data() : nullptr;
 
         const uint32_t signal_count = c.reader.u32();
-        signal_semaphores[i].resize(signal_count);
+        if (ok && !count_fits(c.reader, signal_count, 8)) ok = false;
+        if (ok) signal_semaphores[i].resize(signal_count);
         for (uint32_t j = 0; j < signal_count && ok; ++j) {
             signal_semaphores[i][j] = c.tables.semaphore(c.reader.handle());
         }
         s.signalSemaphoreCount = signal_count;
         s.pSignalSemaphores = signal_count ? signal_semaphores[i].data() : nullptr;
 
-        ok = c.reader.ok();
+        ok = ok && c.reader.ok();
     }
 
     if (!ok) {
@@ -191,6 +201,10 @@ void handle_ResetFences(Session& c) {
     const uint64_t device_id = c.reader.handle();
     VkDevice device = c.tables.devices.get(device_id);
     const uint32_t count = c.reader.u32();
+    if (!count_fits(c.reader, count, 8)) {
+        mark_oneway_error(c);
+        return;
+    }
     std::vector<VkFence> fences(count);
     for (uint32_t i = 0; i < count; ++i) fences[i] = c.tables.fence(c.reader.handle());
     if (!c.reader.ok() || device == VK_NULL_HANDLE) {
@@ -220,6 +234,10 @@ void handle_WaitForFences(Session& c) {
     VkDevice device = c.tables.devices.get(device_id);
     const bool wait_all = c.reader.u32() != 0;
     const uint32_t count = c.reader.u32();
+    if (!count_fits(c.reader, count, 8)) {
+        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        return;
+    }
     std::vector<VkFence> fences(count);
     for (uint32_t i = 0; i < count; ++i) fences[i] = c.tables.fence(c.reader.handle());
     const uint64_t timeout = c.reader.u64();
@@ -392,6 +410,13 @@ void handle_CreateGraphicsPipelines(Session& c) {
     VkDevice device = c.tables.devices.get(device_id);
     VkPipelineCache cache = c.tables.pipeline_cache(c.reader.handle());
     const uint32_t count = c.reader.u32();
+    // Each pipeline's read_GraphicsPipelineCreateInfo starts with a
+    // read_raw() call, whose bytes() consumes at least a 4-byte length
+    // prefix even on immediate failure.
+    if (!count_fits(c.reader, count, 4)) {
+        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        return;
+    }
 
     Arena arena;
     std::vector<VkGraphicsPipelineCreateInfo> infos(count);
@@ -444,6 +469,12 @@ void handle_UpdateDescriptorSets(Session& c) {
     const uint64_t device_id = c.reader.handle();
     VkDevice device = c.tables.devices.get(device_id);
     const uint32_t write_count = c.reader.u32();
+    // read_WriteDescriptorSet starts with read_raw(), whose bytes() call
+    // consumes at least a 4-byte length prefix.
+    if (!count_fits(c.reader, write_count, 4)) {
+        mark_oneway_error(c);
+        return;
+    }
     Arena arena;
     std::vector<VkWriteDescriptorSet> writes(write_count);
     bool ok = c.reader.ok() && device != VK_NULL_HANDLE;
@@ -451,7 +482,8 @@ void handle_UpdateDescriptorSets(Session& c) {
         ok = remoting::read_WriteDescriptorSet(c.reader, arena, c.tables, &writes[i]);
     }
     const uint32_t copy_count = ok ? c.reader.u32() : 0;
-    std::vector<VkCopyDescriptorSet> copies(copy_count);
+    if (ok && !count_fits(c.reader, copy_count, 4)) ok = false;
+    std::vector<VkCopyDescriptorSet> copies(ok ? copy_count : 0);
     for (uint32_t i = 0; ok && i < copy_count; ++i) {
         ok = remoting::read_CopyDescriptorSet(c.reader, arena, c.tables, &copies[i]);
     }
