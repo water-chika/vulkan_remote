@@ -53,11 +53,26 @@ void OwnWindow::toplevel_configure(void* data, xdg_toplevel*, int32_t width, int
     OwnWindow* self = static_cast<OwnWindow*>(data);
     const uint32_t w = static_cast<uint32_t>(width);
     const uint32_t h = static_cast<uint32_t>(height);
-    if (self->width_.exchange(w) != w || self->height_.exchange(h) != h) {
+    // Both exchanges must happen, so neither may sit on the right of a
+    // short-circuiting ||: dragging a corner changes width and height at
+    // once, and evaluating only the width would leave height_ holding the
+    // old value - reporting a half-updated extent that looks to the client
+    // like the window never resized at all.
+    const bool width_changed = self->width_.exchange(w) != w;
+    const bool height_changed = self->height_.exchange(h) != h;
+    if (width_changed || height_changed) {
         self->resized_.store(true);
     }
 }
-void OwnWindow::toplevel_close(void*, xdg_toplevel*) {}
+
+void OwnWindow::toplevel_close(void* data, xdg_toplevel*) {
+    // The compositor is relaying "the user closed this window". There is no
+    // way to push that to the client, which only ever asks us things, so it
+    // is recorded here and reported at the next vkAcquireNextImageKHR as
+    // VK_ERROR_SURFACE_LOST_KHR - the Vulkan-native way to say the surface
+    // is gone, and fatal enough that a client exits rather than spinning.
+    static_cast<OwnWindow*>(data)->closed_.store(true);
+}
 
 void OwnWindow::pump() {
     if (!display_) return;

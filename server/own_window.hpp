@@ -126,6 +126,11 @@ class OwnWindow {
     // recreate its swapchain every single frame.
     bool take_resized() { return resized_.exchange(false); }
 
+    // Not a take_/exchange like the resize flag: a closed window stays
+    // closed, and every swapchain that asks afterwards needs the same
+    // answer rather than only the first one to look.
+    bool closed() const { return closed_.load(); }
+
     uint32_t width() const { return width_.load(); }
     uint32_t height() const { return height_.load(); }
 
@@ -135,5 +140,6 @@ class OwnWindow {
     std::atomic<uint32_t> width_{0};
     std::atomic<uint32_t> height_{0};
     std::atomic<bool> resized_{false};
+    std::atomic<bool> closed_{false};
 };
 

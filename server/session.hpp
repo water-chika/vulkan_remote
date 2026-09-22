@@ -98,6 +98,7 @@ class Server {
     // harmless - VK_SUBOPTIMAL_KHR is advisory and costs a recreate - while
     // the opposite error, staying silent, is the bug this exists to fix.
     bool poll_windows_resized();
+    bool poll_windows_closed();
 
     // Handles cross the wire as indices, never as pointers. A VkPhysicalDevice
     // is a host pointer; sending its bits would be meaningless remotely and

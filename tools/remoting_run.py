@@ -82,6 +82,37 @@ def write_manifest(library: str, destination: str) -> str:
     return destination
 
 
+def register_icd(manifest: str) -> bool:
+    """Add the manifest to the loader's registry list.
+
+    The env-var route is the normal one, but the loader discards
+    VK_ICD_FILENAMES/VK_DRIVER_FILES for elevated processes - and a plain ssh
+    session on Windows lands elevated in session 0, which is how most remote
+    runs arrive. The registry is read regardless of elevation, so it is the
+    only route that works there. The value's type is REG_DWORD with data 0:
+    a REG_SZ is ignored in silence, which looks exactly like the driver not
+    existing.
+    """
+    import winreg
+    with winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE,
+                            r"SOFTWARE\Khronos\Vulkan\Drivers", 0,
+                            winreg.KEY_SET_VALUE) as key:
+        winreg.SetValueEx(key, manifest, 0, winreg.REG_DWORD, 0)
+    return True
+
+
+def unregister_icd(manifest: str) -> None:
+    """Take the manifest back out, so other Vulkan apps stop loading us."""
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SOFTWARE\Khronos\Vulkan\Drivers", 0,
+                            winreg.KEY_SET_VALUE) as key:
+            winreg.DeleteValue(key, manifest)
+    except OSError:
+        pass
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -112,12 +143,9 @@ def main() -> int:
         sys.stderr.write("run: nothing to run - put the program after `--`\n")
         return 2
 
-    if running_elevated():
-        sys.stderr.write(
-            "run: this process is elevated, and the Vulkan loader ignores "
-            "VK_ICD_FILENAMES/VK_DRIVER_FILES for elevated processes, so the remoting "
-            "driver would be silently skipped. Run from an ordinary (non-elevated) "
-            "terminal on the desktop session instead.\n")
+    elevated = running_elevated()
+    if elevated and os.name != "nt":
+        sys.stderr.write("run: refusing to run as root\n")
         return 1
 
     library = find_library(args.library)
@@ -140,18 +168,32 @@ def main() -> int:
             return rc
         opened_tunnel = True
 
+    registered = False
+    if elevated:
+        try:
+            registered = register_icd(manifest)
+            print("run: elevated, so registering the ICD in HKLM instead of "
+                  "relying on VK_ICD_FILENAMES (the loader ignores those here)")
+        except OSError as error:
+            sys.stderr.write(f"run: could not register the ICD: {error}\n")
+            return 1
+
     env = dict(os.environ)
     # Both, deliberately: see the module docstring.
     env["VK_ICD_FILENAMES"] = manifest
     env["VK_DRIVER_FILES"] = manifest
-    # The tunnel's local end, not the GPU machine's name: that is the whole
-    # point of the forward, and it is what keeps the server's own port bound
-    # to its loopback only.
-    env["VK_REMOTING_HOST"] = "127.0.0.1"
+    # With a tunnel the client talks to the forward's local end, which is what
+    # keeps the server's own port bound to its loopback only. Without one
+    # there is no local end to talk to, so it has to be the GPU machine
+    # itself - the name minus any ssh user@ prefix.
+    if opened_tunnel:
+        env["VK_REMOTING_HOST"] = "127.0.0.1"
+    else:
+        env["VK_REMOTING_HOST"] = args.destination.rpartition("@")[2]
     env["VK_REMOTING_PORT"] = str(args.port)
 
-    print(f"run: {os.path.basename(library)} -> {args.destination} "
-          f"via 127.0.0.1:{args.port}")
+    print(f"run: {os.path.basename(library)} -> {env['VK_REMOTING_HOST']}:"
+          f"{env['VK_REMOTING_PORT']}")
     try:
         return subprocess.run(command, env=env).returncode
     except FileNotFoundError:
@@ -161,9 +203,12 @@ def main() -> int:
         return 130
     finally:
         # Only tear down what this invocation brought up. A tunnel that was
-        # already there belongs to someone else's run.
+        # already there belongs to someone else's run, and an ICD left
+        # registered would be loaded by every other Vulkan app on the box.
         if opened_tunnel:
             remoting_tunnel.close_tunnel(args.destination, args.port)
+        if registered:
+            unregister_icd(manifest)
 
 
 if __name__ == "__main__":

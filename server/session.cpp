@@ -248,6 +248,15 @@ OwnWindow* Server::window_for_surface(VkSurfaceKHR surface) {
     return it == m_surface_windows.end() ? nullptr : it->second;
 }
 
+bool Server::poll_windows_closed() {
+    std::lock_guard<std::mutex> lock(m_own_windows_mutex);
+    for (const auto& window : m_own_windows) {
+        window->pump();
+        if (window->closed()) return true;
+    }
+    return false;
+}
+
 bool Server::poll_windows_resized() {
     std::lock_guard<std::mutex> lock(m_own_windows_mutex);
     bool resized = false;

@@ -364,6 +364,13 @@ void handle_AcquireNextImageKHR(Session& c) {
     if (result == VK_SUCCESS && c.server.poll_windows_resized()) {
         result = VK_SUBOPTIMAL_KHR;
     }
+    // Checked after the resize, and allowed to override it: a window the
+    // user has closed is not merely the wrong size, and SUBOPTIMAL would
+    // only send the client round the swapchain-recreation loop again
+    // against a surface that is never coming back.
+    if (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) {
+        if (c.server.poll_windows_closed()) result = VK_ERROR_SURFACE_LOST_KHR;
+    }
 
     c.writer.u32(static_cast<uint32_t>(Status::Ok));
     c.writer.i32(result);
