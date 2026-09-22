@@ -107,7 +107,16 @@ remoting::socket_t listen_on(const std::string& address, uint16_t port) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string address = "0.0.0.0";
+    // Loopback by default, deliberately. This protocol has no authentication
+    // - the handshake only compares a command-set digest, which proves the
+    // peer was built from the same generated table and nothing about who it
+    // is - and every accepted connection gets a detached thread that can
+    // reach the GPU. Binding 0.0.0.0 therefore offered that to the whole LAN.
+    // The intended remote setup is an SSH tunnel (see the README): ssh
+    // authenticates, encrypts and integrity-checks, and this port never
+    // appears on the network at all. --address is still there for a
+    // deliberate LAN-only run, which is now a choice rather than the default.
+    std::string address = "127.0.0.1";
     uint16_t port = 24680;
     bool validate = false;
     bool want_wayland = false;

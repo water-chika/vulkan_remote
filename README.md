@@ -133,6 +133,64 @@ x86-64 do, but a 32-bit or ARM peer would misread every struct with no
 handshake failure to warn it. Not yet exercised from Windows: presenting a
 window, and so any frame rate figure.
 
+## Keeping the port off the network
+
+The server binds `127.0.0.1` by default. This protocol has no authentication
+- the handshake compares a command-set digest, which proves the peer was
+built from the same generated table and nothing about who it is - and every
+connection it accepts gets a detached thread with a path to the GPU. On
+`0.0.0.0` that was offered to the whole LAN.
+
+Remote access goes through an SSH tunnel instead, so authentication,
+encryption, integrity and host verification all come from ssh and this
+project carries no crypto of its own:
+
+```sh
+./build/vulkan_remoting_server --validate --wayland        # GPU machine, loopback only
+python3 tools/remoting_tunnel.py open user@gpu-machine     # client machine
+VK_DRIVER_FILES=$PWD/build/vulkan_remoting_icd.json \
+VK_REMOTING_HOST=127.0.0.1 vkcube
+python3 tools/remoting_tunnel.py close user@gpu-machine
+```
+
+Both ends of the forward are pinned to loopback, key-based auth is required
+(`BatchMode=yes`, so a host wanting a password fails instead of hanging),
+host key checking stays on, and the connection is multiplexed with
+`ControlPersist` so a second run does not pay another handshake. A LAN-only
+run is still possible with `--address`, but it is now a deliberate choice
+rather than the default.
+
+Cost, measured on loopback with `tools/offscreen` (a full instance/device
+setup, render and readback, so many round trips): **19-22 ms direct against
+25-27 ms tunnelled**, about +5.7 ms. Loopback is where this looks worst,
+because direct TCP there has almost no latency for ssh to hide behind; over a
+real link with milliseconds of round-trip time that fixed cost is dwarfed by
+the protocol's own ~2 synchronous round trips per frame. The ceiling stays
+protocol-bound, not encryption-bound.
+
+### On Windows
+
+Windows 10 and later ship the OpenSSH client, so nothing needs installing.
+What the machine does need:
+
+- a key pair (`ssh-keygen -t ed25519`) with the public half in the GPU
+  machine's `~/.ssh/authorized_keys`, since `BatchMode=yes` means a password
+  prompt is a failure rather than a question;
+- one interactive `ssh user@gpu-machine` first, to record the host key in
+  `%USERPROFILE%\.ssh\known_hosts` - host key checking is not disabled here;
+- the tunnel left running in its own window, because **Windows OpenSSH does
+  not implement `ControlMaster`/`ControlPath`**. `tools/remoting_tunnel.py`
+  detects this and omits those options, so `open` works, but there is no
+  multiplexed connection to reuse or to close with `close`; stop the ssh
+  process instead. The cost is one handshake per tunnel, which is once per
+  session rather than once per frame.
+
+```
+ssh -N -L 127.0.0.1:24680:127.0.0.1:24680 user@gpu-machine
+set VK_REMOTING_HOST=127.0.0.1
+vkcube.exe
+```
+
 ## What works
 
 - `tools/offscreen` renders a triangle and reads it back: output is
