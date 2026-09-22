@@ -1,18 +1,34 @@
-// Client-side WSI: Wayland surfaces, surface queries, and swapchains.
+// Client-side WSI: surface creation, surface queries, and swapchains.
 //
-// A VkWaylandSurfaceCreateInfoKHR carries a wl_display*/wl_surface* that
-// belong to the *application's* connection and are meaningless to send; only
-// wl_proxy_get_id(pCreateInfo->surface) travels the wire, which is why this
-// file links wayland-client at all (see wayland/proxy_server.hpp's
-// surface_for_client_id on the server side).
-
-#define VK_USE_PLATFORM_WAYLAND_KHR
+// On Linux, a VkWaylandSurfaceCreateInfoKHR carries a wl_display*/wl_surface*
+// that belong to the *application's* connection and are meaningless to send;
+// only wl_proxy_get_id(pCreateInfo->surface) travels the wire, which is why
+// this file links wayland-client at all there (see
+// wayland/proxy_server.hpp's surface_for_client_id on the server side).
+//
+// On Windows there is no libwayland to link and nothing of the application's
+// HINSTANCE/HWND that the server could use either (see
+// server/handlers_wsi.cpp's handle_CreateWin32SurfaceKHR, which reads and
+// discards both): the server answers by opening its own Wayland window
+// instead (see server/own_window.cpp), which is exactly what commit 75c3bb4
+// added to make a windowless Windows client possible at all.
 
 #include <string.h>
 
 #include <cstring>
 
+// windows.h's default (non-lean) mode drags in the legacy winsock.h, which
+// conflicts with wire.hpp's winsock2.h if windows.h is reached first in this
+// translation unit (as it is here, via vulkan.h's VK_USE_PLATFORM_WIN32_KHR
+// path below); defining this before that include keeps them from conflicting
+// regardless of which of the two ends up included first.
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define VK_USE_PLATFORM_WIN32_KHR
+#else
+#define VK_USE_PLATFORM_WAYLAND_KHR
 #include <wayland-client.h>
+#endif
 
 #include <vulkan/vk_icd.h>
 #include <vulkan/vulkan.h>
@@ -63,6 +79,7 @@ Reader payload_reader(const std::vector<char>& reply) {
 // Instance / physical device: Wayland surface, surface queries.
 // ---------------------------------------------------------------------------
 
+#if !defined(_WIN32)
 VKAPI_ATTR VkResult VKAPI_CALL CreateWaylandSurfaceKHR(VkInstance handle,
                                                        const VkWaylandSurfaceCreateInfoKHR* pCreateInfo,
                                                        const VkAllocationCallbacks*,
@@ -102,6 +119,40 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateWaylandSurfaceKHR(VkInstance handle,
     *pSurface = handle_from_id<VkSurfaceKHR>(id);
     return VK_SUCCESS;
 }
+#endif  // !defined(_WIN32)
+
+#if defined(_WIN32)
+VKAPI_ATTR VkResult VKAPI_CALL CreateWin32SurfaceKHR(VkInstance handle,
+                                                     const VkWin32SurfaceCreateInfoKHR* pCreateInfo,
+                                                     const VkAllocationCallbacks*,
+                                                     VkSurfaceKHR* pSurface) {
+    RemoteInstance* instance = to_instance(handle);
+
+    // hinstance/hwnd name a window in the Win32 world only, and the server
+    // has no way to turn either back into anything real (there is no Win32
+    // window on the GPU machine); both still travel the wire because the
+    // server's handler (see server/handlers_wsi.cpp's
+    // handle_CreateWin32SurfaceKHR) must read exactly what this call writes
+    // to stay in step, even though it discards them and opens its own
+    // server-owned Wayland window instead.
+    Writer request;
+    request.u64(reinterpret_cast<uint64_t>(pCreateInfo->hinstance));
+    request.u64(reinterpret_cast<uint64_t>(pCreateInfo->hwnd));
+    std::vector<char> reply;
+    if (!round_trip(instance, Opcode::vkCreateWin32SurfaceKHR, request, &reply)) {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    Reader reader(reply.data(), reply.size());
+    reader.u32();  // status
+    const VkResult result = static_cast<VkResult>(reader.i32());
+    const uint64_t id = reader.handle();
+    if (!reader.ok()) return VK_ERROR_INITIALIZATION_FAILED;
+    if (result != VK_SUCCESS) return result;
+    *pSurface = handle_from_id<VkSurfaceKHR>(id);
+    return VK_SUCCESS;
+}
+#endif  // defined(_WIN32)
 
 VKAPI_ATTR void VKAPI_CALL DestroySurfaceKHR(VkInstance handle, VkSurfaceKHR surface,
                                              const VkAllocationCallbacks*) {
@@ -112,6 +163,7 @@ VKAPI_ATTR void VKAPI_CALL DestroySurfaceKHR(VkInstance handle, VkSurfaceKHR sur
     instance->connection.send_oneway(Opcode::vkDestroySurfaceKHR, request);
 }
 
+#if !defined(_WIN32)
 VKAPI_ATTR VkBool32 VKAPI_CALL GetPhysicalDeviceWaylandPresentationSupportKHR(
     VkPhysicalDevice handle, uint32_t queueFamilyIndex, struct wl_display*) {
     // The wl_display* argument names the application's own connection, which
@@ -131,6 +183,7 @@ VKAPI_ATTR VkBool32 VKAPI_CALL GetPhysicalDeviceWaylandPresentationSupportKHR(
     reader.u32();  // status
     return reader.u32() != 0 ? VK_TRUE : VK_FALSE;
 }
+#endif  // !defined(_WIN32)
 
 VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceSupportKHR(VkPhysicalDevice handle,
                                                                   uint32_t queueFamilyIndex,
@@ -379,9 +432,13 @@ namespace remoting {
 const DeviceEntry* get_wsi_instance_entries(size_t* count) {
     static const DeviceEntry kEntries[] = {
 #define D(name) {"vk" #name, reinterpret_cast<PFN_vkVoidFunction>(name)}
+#if defined(_WIN32)
+        D(CreateWin32SurfaceKHR),
+#else
         D(CreateWaylandSurfaceKHR),
-        D(DestroySurfaceKHR),
         D(GetPhysicalDeviceWaylandPresentationSupportKHR),
+#endif
+        D(DestroySurfaceKHR),
         D(GetPhysicalDeviceSurfaceSupportKHR),
         D(GetPhysicalDeviceSurfaceCapabilitiesKHR),
         D(GetPhysicalDeviceSurfaceFormatsKHR),

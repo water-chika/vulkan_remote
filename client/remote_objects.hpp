@@ -34,7 +34,7 @@ inline uint64_t id_from_handle(H handle) {
 }
 
 struct Connection {
-    int fd = -1;
+    socket_t fd = kInvalidSocket;
     std::mutex mutex;
 
     // Recording commands are void and nobody waits on them, so they are sent

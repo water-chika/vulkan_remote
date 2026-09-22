@@ -78,6 +78,17 @@ add_library(vulkan_remoting_icd SHARED
     client/remote_objects.cpp
 )
 target_link_libraries(vulkan_remoting_icd PRIVATE vulkan_remoting_wire Vulkan::Headers)
+if(WIN32)
+    # The client speaks Winsock instead of BSD sockets on Windows (see
+    # common/wire.cpp); ws2_32 is where WSAStartup/getaddrinfo/socket/etc.
+    # live there.
+    target_link_libraries(vulkan_remoting_icd PRIVATE ws2_32)
+    # VK_USE_PLATFORM_WIN32_KHR itself is not defined here: client/icd.cpp and
+    # client/wsi.cpp already define it themselves under #if defined(_WIN32),
+    # the same way they define VK_USE_PLATFORM_WAYLAND_KHR for a Linux build,
+    # so doing it again from CMake would just be a duplicate-definition
+    # warning waiting to happen.
+endif()
 
 # The probe links no Vulkan at all, which keeps it honest about what actually
 # has to cross the socket.
@@ -86,6 +97,15 @@ target_link_libraries(vulkan_remoting_probe PRIVATE vulkan_remoting_wire)
 
 # Manifest telling the Vulkan loader where the ICD is. Written to the build
 # directory because it must carry an absolute path to the built library.
+# $<TARGET_FILE:...> already resolves to a .dll here on a Windows configure,
+# so the JSON itself needs no platform-specific handling; what differs on
+# Windows is how the loader is told to look at it at all. On Linux the
+# loader finds this file through VK_ICD_FILENAMES or the standard
+# /usr/share/vulkan/icd.d search path, but on Windows it instead reads a
+# REG_SZ value named after this JSON's path under the registry key
+# HKLM\SOFTWARE\Khronos\Vulkan\Drivers (or the HKCU equivalent) - creating
+# that value is a one-time step for whoever installs this driver, and CMake
+# has no business writing to the registry to do it.
 set(icd_library $<TARGET_FILE:vulkan_remoting_icd>)
 file(GENERATE
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/vulkan_remoting_icd.json
@@ -107,6 +127,15 @@ target_link_libraries(vulkan_remoting_offscreen PRIVATE Vulkan::Vulkan)
 # wayland/proxy_server.hpp for why that placement is load-bearing, not
 # incidental). Kept independent of the Vulkan remoting pieces above other
 # than sharing the project's C++17 baseline.
+#
+# Everything below is Linux-only: wayland-client, the proxy, and the
+# server's own-window path only ever make sense on the machine that owns a
+# real compositor connection, which per this project's split (see the
+# project() comment at the top) is the server side. A Windows configure
+# builds only the client half (vulkan_remoting_icd), so none of this needs to
+# exist there, and pkg_check_modules(... REQUIRED wayland-client) would fail
+# a Windows configure outright if it were not skipped.
+if(NOT WIN32)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(WAYLAND_CLIENT REQUIRED wayland-client)
 
@@ -235,3 +264,4 @@ target_sources(vulkan_remoting_server PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-client-protocol.h
 )
 target_include_directories(vulkan_remoting_server PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+endif()  # NOT WIN32

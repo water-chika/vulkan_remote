@@ -10,12 +10,25 @@
 
 #include <stdio.h>
 #include <string.h>
+
+#if !defined(_WIN32)
 #include <unistd.h>
+#endif
 
 #include <cstdlib>
 #include <cstring>
 
+// windows.h's default (non-lean) mode drags in the legacy winsock.h, which
+// conflicts with wire.hpp's winsock2.h if windows.h is reached first in this
+// translation unit (as it is here, via vulkan.h's VK_USE_PLATFORM_WIN32_KHR
+// path below); defining this before that include keeps them from conflicting
+// regardless of which of the two ends up included first.
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define VK_USE_PLATFORM_WIN32_KHR
+#else
 #define VK_USE_PLATFORM_WAYLAND_KHR
+#endif
 
 #include <vulkan/vk_icd.h>
 #include <vulkan/vulkan.h>
@@ -46,6 +59,17 @@ bool round_trip(RemoteInstance* instance, Opcode opcode, const Writer& request,
 VKAPI_ATTR VkResult VKAPI_CALL EnumerateInstanceExtensionProperties(const char* /*layer*/,
                                                                     uint32_t* count,
                                                                     VkExtensionProperties* props) {
+#if defined(_WIN32)
+    // A Windows client has no Wayland connection of its own to name a window
+    // on (see wsi.cpp); the server turns the hinstance/hwnd this platform's
+    // surface carries into its own server-owned window instead (see
+    // server/handlers_wsi.cpp's handle_CreateWin32SurfaceKHR), so Win32
+    // surface is what this driver offers here rather than Wayland surface.
+    static const char* const kNames[] = {VK_KHR_SURFACE_EXTENSION_NAME,
+                                         VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
+    static const uint32_t kVersions[] = {VK_KHR_SURFACE_SPEC_VERSION,
+                                        VK_KHR_WIN32_SURFACE_SPEC_VERSION};
+#else
     // The only WSI platform this driver ever offers is Wayland, because that
     // is the only one wayland/proxy_server.hpp's WaylandProxy can name a
     // window on.
@@ -53,6 +77,7 @@ VKAPI_ATTR VkResult VKAPI_CALL EnumerateInstanceExtensionProperties(const char* 
                                          VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME};
     static const uint32_t kVersions[] = {VK_KHR_SURFACE_SPEC_VERSION,
                                         VK_KHR_WAYLAND_SURFACE_SPEC_VERSION};
+#endif
     constexpr uint32_t kCount = 2;
 
     if (props == nullptr) {
@@ -86,7 +111,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo*,
     set_loader_magic_value(instance);
 
     instance->connection.fd = remoting::connect_to(host, port);
-    if (instance->connection.fd < 0) {
+    if (instance->connection.fd == remoting::kInvalidSocket) {
         fprintf(stderr, "vulkan-remoting: no server at %s:%u\n", host, static_cast<unsigned>(port));
         delete instance;
         return VK_ERROR_INITIALIZATION_FAILED;
@@ -101,7 +126,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo*,
                     "vulkan-remoting: handshake refused; server was generated from a different "
                     "vk.xml (ours is %s)\n",
                     remoting::kCommandSetDigest);
-            ::close(instance->connection.fd);
+            remoting::close_socket(instance->connection.fd);
             delete instance;
             return VK_ERROR_INCOMPATIBLE_DRIVER;
         }
@@ -114,7 +139,9 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo*,
 VKAPI_ATTR void VKAPI_CALL DestroyInstance(VkInstance handle, const VkAllocationCallbacks*) {
     if (handle == VK_NULL_HANDLE) return;
     RemoteInstance* instance = to_instance(handle);
-    if (instance->connection.fd >= 0) ::close(instance->connection.fd);
+    if (instance->connection.fd != remoting::kInvalidSocket) {
+        remoting::close_socket(instance->connection.fd);
+    }
     for (auto* device : instance->physical_devices) delete device;
     delete instance;
 }

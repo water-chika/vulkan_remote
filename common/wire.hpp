@@ -14,7 +14,30 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+// windows.h's default (non-lean) mode drags in the legacy winsock.h, which
+// conflicts with winsock2.h if both end up in the same translation unit; the
+// .cpp files that reach this header on Windows define WIN32_LEAN_AND_MEAN
+// before their very first include (see wire.cpp/icd.cpp/wsi.cpp/
+// remote_objects.cpp) so that whichever of windows.h/winsock2.h the compiler
+// sees first, the other does not conflict with it.
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#endif
+
 namespace remoting {
+
+#if defined(_WIN32)
+// SOCKET is an unsigned, pointer-sized handle on Windows (64 bits on x64),
+// not a small file descriptor; storing it in `int` as the POSIX side does
+// would silently truncate it, so every socket value lives in this type
+// instead from here on.
+using socket_t = SOCKET;
+constexpr socket_t kInvalidSocket = INVALID_SOCKET;
+#else
+using socket_t = int;
+constexpr socket_t kInvalidSocket = -1;
+#endif
 
 enum class Status : uint32_t {
     Ok = 0,
@@ -122,10 +145,15 @@ class Reader {
 
 // Blocking whole-message send and receive. Return false on any short read or
 // peer disconnect; callers treat that as a dead connection.
-bool send_message(int fd, uint32_t opcode, const std::vector<char>& payload);
-bool recv_message(int fd, MessageHeader* header, std::vector<char>* payload);
+bool send_message(socket_t fd, uint32_t opcode, const std::vector<char>& payload);
+bool recv_message(socket_t fd, MessageHeader* header, std::vector<char>* payload);
 
-// Connects to host:port with TCP_NODELAY set, returning -1 on failure.
-int connect_to(const std::string& host, uint16_t port);
+// Connects to host:port with TCP_NODELAY set, returning kInvalidSocket on
+// failure.
+socket_t connect_to(const std::string& host, uint16_t port);
+
+// ::close on POSIX, ::closesocket on Windows (they are not interchangeable:
+// Windows keeps ::close for CRT file descriptors, not SOCKETs).
+void close_socket(socket_t fd);
 
 }  // namespace remoting

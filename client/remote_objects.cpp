@@ -1,20 +1,31 @@
 // Connection helpers shared by every remoted entry point.
+//
+// windows.h's default (non-lean) mode drags in the legacy winsock.h, which
+// conflicts with wire.hpp's winsock2.h if windows.h is reached first in this
+// translation unit; defining this before any include - including
+// remote_objects.hpp itself, which pulls in wire.hpp - keeps that from
+// happening regardless of what pulls windows.h in.
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#endif
 
 #include "remote_objects.hpp"
 
+#if !defined(_WIN32)
 #include <unistd.h>
+#endif
 
 namespace remoting {
 
 bool Connection::send_oneway(Opcode opcode, const Writer& request) {
     std::lock_guard<std::mutex> lock(mutex);
-    if (fd < 0) return false;
+    if (fd == kInvalidSocket) return false;
     return send_message(fd, static_cast<uint32_t>(opcode), request.data());
 }
 
 bool Connection::round_trip(Opcode opcode, const Writer& request, std::vector<char>* reply) {
     std::lock_guard<std::mutex> lock(mutex);
-    if (fd < 0) return false;
+    if (fd == kInvalidSocket) return false;
     if (!send_message(fd, static_cast<uint32_t>(opcode), request.data())) return false;
 
     MessageHeader header{};
