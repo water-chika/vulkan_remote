@@ -26,12 +26,14 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
 #include <vulkan/vulkan.h>
 
 #include "objects.hpp"
+#include "own_window.hpp"
 #include "remoting_commands.inl"
 #include "wire.hpp"
 
@@ -62,6 +64,15 @@ class Server {
     VkInstance instance() const { return m_instance; }
     size_t physical_device_count() const { return m_physical_devices.size(); }
 
+    // Creates a new server-owned Wayland window (see server/own_window.hpp)
+    // for handle_CreateWin32SurfaceKHR to present through. One per surface
+    // request rather than a single shared window, kept alive for the life of
+    // the Server because the VkSurfaceKHR it backs must outlive the call
+    // that created it. Returns nullptr if there is no compositor to talk
+    // to - this must work whether or not the server was started with
+    // --wayland, so it never touches m_wayland.
+    OwnWindow* create_own_window();
+
     // Handles cross the wire as indices, never as pointers. A VkPhysicalDevice
     // is a host pointer; sending its bits would be meaningless remotely and
     // would leak an address, so the client only ever sees 1-based indices.
@@ -78,6 +89,12 @@ class Server {
     std::vector<VkPhysicalDevice> m_physical_devices;
     std::unique_ptr<WaylandProxy> m_wayland;
     std::thread m_wayland_thread;
+
+    // Guards m_own_windows: handle_CreateWin32SurfaceKHR runs on whichever
+    // thread is serving that connection (see main.cpp's accept loop), and
+    // two connections can request one concurrently.
+    std::mutex m_own_windows_mutex;
+    std::vector<std::unique_ptr<OwnWindow>> m_own_windows;
 };
 
 namespace remoting {

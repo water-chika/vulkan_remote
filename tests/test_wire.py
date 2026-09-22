@@ -288,6 +288,33 @@ def test_client_without_server_fails_cleanly(server, build_dir):
     return None
 
 
+def test_own_window_surface(server, build_dir):
+    """vkCreateWin32SurfaceKHR must reply, never hang, even without Wayland.
+
+    The server under test was started with no --wayland and no guarantee of a
+    real compositor being reachable, so this only proves the handler always
+    sends back a reply for a request whose HWND cannot possibly mean anything
+    here. If a compositor happens to be reachable it may report VK_SUCCESS;
+    if not, VK_ERROR_INITIALIZATION_FAILED with handle 0 is just as
+    acceptable - the property under test is "replies", not "a window
+    appeared".
+    """
+    with connect(server.port) as sock:
+        if handshake(sock, read_digest(build_dir)) != STATUS_OK:
+            raise Failure('handshake failed')
+
+        # hinstance, hwnd: both discarded server-side (see
+        # handle_CreateWin32SurfaceKHR), but still sent so the payload has
+        # the shape a real client would send.
+        payload = struct.pack('<QQ', 0x1000, 0x2000)
+        send_message(sock, read_opcode(build_dir, 'vkCreateWin32SurfaceKHR'), payload)
+        opcode, response = recv_message(sock)
+        if opcode is None:
+            raise Failure('server did not reply to vkCreateWin32SurfaceKHR')
+        if decode_u32(response) != STATUS_OK:
+            raise Failure('vkCreateWin32SurfaceKHR did not report Status::Ok')
+
+
 TESTS = [
     test_handshake_accepts_matching_digest,
     test_handshake_rejects_foreign_digest,
@@ -298,6 +325,7 @@ TESTS = [
     test_short_payload_for_known_command,
     test_abrupt_disconnect_is_survivable,
     test_client_without_server_fails_cleanly,
+    test_own_window_surface,
 ]
 
 

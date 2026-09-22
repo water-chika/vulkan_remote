@@ -61,6 +61,7 @@ add_executable(vulkan_remoting_server
     server/handlers_memory.cpp
     server/handlers_command.cpp
     server/handlers_wsi.cpp
+    server/own_window.cpp
 )
 target_link_libraries(vulkan_remoting_server PRIVATE vulkan_remoting_wire Vulkan::Vulkan)
 
@@ -220,3 +221,17 @@ target_include_directories(vulkan_remoting_wayland_test_client PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}
 )
 target_link_libraries(vulkan_remoting_wayland_test_client PRIVATE ${WAYLAND_CLIENT_LIBRARIES})
+
+# server/own_window.cpp needs the same xdg-shell client bindings as the
+# throwaway verification client above (server/main.cpp's --wayland proxy path
+# never depends on scanner output, but this server-owned-window path is a
+# real libwayland client and does). Only the generated header is compiled
+# in here, never xdg-shell-protocol.c: that .c file's xdg_*_interface
+# globals would collide at link time with the equivalent globals
+# vulkan_remoting_wayland_proxy_server already defines from the very same
+# xdg-shell.xml (see wayland/generate_protocol.py), so own_window.cpp's
+# calls resolve against that library's copies instead of a second one.
+target_sources(vulkan_remoting_server PRIVATE
+    ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-client-protocol.h
+)
+target_include_directories(vulkan_remoting_server PRIVATE ${CMAKE_CURRENT_BINARY_DIR})

@@ -10,6 +10,7 @@
 #include <vulkan/vulkan_wayland.h>
 
 #include "marshal.hpp"
+#include "own_window.hpp"
 #include "proxy_server.hpp"
 #include "session.hpp"
 
@@ -58,6 +59,47 @@ void handle_CreateWaylandSurfaceKHR(Session& c) {
     info.sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR;
     info.display = wayland->display();
     info.surface = surface;
+
+    VkSurfaceKHR vk_surface = VK_NULL_HANDLE;
+    const VkResult result = vkCreateWaylandSurfaceKHR(c.server.instance(), &info, nullptr, &vk_surface);
+    c.writer.u32(static_cast<uint32_t>(Status::Ok));
+    c.writer.i32(result);
+    c.writer.handle(result == VK_SUCCESS ? c.tables.surfaces.add(vk_surface) : 0);
+    c.reply();
+}
+
+void handle_CreateWin32SurfaceKHR(Session& c) {
+    // hinstance/hwnd name a window in the Win32 world only; there is nothing
+    // to translate them into here, since a future Win32 client has no
+    // Wayland surface of its own to hand over. Both are still read, never
+    // used, purely to keep the wire reader in sync with what the client
+    // sent.
+    const uint64_t hinstance = c.reader.u64();
+    const uint64_t hwnd = c.reader.u64();
+    (void)hinstance;
+    (void)hwnd;
+    if (!c.reader.ok()) {
+        c.writer.u32(static_cast<uint32_t>(Status::Ok));
+        c.writer.i32(VK_ERROR_INITIALIZATION_FAILED);
+        c.writer.handle(0);
+        return;
+    }
+
+    OwnWindow* window = c.server.create_own_window();
+    if (!window) {
+        fprintf(stderr,
+                "server: vkCreateWin32SurfaceKHR: could not create a server-owned Wayland window "
+                "(no compositor?)\n");
+        c.writer.u32(static_cast<uint32_t>(Status::Ok));
+        c.writer.i32(VK_ERROR_INITIALIZATION_FAILED);
+        c.writer.handle(0);
+        return;
+    }
+
+    VkWaylandSurfaceCreateInfoKHR info{};
+    info.sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR;
+    info.display = window->display();
+    info.surface = window->surface();
 
     VkSurfaceKHR vk_surface = VK_NULL_HANDLE;
     const VkResult result = vkCreateWaylandSurfaceKHR(c.server.instance(), &info, nullptr, &vk_surface);
@@ -310,6 +352,7 @@ void handle_QueuePresentKHR(Session& c) {
 }  // namespace
 
 REGISTER_HANDLER(vkCreateWaylandSurfaceKHR, handle_CreateWaylandSurfaceKHR);
+REGISTER_HANDLER(vkCreateWin32SurfaceKHR, handle_CreateWin32SurfaceKHR);
 REGISTER_HANDLER(vkDestroySurfaceKHR, handle_DestroySurfaceKHR);
 REGISTER_HANDLER(vkGetPhysicalDeviceWaylandPresentationSupportKHR,
                   handle_GetPhysicalDeviceWaylandPresentationSupportKHR);

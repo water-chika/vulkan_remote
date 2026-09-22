@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <unordered_map>
 
+#include "own_window.hpp"
 #include "proxy_server.hpp"
 
 namespace {
@@ -84,12 +85,34 @@ bool Server::init_vulkan(bool validate, bool want_wayland) {
         }
     }
 
-    // Only requested with --wayland: without a WaylandProxy to name a
-    // window, the offscreen path must see the exact same instance it
-    // always has, extension for extension.
-    if (want_wayland) {
-        extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
-        extensions.push_back(VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME);
+    // Both surface paths need VK_KHR_wayland_surface now: the WaylandProxy one
+    // (--wayland) and the server-owned OwnWindow one behind
+    // vkCreateWin32SurfaceKHR, which never touches WaylandProxy and so cannot
+    // be tied to that flag. Enabling it unconditionally would be wrong the
+    // other way round, though: a headless server has no such extension, and
+    // asking for a missing one fails vkCreateInstance outright, which would
+    // take the offscreen path down with it. So ask only for what is there.
+    {
+        uint32_t ext_count = 0;
+        vkEnumerateInstanceExtensionProperties(nullptr, &ext_count, nullptr);
+        std::vector<VkExtensionProperties> avail(ext_count);
+        vkEnumerateInstanceExtensionProperties(nullptr, &ext_count, avail.data());
+        bool has_surface = false;
+        bool has_wayland_surface = false;
+        for (const auto& e : avail) {
+            if (strcmp(e.extensionName, VK_KHR_SURFACE_EXTENSION_NAME) == 0) has_surface = true;
+            if (strcmp(e.extensionName, VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME) == 0) {
+                has_wayland_surface = true;
+            }
+        }
+        if (has_surface && has_wayland_surface) {
+            extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
+            extensions.push_back(VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME);
+        } else {
+            fprintf(stderr,
+                    "server: VK_KHR_wayland_surface is not available; presentation is disabled "
+                    "and only the offscreen path will work\n");
+        }
     }
 
     VkInstanceCreateInfo create_info{};
@@ -168,6 +191,14 @@ void Server::stop_wayland() {
         g_stop.store(true);
         m_wayland_thread.join();
     }
+}
+
+OwnWindow* Server::create_own_window() {
+    auto window = std::make_unique<OwnWindow>();
+    if (!window->create()) return nullptr;
+    std::lock_guard<std::mutex> lock(m_own_windows_mutex);
+    m_own_windows.push_back(std::move(window));
+    return m_own_windows.back().get();
 }
 
 VkPhysicalDevice Server::physical_device_from_id(uint64_t id) const {
