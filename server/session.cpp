@@ -1,3 +1,14 @@
+#if defined(_WIN32)
+// windows.h's default (non-lean) mode drags in the legacy winsock.h, which
+// conflicts with wire.hpp's winsock2.h if windows.h is reached first in this
+// translation unit; defining this - and requesting Vulkan's Win32 surface
+// types - before session.hpp's own #include <vulkan/vulkan.h> keeps that
+// from happening and makes VK_KHR_WIN32_SURFACE_EXTENSION_NAME available
+// below (see client/wsi.cpp lines 20-31 for the same reasoning).
+#define WIN32_LEAN_AND_MEAN
+#define VK_USE_PLATFORM_WIN32_KHR
+#endif
+
 #include "session.hpp"
 
 #include <errno.h>
@@ -8,7 +19,9 @@
 #include <unordered_map>
 
 #include "own_window.hpp"
+#if !defined(_WIN32)
 #include "proxy_server.hpp"
+#endif
 
 namespace {
 
@@ -85,33 +98,50 @@ bool Server::init_vulkan(bool validate, bool want_wayland) {
         }
     }
 
-    // Both surface paths need VK_KHR_wayland_surface now: the WaylandProxy one
-    // (--wayland) and the server-owned OwnWindow one behind
-    // vkCreateWin32SurfaceKHR, which never touches WaylandProxy and so cannot
-    // be tied to that flag. Enabling it unconditionally would be wrong the
-    // other way round, though: a headless server has no such extension, and
-    // asking for a missing one fails vkCreateInstance outright, which would
-    // take the offscreen path down with it. So ask only for what is there.
+    // Both surface paths need a windowing-system surface extension now: the
+    // WaylandProxy one (--wayland, Linux only) and the server-owned
+    // OwnWindow one behind vkCreateWin32SurfaceKHR, which never touches
+    // WaylandProxy and so cannot be tied to that flag. Enabling either
+    // unconditionally would be wrong the other way round, though: a headless
+    // server has no such extension, and asking for a missing one fails
+    // vkCreateInstance outright, which would take the offscreen path down
+    // with it. So ask only for what is there.
     {
         uint32_t ext_count = 0;
         vkEnumerateInstanceExtensionProperties(nullptr, &ext_count, nullptr);
         std::vector<VkExtensionProperties> avail(ext_count);
         vkEnumerateInstanceExtensionProperties(nullptr, &ext_count, avail.data());
         bool has_surface = false;
-        bool has_wayland_surface = false;
+        bool has_platform_surface = false;
         for (const auto& e : avail) {
             if (strcmp(e.extensionName, VK_KHR_SURFACE_EXTENSION_NAME) == 0) has_surface = true;
-            if (strcmp(e.extensionName, VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME) == 0) {
-                has_wayland_surface = true;
+#if defined(_WIN32)
+            if (strcmp(e.extensionName, VK_KHR_WIN32_SURFACE_EXTENSION_NAME) == 0) {
+                has_platform_surface = true;
             }
+#else
+            if (strcmp(e.extensionName, VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME) == 0) {
+                has_platform_surface = true;
+            }
+#endif
         }
-        if (has_surface && has_wayland_surface) {
+        if (has_surface && has_platform_surface) {
             extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
+#if defined(_WIN32)
+            extensions.push_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
+#else
             extensions.push_back(VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME);
+#endif
         } else {
+#if defined(_WIN32)
+            fprintf(stderr,
+                    "server: VK_KHR_win32_surface is not available; presentation is disabled "
+                    "and only the offscreen path will work\n");
+#else
             fprintf(stderr,
                     "server: VK_KHR_wayland_surface is not available; presentation is disabled "
                     "and only the offscreen path will work\n");
+#endif
         }
     }
 
@@ -162,7 +192,9 @@ bool Server::init_vulkan(bool validate, bool want_wayland) {
 }
 
 Server::~Server() {
+#if !defined(_WIN32)
     stop_wayland();
+#endif
     if (m_messenger != VK_NULL_HANDLE) {
         auto destroy_fn = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
             vkGetInstanceProcAddr(m_instance, "vkDestroyDebugUtilsMessengerEXT"));
@@ -171,6 +203,7 @@ Server::~Server() {
     if (m_instance != VK_NULL_HANDLE) vkDestroyInstance(m_instance, nullptr);
 }
 
+#if !defined(_WIN32)
 bool Server::start_wayland(uint16_t port) {
     m_wayland = std::make_unique<WaylandProxy>();
     if (!m_wayland->start(port)) {
@@ -192,6 +225,7 @@ void Server::stop_wayland() {
         m_wayland_thread.join();
     }
 }
+#endif
 
 OwnWindow* Server::create_own_window() {
     auto window = std::make_unique<OwnWindow>();
@@ -206,7 +240,7 @@ VkPhysicalDevice Server::physical_device_from_id(uint64_t id) const {
     return m_physical_devices[id - 1];
 }
 
-void Server::serve(int fd) {
+void Server::serve(remoting::socket_t fd) {
     fprintf(stderr, "server: client connected\n");
     remoting::ObjectTables tables;
     uint32_t oneway_errors = 0;

@@ -34,24 +34,6 @@ using io_result_t = int;
 using io_result_t = ssize_t;
 #endif
 
-#if defined(_WIN32)
-// Winsock must be started once per process before any socket call, and
-// nothing else in this driver has a natural "process startup" hook to do it
-// from - the ICD is loaded into whatever process called into Vulkan. A
-// std::once_flag makes the first connect_to() call double as that hook
-// without every caller needing to know that.
-void ensure_winsock_started() {
-    static std::once_flag once;
-    std::call_once(once, [] {
-        WSADATA data;
-        WSAStartup(MAKEWORD(2, 2), &data);
-    });
-    // No matching WSACleanup(): this driver is loaded for the lifetime of the
-    // host process and has no reliable point to call it from at which no
-    // other connection could still be using Winsock.
-}
-#endif
-
 // True for whatever this platform's send/recv report as "the call was
 // interrupted, try again" - a signal on POSIX, WSAEINTR on Windows. Kept as
 // one helper so the read/write loops never touch errno/WSAGetLastError
@@ -172,10 +154,27 @@ void close_socket(socket_t fd) {
 #endif
 }
 
-socket_t connect_to(const std::string& host, uint16_t port) {
+void ensure_sockets_initialised() {
 #if defined(_WIN32)
-    ensure_winsock_started();
+    // Winsock must be started once per process before any socket call, and
+    // nothing else in this driver has a natural "process startup" hook to do
+    // it from - the ICD is loaded into whatever process called into Vulkan,
+    // and the server (see main.cpp) opens its listening socket before ever
+    // calling connect_to(). A std::once_flag makes whichever call gets here
+    // first double as that hook without every caller needing to know that.
+    static std::once_flag once;
+    std::call_once(once, [] {
+        WSADATA data;
+        WSAStartup(MAKEWORD(2, 2), &data);
+    });
+    // No matching WSACleanup(): this driver is loaded for the lifetime of the
+    // host process and has no reliable point to call it from at which no
+    // other connection could still be using Winsock.
 #endif
+}
+
+socket_t connect_to(const std::string& host, uint16_t port) {
+    ensure_sockets_initialised();
 
     char port_text[16];
     snprintf(port_text, sizeof(port_text), "%u", static_cast<unsigned>(port));

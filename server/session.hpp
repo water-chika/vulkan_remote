@@ -37,7 +37,9 @@
 #include "remoting_commands.inl"
 #include "wire.hpp"
 
+#if !defined(_WIN32)
 class WaylandProxy;
+#endif
 
 // Set by SIGINT/SIGTERM (see main.cpp's on_signal); checked by main.cpp's
 // accept loop and by Server::start_wayland's pump thread so both stop
@@ -53,14 +55,19 @@ class Server {
     bool init_vulkan(bool validate, bool want_wayland);
     ~Server();
 
+#if !defined(_WIN32)
     // Starts the embedded Wayland proxy and its pump thread. See the
     // top-of-file comment in server.cpp's original form (now in
     // handlers_wsi.cpp) for why this runs on its own thread rather than
-    // being folded into serve()'s blocking recv loop.
+    // being folded into serve()'s blocking recv loop. Linux-only: a Windows
+    // server has no compositor connection of its own to proxy (see
+    // CMakeLists.txt's `if(NOT WIN32)` block around the wayland/ pieces),
+    // so main.cpp never lets --wayland reach here on that platform.
     bool start_wayland(uint16_t port);
     void stop_wayland();
 
     WaylandProxy* wayland() const { return m_wayland.get(); }
+#endif
     VkInstance instance() const { return m_instance; }
     size_t physical_device_count() const { return m_physical_devices.size(); }
 
@@ -81,14 +88,16 @@ class Server {
     // Runs on its own thread per connection (see main.cpp's accept loop);
     // owns that connection's ObjectTables and dispatches every message on it
     // through the registration table below until the peer disconnects.
-    void serve(int fd);
+    void serve(remoting::socket_t fd);
 
    private:
     VkInstance m_instance = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT m_messenger = VK_NULL_HANDLE;
     std::vector<VkPhysicalDevice> m_physical_devices;
+#if !defined(_WIN32)
     std::unique_ptr<WaylandProxy> m_wayland;
     std::thread m_wayland_thread;
+#endif
 
     // Guards m_own_windows: handle_CreateWin32SurfaceKHR runs on whichever
     // thread is serving that connection (see main.cpp's accept loop), and
@@ -103,7 +112,7 @@ namespace remoting {
 // exactly as server.cpp's original Ctx struct was reused across its case
 // handler functions.
 struct Session {
-    int fd;
+    socket_t fd;
     Server& server;
     Reader& reader;
     Writer& writer;

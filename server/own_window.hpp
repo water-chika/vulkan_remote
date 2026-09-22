@@ -1,17 +1,35 @@
 #pragma once
 
-// A Wayland window the server creates and owns itself, rather than one
-// replayed from an application (see wayland/proxy_server.hpp for that other
-// path). This is what backs vkCreateWin32SurfaceKHR: a Win32 client has no
-// Wayland connection at all, so there is nothing to adopt, and the server
-// has to make its own surface to present through.
+// A window the server creates and owns itself, rather than one replayed from
+// an application (see wayland/proxy_server.hpp for that other path). This is
+// what backs vkCreateWin32SurfaceKHR: a Win32 client has no Wayland
+// connection (or, on a Windows server, no window at all) of its own, so
+// there is nothing to adopt, and the server has to make its own surface to
+// present through.
 //
-// Deliberately opens its own wl_display connection instead of reusing
-// WaylandProxy's, so this works even when the server was not started with
-// --wayland.
+// On Linux this deliberately opens its own wl_display connection instead of
+// reusing WaylandProxy's, so this works even when the server was not
+// started with --wayland. On Windows there is no compositor connection to
+// share in the first place - every OwnWindow just owns a plain HWND - so
+// the same reasoning does not apply there, but the "one per surface
+// request" lifetime still does (see session.hpp's create_own_window).
 
 #include <cstdint>
 
+#if defined(_WIN32)
+#include <thread>
+
+// Forward-declared the same way <windows.h> itself defines them (HWND is
+// `struct HWND__*`, HINSTANCE is `struct HINSTANCE__*`), so this header never
+// has to pull in <windows.h> - and therefore never has to worry about
+// WIN32_LEAN_AND_MEAN ordering - just to name these two handle types (see
+// own_window_win32.cpp, which does include <windows.h>, for the real
+// definitions this resolves against).
+struct HWND__;
+using HWND = HWND__*;
+struct HINSTANCE__;
+using HINSTANCE = HINSTANCE__*;
+#else
 struct wl_display;
 struct wl_registry;
 struct wl_compositor;
@@ -20,6 +38,7 @@ struct wl_array;
 struct xdg_wm_base;
 struct xdg_surface;
 struct xdg_toplevel;
+#endif
 
 class OwnWindow {
    public:
@@ -29,6 +48,27 @@ class OwnWindow {
     OwnWindow(const OwnWindow&) = delete;
     OwnWindow& operator=(const OwnWindow&) = delete;
 
+#if defined(_WIN32)
+    // Spawns a dedicated thread that registers the window class (once,
+    // process-wide), creates the window, and then pumps its message queue
+    // until the window is destroyed (see own_window_win32.cpp). A Win32
+    // window's messages must be pumped on the thread that created it, and
+    // the session thread calling create() cannot itself block in a message
+    // loop - it still has a client connection to serve - so the pump has to
+    // live on its own thread. create() blocks only long enough for that
+    // thread to report the HWND exists (or that creation failed), never for
+    // the whole pump lifetime. Returns false - cleanly, never crashing or
+    // hanging - if window creation failed.
+    bool create();
+
+    HINSTANCE hinstance() const { return hinstance_; }
+    HWND hwnd() const { return hwnd_; }
+
+   private:
+    HINSTANCE hinstance_ = nullptr;
+    HWND hwnd_ = nullptr;
+    std::thread pump_thread_;
+#else
     // Connects to the compositor, creates a wl_surface -> xdg_surface ->
     // xdg_toplevel chain, and round-trips until the compositor has
     // configured it. Returns false - cleanly, never crashing or hanging -
@@ -58,4 +98,6 @@ class OwnWindow {
     xdg_surface* xdg_surface_ = nullptr;
     xdg_toplevel* toplevel_ = nullptr;
     bool configured_ = false;
+#endif
 };
+

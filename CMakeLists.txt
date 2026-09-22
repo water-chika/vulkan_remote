@@ -13,6 +13,12 @@ project(vulkan_remoting CXX)
 find_package(Vulkan REQUIRED)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
+# Every server-side session runs on its own thread (see main.cpp's accept
+# loop and, on Windows, own_window_win32.cpp's message-pump thread), on both
+# platforms, so this is needed regardless of whether the Wayland-only pieces
+# further down end up built at all.
+find_package(Threads REQUIRED)
+
 # Both peers must be generated from one registry or their opcode numbering
 # disagrees. The generated digest makes a mismatch fail at connect time
 # instead of silently invoking the wrong command.
@@ -61,9 +67,23 @@ add_executable(vulkan_remoting_server
     server/handlers_memory.cpp
     server/handlers_command.cpp
     server/handlers_wsi.cpp
-    server/own_window.cpp
+    $<IF:$<BOOL:${WIN32}>,server/own_window_win32.cpp,server/own_window.cpp>
 )
-target_link_libraries(vulkan_remoting_server PRIVATE vulkan_remoting_wire Vulkan::Vulkan)
+target_link_libraries(vulkan_remoting_server PRIVATE vulkan_remoting_wire Vulkan::Vulkan
+                                                      Threads::Threads)
+if(WIN32)
+    # The server speaks Winsock instead of BSD sockets on Windows (see
+    # common/wire.cpp); ws2_32 is where WSAStartup/getaddrinfo/socket/etc.
+    # live there - same reasoning as the client's ws2_32 link below.
+    target_link_libraries(vulkan_remoting_server PRIVATE ws2_32)
+    # Static runtime, deliberately, for the same error-126 reason documented
+    # on vulkan_remoting_icd below: an EXE built by GCC against the shared
+    # runtime needs libstdc++-6.dll/libgcc_s_seh-1.dll/libwinpthread-1.dll
+    # alongside it, none of which ship with Windows.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_link_options(vulkan_remoting_server PRIVATE -static)
+    endif()
+endif()
 
 # The client links Vulkan::Headers, never the loader: it is the driver the
 # loader talks to, so linking the loader would be circular.
@@ -146,12 +166,14 @@ target_link_libraries(vulkan_remoting_offscreen PRIVATE Vulkan::Vulkan)
 # than sharing the project's C++17 baseline.
 #
 # Everything below is Linux-only: wayland-client, the proxy, and the
-# server's own-window path only ever make sense on the machine that owns a
-# real compositor connection, which per this project's split (see the
-# project() comment at the top) is the server side. A Windows configure
-# builds only the client half (vulkan_remoting_icd), so none of this needs to
-# exist there, and pkg_check_modules(... REQUIRED wayland-client) would fail
-# a Windows configure outright if it were not skipped.
+# server's own-window path (server/own_window.cpp) only ever make sense on
+# the machine that owns a real compositor connection, which per this
+# project's split (see the project() comment at the top) is the server
+# side. vulkan_remoting_server itself is already built above on both
+# platforms - on Windows with server/own_window_win32.cpp instead - so a
+# Windows configure just never links the proxy library or wayland-client
+# into it, and pkg_check_modules(... REQUIRED wayland-client) would fail a
+# Windows configure outright if it were not skipped.
 if(NOT WIN32)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(WAYLAND_CLIENT REQUIRED wayland-client)
@@ -215,13 +237,11 @@ target_link_libraries(vulkan_remoting_wayland_proxy_server PUBLIC
 target_compile_features(vulkan_remoting_wayland_proxy_server PUBLIC cxx_std_17)
 
 # The server embeds WaylandProxy directly (see server/server.cpp's --wayland
-# flag) and pumps it on its own thread, so it needs both the proxy library
-# and threading support that the earlier vulkan_remoting_server target
-# definition (above) did not yet have available.
-find_package(Threads REQUIRED)
+# flag) and pumps it on its own thread; Threads::Threads is already linked
+# into vulkan_remoting_server above (needed on every platform, not just
+# here), so this only has to add the proxy library itself.
 target_link_libraries(vulkan_remoting_server PRIVATE
     vulkan_remoting_wayland_proxy_server
-    Threads::Threads
 )
 
 # The client-side ICD only needs wl_proxy_get_id to name the app's surface

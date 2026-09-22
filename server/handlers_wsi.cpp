@@ -1,17 +1,32 @@
-// Server-side WSI handlers: Wayland surface creation/destruction, every
+// Server-side WSI handlers: surface creation/destruction (Wayland on Linux,
+// a server-owned Win32 window on Windows - see own_window.hpp), every
 // vkGetPhysicalDeviceSurface*KHR query, and swapchain create/destroy/
 // get-images/acquire/present. See wayland/proxy_server.hpp for the embedded
-// compositor proxy these surface calls talk to.
+// compositor proxy the Linux surface calls talk to.
 
 #include <cstring>
 #include <vector>
 
+// windows.h's default (non-lean) mode drags in the legacy winsock.h, which
+// conflicts with wire.hpp's winsock2.h if windows.h is reached first in this
+// translation unit (as it is here, via vulkan.h's VK_USE_PLATFORM_WIN32_KHR
+// path below); defining this before that include keeps them from
+// conflicting regardless of which of the two ends up included first (see
+// client/wsi.cpp lines 20-31 for the same pattern on the client side).
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define VK_USE_PLATFORM_WIN32_KHR
+#else
+#define VK_USE_PLATFORM_WAYLAND_KHR
+#endif
+
 #include <vulkan/vulkan.h>
-#include <vulkan/vulkan_wayland.h>
 
 #include "marshal.hpp"
 #include "own_window.hpp"
+#if !defined(_WIN32)
 #include "proxy_server.hpp"
+#endif
 #include "session.hpp"
 
 namespace {
@@ -21,6 +36,7 @@ using remoting::Session;
 using remoting::Status;
 using remoting::mark_oneway_error;
 
+#if !defined(_WIN32)
 void handle_CreateWaylandSurfaceKHR(Session& c) {
     const uint32_t app_object_id = c.reader.u32();
     if (!c.reader.ok()) {
@@ -67,17 +83,28 @@ void handle_CreateWaylandSurfaceKHR(Session& c) {
     c.writer.handle(result == VK_SUCCESS ? c.tables.surfaces.add(vk_surface) : 0);
     c.reply();
 }
+#endif  // !defined(_WIN32)
 
 void handle_CreateWin32SurfaceKHR(Session& c) {
-    // hinstance/hwnd name a window in the Win32 world only; there is nothing
-    // to translate them into here, since a future Win32 client has no
-    // Wayland surface of its own to hand over. Both are still read, never
-    // used, purely to keep the wire reader in sync with what the client
-    // sent.
     const uint64_t hinstance = c.reader.u64();
     const uint64_t hwnd = c.reader.u64();
+#if defined(_WIN32)
+    // On a Windows server there is no application HINSTANCE/HWND worth
+    // trusting either - the client and server are different machines, so
+    // the client's handles are meaningless in this process - hence the
+    // server-owned window below rather than anything derived from these two
+    // values. Both are still read, never used, purely to keep the wire
+    // reader in sync with what the client sent.
     (void)hinstance;
     (void)hwnd;
+#else
+    // hinstance/hwnd name a window in the Win32 world only; there is nothing
+    // to translate them into here, since a Win32 client has no Wayland
+    // surface of its own to hand over. Both are still read, never used,
+    // purely to keep the wire reader in sync with what the client sent.
+    (void)hinstance;
+    (void)hwnd;
+#endif
     if (!c.reader.ok()) {
         c.writer.u32(static_cast<uint32_t>(Status::Ok));
         c.writer.i32(VK_ERROR_INITIALIZATION_FAILED);
@@ -88,21 +115,27 @@ void handle_CreateWin32SurfaceKHR(Session& c) {
     OwnWindow* window = c.server.create_own_window();
     if (!window) {
         fprintf(stderr,
-                "server: vkCreateWin32SurfaceKHR: could not create a server-owned Wayland window "
-                "(no compositor?)\n");
+                "server: vkCreateWin32SurfaceKHR: could not create a server-owned window\n");
         c.writer.u32(static_cast<uint32_t>(Status::Ok));
         c.writer.i32(VK_ERROR_INITIALIZATION_FAILED);
         c.writer.handle(0);
         return;
     }
 
+    VkSurfaceKHR vk_surface = VK_NULL_HANDLE;
+#if defined(_WIN32)
+    VkWin32SurfaceCreateInfoKHR info{};
+    info.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+    info.hinstance = window->hinstance();
+    info.hwnd = window->hwnd();
+    const VkResult result = vkCreateWin32SurfaceKHR(c.server.instance(), &info, nullptr, &vk_surface);
+#else
     VkWaylandSurfaceCreateInfoKHR info{};
     info.sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR;
     info.display = window->display();
     info.surface = window->surface();
-
-    VkSurfaceKHR vk_surface = VK_NULL_HANDLE;
     const VkResult result = vkCreateWaylandSurfaceKHR(c.server.instance(), &info, nullptr, &vk_surface);
+#endif
     c.writer.u32(static_cast<uint32_t>(Status::Ok));
     c.writer.i32(result);
     c.writer.handle(result == VK_SUCCESS ? c.tables.surfaces.add(vk_surface) : 0);
@@ -119,6 +152,7 @@ void handle_DestroySurfaceKHR(Session& c) {
     if (surface != VK_NULL_HANDLE) vkDestroySurfaceKHR(c.server.instance(), surface, nullptr);
 }
 
+#if !defined(_WIN32)
 void handle_GetPhysicalDeviceWaylandPresentationSupportKHR(Session& c) {
     const uint64_t pd_id = c.reader.handle();
     VkPhysicalDevice physdev = c.server.physical_device_from_id(pd_id);
@@ -141,6 +175,7 @@ void handle_GetPhysicalDeviceWaylandPresentationSupportKHR(Session& c) {
     c.writer.u32(supported ? 1 : 0);
     c.reply();
 }
+#endif  // !defined(_WIN32)
 
 void handle_GetPhysicalDeviceSurfaceSupportKHR(Session& c) {
     const uint64_t pd_id = c.reader.handle();
@@ -351,11 +386,15 @@ void handle_QueuePresentKHR(Session& c) {
 
 }  // namespace
 
+#if !defined(_WIN32)
 REGISTER_HANDLER(vkCreateWaylandSurfaceKHR, handle_CreateWaylandSurfaceKHR);
+#endif
 REGISTER_HANDLER(vkCreateWin32SurfaceKHR, handle_CreateWin32SurfaceKHR);
 REGISTER_HANDLER(vkDestroySurfaceKHR, handle_DestroySurfaceKHR);
+#if !defined(_WIN32)
 REGISTER_HANDLER(vkGetPhysicalDeviceWaylandPresentationSupportKHR,
                   handle_GetPhysicalDeviceWaylandPresentationSupportKHR);
+#endif
 REGISTER_HANDLER(vkGetPhysicalDeviceSurfaceSupportKHR, handle_GetPhysicalDeviceSurfaceSupportKHR);
 REGISTER_HANDLER(vkGetPhysicalDeviceSurfaceCapabilitiesKHR,
                   handle_GetPhysicalDeviceSurfaceCapabilitiesKHR);

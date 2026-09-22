@@ -7,55 +7,99 @@
 
 #define VK_USE_PLATFORM_WAYLAND_KHR
 
+// windows.h's default (non-lean) mode drags in the legacy winsock.h, which
+// conflicts with wire.hpp's winsock2.h if windows.h is reached first in this
+// translation unit; defining this before any include - including wire.hpp
+// itself, reached transitively through session.hpp below - keeps that from
+// happening regardless of what pulls windows.h in first (see client/wsi.cpp
+// lines 20-31 for the same reasoning on the client side).
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #include <string>
 #include <thread>
 
+#if !defined(_WIN32)
 #include "proxy_server.hpp"
+#endif
 #include "remoting_commands.inl"
 #include "session.hpp"
+#include "wire.hpp"
 
 namespace {
 
 void on_signal(int) { g_stop.store(true); }
 
-int listen_on(const std::string& address, uint16_t port) {
-    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
+// True for whatever this platform's accept() reports as "the call was
+// interrupted, try again" - a signal on POSIX; Windows has no EINTR at all,
+// so there is nothing to retry there.
+bool accept_was_interrupted() {
+#if defined(_WIN32)
+    return false;
+#else
+    return errno == EINTR;
+#endif
+}
+
+remoting::socket_t listen_on(const std::string& address, uint16_t port) {
+    // main.cpp opens this listening socket directly, without ever going
+    // through connect_to() first, so Winsock would otherwise never get
+    // started on a server process (see wire.hpp's ensure_sockets_initialised).
+    remoting::ensure_sockets_initialised();
+
+    const remoting::socket_t fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd == remoting::kInvalidSocket) {
+#if defined(_WIN32)
+        fprintf(stderr, "server: socket failed: WSA error %d\n", WSAGetLastError());
+#else
         fprintf(stderr, "server: socket failed: %s\n", strerror(errno));
-        return -1;
+#endif
+        return remoting::kInvalidSocket;
     }
 
     const int one = 1;
-    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&one), sizeof(one));
 
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     if (::inet_pton(AF_INET, address.c_str(), &addr.sin_addr) != 1) {
         fprintf(stderr, "server: bad address '%s'\n", address.c_str());
-        ::close(fd);
-        return -1;
+        remoting::close_socket(fd);
+        return remoting::kInvalidSocket;
     }
 
     if (::bind(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+#if defined(_WIN32)
+        fprintf(stderr, "server: bind failed: WSA error %d\n", WSAGetLastError());
+#else
         fprintf(stderr, "server: bind failed: %s\n", strerror(errno));
-        ::close(fd);
-        return -1;
+#endif
+        remoting::close_socket(fd);
+        return remoting::kInvalidSocket;
     }
     if (::listen(fd, 4) < 0) {
+#if defined(_WIN32)
+        fprintf(stderr, "server: listen failed: WSA error %d\n", WSAGetLastError());
+#else
         fprintf(stderr, "server: listen failed: %s\n", strerror(errno));
-        ::close(fd);
-        return -1;
+#endif
+        remoting::close_socket(fd);
+        return remoting::kInvalidSocket;
     }
     return fd;
 }
@@ -91,30 +135,45 @@ int main(int argc, char** argv) {
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
+#if !defined(_WIN32)
     signal(SIGPIPE, SIG_IGN);
+#endif
 
     Server server;
     if (!server.init_vulkan(validate, want_wayland)) return 1;
 
+#if defined(_WIN32)
+    // The embedded Wayland proxy (see wayland/proxy_server.hpp) only ever
+    // makes sense on the machine that owns a real compositor connection,
+    // which a Windows server is not; CMakeLists.txt does not even build that
+    // code into this target on Windows (see its `if(NOT WIN32)` block), so
+    // there is nothing here for --wayland to start.
+    if (want_wayland) {
+        fprintf(stderr, "server: --wayland is not available in a Windows server build\n");
+        return 1;
+    }
+#else
     // Without --wayland the server behaves exactly as it always has: no
     // VK_KHR_surface/VK_KHR_wayland_surface were even requested above, so the
     // offscreen path is untouched.
     if (want_wayland && !server.start_wayland(wayland_port)) return 1;
+#endif
 
-    const int listen_fd = listen_on(address, port);
-    if (listen_fd < 0) return 1;
+    const remoting::socket_t listen_fd = listen_on(address, port);
+    if (listen_fd == remoting::kInvalidSocket) return 1;
 
     fprintf(stderr, "server: listening on %s:%u (command set %s)\n", address.c_str(),
             static_cast<unsigned>(port), remoting::kCommandSetDigest);
 
     while (!g_stop.load()) {
-        const int fd = ::accept(listen_fd, nullptr, nullptr);
-        if (fd < 0) {
-            if (errno == EINTR) continue;
+        const remoting::socket_t fd = ::accept(listen_fd, nullptr, nullptr);
+        if (fd == remoting::kInvalidSocket) {
+            if (accept_was_interrupted()) continue;
             break;
         }
         const int one = 1;
-        ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+        ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&one),
+                     sizeof(one));
         // One VkInstance is one connection, and a single process can hold
         // several open at once (CTS's CustomInstanceTest keeps its default
         // instance alive while asking for a differently-configured one for a
@@ -127,12 +186,14 @@ int main(int argc, char** argv) {
         // detached std::thread.
         std::thread([&server, fd] {
             server.serve(fd);
-            ::close(fd);
+            remoting::close_socket(fd);
         }).detach();
     }
 
+#if !defined(_WIN32)
     server.stop_wayland();
-    ::close(listen_fd);
+#endif
+    remoting::close_socket(listen_fd);
     fprintf(stderr, "server: stopped\n");
     return 0;
 }

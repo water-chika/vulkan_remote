@@ -156,4 +156,13 @@ socket_t connect_to(const std::string& host, uint16_t port);
 // Windows keeps ::close for CRT file descriptors, not SOCKETs).
 void close_socket(socket_t fd);
 
+// Runs WSAStartup exactly once per process (a no-op on POSIX). Winsock
+// requires this before any socket call at all, including the very first
+// ::socket()/::bind()/::listen() a listening server makes, not just the
+// ::connect() path connect_to() below already covers - so any translation
+// unit that opens a socket directly (see server/main.cpp's listen_on) must
+// call this first instead of assuming connect_to() already ran on this
+// process.
+void ensure_sockets_initialised();
+
 }  // namespace remoting
