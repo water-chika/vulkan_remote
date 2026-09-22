@@ -43,6 +43,69 @@ VK_DRIVER_FILES=$PWD/build/vulkan_remoting_icd.json \
 VK_REMOTING_HOST=<gpu-machine> vkcube                        # other machine
 ```
 
+### Running the client on Windows
+
+The client half builds for Windows; the server half does not, and is not
+meant to. The split is the point: the server is where the GPU and the
+compositor are, so it stays Linux/Wayland, and a Windows box is a *client*
+needing no GPU of its own. Since the server owns the window, the Windows
+client links no libwayland at all.
+
+Cross-built from Linux, which is how the DLL below was produced:
+
+```sh
+mkdir -p /tmp/vkinc && ln -s /usr/include/vulkan /usr/include/vk_video /tmp/vkinc/
+x86_64-w64-mingw32-g++ -std=c++17 -O2 -shared -I/tmp/vkinc \
+    -Icommon -Iclient -Ibuild -o vulkan_remoting_icd.dll \
+    client/*.cpp common/wire.cpp common/marshal.cpp -lws2_32
+```
+
+Pass only the Vulkan headers, not `-I/usr/include`: the latter puts glibc's
+`stdlib.h` ahead of mingw's and the build dies on a redefined `div_t`.
+
+Installing it on the Windows machine is three steps, because the Vulkan
+loader finds a driver differently there than on Linux:
+
+1. Put `vulkan_remoting_icd.dll` anywhere readable, say `C:\vulkan_remoting\`.
+2. Write an ICD manifest next to it, `C:\vulkan_remoting\icd.json`, whose
+   `library_path` is the DLL. A relative path is resolved against the JSON's
+   own directory, so `"library_path": "vulkan_remoting_icd.dll"` is enough:
+
+   ```json
+   {"file_format_version": "1.0.0",
+    "ICD": {"library_path": "vulkan_remoting_icd.dll", "api_version": "1.0.0"}}
+   ```
+
+3. Tell the loader the manifest exists, by adding a `REG_DWORD` value named
+   for its full path, set to 0, under
+   `HKLM\SOFTWARE\Khronos\Vulkan\Drivers` (`HKCU` works and needs no
+   administrator):
+
+   ```
+   reg add HKCU\SOFTWARE\Khronos\Vulkan\Drivers /v C:\vulkan_remoting\icd.json /t REG_DWORD /d 0
+   ```
+
+   `VK_DRIVER_FILES=C:\vulkan_remoting\icd.json` skips the registry and is
+   the better way to try it once. Note that the loader ignores that variable
+   for *elevated* processes, which includes anything launched over a plain
+   ssh session on Windows; if the driver seems to be ignored, that is the
+   first thing to check.
+
+Then point it at the Linux server, which must already be running:
+
+```
+set VK_REMOTING_HOST=<gpu-machine>
+vkcube.exe
+```
+
+Unproven: the Windows client compiles, links, and exports both loader entry
+points (`vk_icdGetInstanceProcAddr`,
+`vk_icdNegotiateLoaderICDInterfaceVersion`), but has never been loaded by the
+Windows loader or run against a server. Both peers also blit whole Vulkan
+structs over the wire, so they must agree on the struct ABI - Windows and
+Linux on x86-64 do, but a 32-bit or ARM peer would misread every struct with
+no handshake failure to warn it.
+
 ## What works
 
 - `tools/offscreen` renders a triangle and reads it back: output is

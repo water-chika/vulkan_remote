@@ -102,7 +102,7 @@ target_link_libraries(vulkan_remoting_probe PRIVATE vulkan_remoting_wire)
 # Windows is how the loader is told to look at it at all. On Linux the
 # loader finds this file through VK_ICD_FILENAMES or the standard
 # /usr/share/vulkan/icd.d search path, but on Windows it instead reads a
-# REG_SZ value named after this JSON's path under the registry key
+# REG_DWORD value (data 0) named after this JSON's path under the registry key
 # HKLM\SOFTWARE\Khronos\Vulkan\Drivers (or the HKCU equivalent) - creating
 # that value is a one-time step for whoever installs this driver, and CMake
 # has no business writing to the registry to do it.
