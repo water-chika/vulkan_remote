@@ -48,6 +48,11 @@ class Table {
 
     size_t size() const { return m_slots.size(); }
 
+    // For teardown, which has to walk everything that was ever added. Slots
+    // emptied by take() read back as VK_NULL_HANDLE, so a caller must skip
+    // those rather than assume every slot is live.
+    const std::vector<T>& all() const { return m_slots; }
+
    private:
     std::vector<T> m_slots;
 };
@@ -77,6 +82,11 @@ struct ObjectTables final : public HandleResolver {
     Table<VkFence> fences;
     Table<VkSurfaceKHR> surfaces;
     Table<VkSwapchainKHR> swapchains;
+
+    // A swapchain can only be destroyed through the device that created it,
+    // and nothing in the handle it is given carries that back, so teardown
+    // would otherwise have no way to clean one up.
+    std::unordered_map<VkSwapchainKHR, VkDevice> swapchain_devices;
 
     // GetSwapchainImagesKHR is idempotent on the real driver (same VkImages
     // every call), but Table::add is not - calling it twice for the same

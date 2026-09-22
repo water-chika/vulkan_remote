@@ -328,6 +328,7 @@ void handle_CreateSwapchainKHR(Session& c) {
     }
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
     const VkResult result = vkCreateSwapchainKHR(device, &info, nullptr, &swapchain);
+    if (result == VK_SUCCESS) c.tables.swapchain_devices[swapchain] = device;
     c.writer.u32(static_cast<uint32_t>(Status::Ok));
     c.writer.i32(result);
     c.writer.handle(result == VK_SUCCESS ? c.tables.swapchains.add(swapchain) : 0);

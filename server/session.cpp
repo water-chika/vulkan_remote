@@ -275,8 +275,38 @@ VkPhysicalDevice Server::physical_device_from_id(uint64_t id) const {
     return m_physical_devices[id - 1];
 }
 
-void Server::serve(remoting::socket_t fd) {
-    fprintf(stderr, "server: client connected\n");
+namespace {
+
+// Destroy what one connection created, in an order Vulkan allows: a
+// swapchain must go before the surface it presents to (the spec says so
+// outright, VUID-vkDestroySurfaceKHR-surface-01266), and the device must be
+// idle before either, or the objects are still in use by work in flight.
+//
+// Before this, a disconnect destroyed nothing at all: the tables simply went
+// out of scope, and their handles with them. Every swapchain, surface and
+// wl_buffer of every connection leaked for the server's whole life, which is
+// what kept a compositor window alive after the client that owned it was
+// gone, and what produced 'queue destroyed while proxies still attached'
+// with fourteen objects still on it.
+void destroy_session_objects(remoting::ObjectTables& tables, VkInstance instance) {
+    for (VkSwapchainKHR swapchain : tables.swapchains.all()) {
+        if (swapchain == VK_NULL_HANDLE) continue;
+        const auto it = tables.swapchain_devices.find(swapchain);
+        if (it == tables.swapchain_devices.end() || it->second == VK_NULL_HANDLE) continue;
+        vkDeviceWaitIdle(it->second);
+        vkDestroySwapchainKHR(it->second, swapchain, nullptr);
+    }
+    tables.swapchain_devices.clear();
+
+    for (VkSurfaceKHR surface : tables.surfaces.all()) {
+        if (surface == VK_NULL_HANDLE) continue;
+        vkDestroySurfaceKHR(instance, surface, nullptr);
+    }
+}
+
+}  // namespace
+
+void Server::serve(remoting::socket_t fd) {    fprintf(stderr, "server: client connected\n");
     remoting::ObjectTables tables;
     uint32_t oneway_errors = 0;
     g_current_error_counter = &oneway_errors;
@@ -304,9 +334,13 @@ void Server::serve(remoting::socket_t fd) {
         // mismatch; the original code returned from Server::serve() right
         // there, skipping the "client disconnected" log and the error-counter
         // cleanup below, so this preserves that exactly.
-        if (session.close_connection) return;
+        if (session.close_connection) {
+            destroy_session_objects(tables, instance());
+            return;
+        }
     }
 
+    destroy_session_objects(tables, instance());
     g_current_error_counter = nullptr;
     fprintf(stderr, "server: client disconnected\n");
 }
