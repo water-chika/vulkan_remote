@@ -147,6 +147,23 @@ project carries no crypto of its own:
 
 ```sh
 ./build/vulkan_remoting_server --validate --wayland        # GPU machine, loopback only
+python3 tools/remoting_run.py user@gpu-machine -- vkcube   # client machine, one command
+```
+
+`remoting_run.py` is not specific to vkcube, or to any program: the client is
+an ICD, so anything that loads the Vulkan loader is remoted without knowing
+it. Whatever follows `--` is launched with the environment already right - it
+generates the ICD manifest with an absolute `library_path`, sets both
+`VK_ICD_FILENAMES` and `VK_DRIVER_FILES`, opens the tunnel, and closes it
+afterwards. On Windows it also refuses to run elevated, since the loader
+would silently ignore the driver. Those are the three ways this setup
+actually fails in practice, so the script removes them rather than
+documenting them.
+
+The steps it automates, if you would rather run them yourself:
+
+```sh
+./build/vulkan_remoting_server --validate --wayland        # GPU machine, loopback only
 python3 tools/remoting_tunnel.py open user@gpu-machine     # client machine
 VK_DRIVER_FILES=$PWD/build/vulkan_remoting_icd.json \
 VK_REMOTING_HOST=127.0.0.1 vkcube
