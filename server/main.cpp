@@ -142,9 +142,23 @@ int main(int argc, char** argv) {
         }
     }
 
+#if defined(_WIN32)
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
-#if !defined(_WIN32)
+#else
+    // Deliberately sigaction() with sa_flags = 0 rather than signal().
+    // glibc's signal() is the BSD flavour, which sets SA_RESTART, and a
+    // restarting accept() never comes back to the top of the loop to notice
+    // that on_signal() set g_stop - so Ctrl+C set the flag and the server
+    // carried on waiting for a connection that was never going to arrive.
+    // Without SA_RESTART the accept() fails with EINTR, and the loop below
+    // re-tests g_stop on the way round.
+    struct sigaction sa{};
+    sa.sa_handler = on_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
     signal(SIGPIPE, SIG_IGN);
 #endif
 
