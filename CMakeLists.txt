@@ -301,4 +301,28 @@ target_sources(vulkan_remoting_server PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-client-protocol.h
 )
 target_include_directories(vulkan_remoting_server PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+# The compositor callbacks are static and take their instance through the
+# void* libwayland passes them, so they can be driven directly with no
+# display, no compositor and no GPU - which is how two shipped bugs in them
+# (a dropped height and a close that did nothing) are now caught at build
+# time rather than by a tester with a Win32 client. own_window.cpp is
+# compiled in again rather than shared with the server target because that
+# target is an executable, not a library.
+add_executable(vulkan_remoting_test_own_window
+    tests/test_own_window.cpp
+    server/own_window.cpp
+    ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-client-protocol.h
+)
+target_include_directories(vulkan_remoting_test_own_window PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/server
+    ${CMAKE_CURRENT_BINARY_DIR}
+    ${WAYLAND_CLIENT_INCLUDE_DIRS}
+)
+target_link_libraries(vulkan_remoting_test_own_window PRIVATE
+    vulkan_remoting_wayland_proxy_server
+    ${WAYLAND_CLIENT_LIBRARIES}
+    Threads::Threads
+)
+add_test(NAME own_window COMMAND vulkan_remoting_test_own_window)
+
 endif()  # NOT WIN32
