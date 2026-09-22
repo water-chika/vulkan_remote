@@ -55,7 +55,7 @@ Cross-built from Linux, which is how the DLL below was produced:
 
 ```sh
 mkdir -p /tmp/vkinc && ln -s /usr/include/vulkan /usr/include/vk_video /tmp/vkinc/
-x86_64-w64-mingw32-g++ -std=c++17 -O2 -shared -I/tmp/vkinc \
+x86_64-w64-mingw32-g++ -std=c++17 -O2 -shared -static -I/tmp/vkinc \
     -Icommon -Iclient -Ibuild -o vulkan_remoting_icd.dll \
     client/*.cpp common/wire.cpp common/marshal.cpp -lws2_32
 ```
@@ -63,33 +63,59 @@ x86_64-w64-mingw32-g++ -std=c++17 -O2 -shared -I/tmp/vkinc \
 Pass only the Vulkan headers, not `-I/usr/include`: the latter puts glibc's
 `stdlib.h` ahead of mingw's and the build dies on a redefined `div_t`.
 
+`-static` is not optional, and is the fix for a real failure. Without it the
+DLL imports `libstdc++-6.dll`, `libgcc_s_seh-1.dll` and
+`libwinpthread-1.dll`, none of which ship with Windows, and `LoadLibrary`
+then fails with **error 126**. That error names only the module it was asked
+to load, never the dependency that was actually missing, so it reads as
+"your ICD is broken" when the ICD is fine. Copying those three DLLs alongside
+also works, but an ICD is loaded into another program's process, so the
+search runs on the host's terms; a host that already loaded a different
+`libstdc++-6.dll` gives an ABI mismatch instead of an honest failure.
+`cmake` does this for you (see the `if(WIN32)` block); the statically linked
+DLL imports only `KERNEL32`, `WS2_32` and the UCRT, and is 2.7 MB against
+438 KB.
+
 Installing it on the Windows machine is three steps, because the Vulkan
 loader finds a driver differently there than on Linux:
 
 1. Put `vulkan_remoting_icd.dll` anywhere readable, say `C:\vulkan_remoting\`.
 2. Write an ICD manifest next to it, `C:\vulkan_remoting\icd.json`, whose
-   `library_path` is the DLL. A relative path is resolved against the JSON's
-   own directory, so `"library_path": "vulkan_remoting_icd.dll"` is enough:
+   `library_path` is an **absolute** path to the DLL:
 
    ```json
    {"file_format_version": "1.0.0",
-    "ICD": {"library_path": "vulkan_remoting_icd.dll", "api_version": "1.0.0"}}
+    "ICD": {"library_path": "C:\\vulkan_remoting\\vulkan_remoting_icd.dll",
+            "api_version": "1.0.0"}}
    ```
 
-3. Tell the loader the manifest exists, by adding a `REG_DWORD` value named
-   for its full path, set to 0, under
-   `HKLM\SOFTWARE\Khronos\Vulkan\Drivers` (`HKCU` works and needs no
-   administrator):
+   The spec says a relative `library_path` resolves against the manifest's
+   own directory, and this document used to claim so, but in practice on
+   Windows a relative path was not found and an absolute one was needed. Note
+   that this ICD cannot paper over that itself: `library_path` is read by the
+   loader in order to decide what to load, so our code does not exist yet at
+   the moment the path is resolved. Whoever writes the manifest has to get it
+   right.
+
+3. Point the loader at that manifest. Set **both** variables, to the absolute
+   path of the JSON - `VK_ICD_FILENAMES` is the older name and some loaders
+   still honour only it:
 
    ```
-   reg add HKCU\SOFTWARE\Khronos\Vulkan\Drivers /v C:\vulkan_remoting\icd.json /t REG_DWORD /d 0
+   set VK_ICD_FILENAMES=C:\vulkan_remoting\icd.json
+   set VK_DRIVER_FILES=C:\vulkan_remoting\icd.json
    ```
 
-   `VK_DRIVER_FILES=C:\vulkan_remoting\icd.json` skips the registry and is
-   the better way to try it once. Note that the loader ignores that variable
-   for *elevated* processes, which includes anything launched over a plain
-   ssh session on Windows; if the driver seems to be ignored, that is the
-   first thing to check.
+   The loader **ignores both for elevated processes**, and a plain `ssh`
+   session on Windows lands elevated in session 0, where they are silently
+   dropped. The run that proved this client worked used a non-elevated
+   session-1 launch; if the driver appears to be ignored, check this first.
+
+   There is also a registry route - a `REG_DWORD` named for the manifest's
+   full path, data 0, under `HKLM\SOFTWARE\Khronos\Vulkan\Drivers` or the
+   `HKCU` equivalent - which avoids the environment entirely. It is
+   *untested* here: the working run used the variables above, not the
+   registry.
 
 Then point it at the Linux server, which must already be running:
 
@@ -98,19 +124,23 @@ set VK_REMOTING_HOST=<gpu-machine>
 vkcube.exe
 ```
 
-Unproven: the Windows client compiles, links, and exports both loader entry
-points (`vk_icdGetInstanceProcAddr`,
-`vk_icdNegotiateLoaderICDInterfaceVersion`), but has never been loaded by the
-Windows loader or run against a server. Both peers also blit whole Vulkan
-structs over the wire, so they must agree on the struct ABI - Windows and
-Linux on x86-64 do, but a 32-bit or ARM peer would misread every struct with
-no handshake failure to warn it.
+Proven on a Windows client against a Linux server: the DLL loads, connects
+over TCP, and `vulkaninfo.exe --summary` enumerates the server's real GPUs by
+their exact names - which is also a struct-ABI check, since those names
+arrive as real values rather than garbage. Both peers blit whole Vulkan
+structs over the wire, so they must agree on that ABI; Windows and Linux on
+x86-64 do, but a 32-bit or ARM peer would misread every struct with no
+handshake failure to warn it. Not yet exercised from Windows: presenting a
+window, and so any frame rate figure.
 
 ## What works
 
 - `tools/offscreen` renders a triangle and reads it back: output is
   **byte-identical** whether run on the system driver or through this one.
 - `vkcube` runs, with its window on the remote compositor.
+- The Windows client works against the Linux server: the DLL loads, connects,
+  and `vulkaninfo.exe --summary` enumerates the server's GPUs by exact name.
+  Presenting a window from Windows is not yet exercised.
 - CTS results drift as the suite grows and commands get implemented, so the
   pass/fail count is not pinned here. `tests/cts_baseline.txt` is the known-
   passing set (`dEQP-VK.api.smoke.*` and `dEQP-VK.api.info.*` so far); run

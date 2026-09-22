@@ -88,6 +88,23 @@ if(WIN32)
     # the same way they define VK_USE_PLATFORM_WAYLAND_KHR for a Linux build,
     # so doing it again from CMake would just be a duplicate-definition
     # warning waiting to happen.
+
+    # Static runtime, deliberately. A GCC-built DLL imports libstdc++-6.dll,
+    # libgcc_s_seh-1.dll and libwinpthread-1.dll, none of which ship with
+    # Windows; without them LoadLibrary fails with error 126, which names
+    # only the module it was asked for and never the dependency that was
+    # actually missing. That cost a tester a debugging session already.
+    #
+    # Shipping those three DLLs alongside is the other option and is worse
+    # here: an ICD is loaded into somebody else's process, so the search
+    # happens on the *host* program's terms, and a host that already loaded
+    # a different libstdc++-6.dll gives an ABI mismatch instead of an honest
+    # failure. 2.7 MB against 438 KB buys a DLL that cannot fail this way.
+    # What remains imported is the UCRT (api-ms-win-crt-*), which is part of
+    # the OS from Windows 10 on.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_link_options(vulkan_remoting_icd PRIVATE -static)
+    endif()
 endif()
 
 # The probe links no Vulkan at all, which keeps it honest about what actually
