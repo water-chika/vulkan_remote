@@ -53,6 +53,29 @@ def read_opcode(build_dir, name):
     return int(match.group(1))
 
 
+def unhandled_opcode(build_dir):
+    """A real Vulkan command the server has no handler for, found rather than named.
+
+    Naming one here dates the test: this asserted on vkCreateBuffer, and the day
+    that handler was written the test stopped exercising the unsupported path and
+    started hanging on a real reply that never came.
+    """
+    server_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'server')
+    registered = set()
+    for entry in sorted(os.listdir(server_dir)):
+        if entry.endswith('.cpp'):
+            with open(os.path.join(server_dir, entry)) as handle:
+                registered.update(re.findall(r'REGISTER_HANDLER\(\s*([A-Za-z0-9_]+)', handle.read()))
+
+    with open(os.path.join(build_dir, 'remoting_commands.inl')) as handle:
+        table = re.findall(r'^\s*(vk[A-Za-z0-9_]+) = (\d+),', handle.read(), re.M)
+
+    for name, opcode in table:
+        if name not in registered:
+            return name, int(opcode)
+    raise Failure('every command has a handler; this test needs a new premise')
+
+
 def encode_string(text):
     raw = text.encode('utf-8')
     return struct.pack('<I', len(raw)) + raw
@@ -161,12 +184,13 @@ def test_unknown_opcode_is_reported(server, build_dir):
         if handshake(sock, read_digest(build_dir)) != STATUS_OK:
             raise Failure('handshake failed')
 
-        send_message(sock, read_opcode(build_dir, 'vkCreateBuffer'), b'\x00' * 8)
+        name, unhandled = unhandled_opcode(build_dir)
+        send_message(sock, unhandled, b'\x00' * 8)
         opcode, payload = recv_message(sock)
         if opcode is None:
-            raise Failure('server closed the connection on an unimplemented command')
+            raise Failure('server closed the connection on ' + name)
         if decode_u32(payload) != STATUS_UNSUPPORTED:
-            raise Failure('unimplemented command did not report UnsupportedCommand')
+            raise Failure('{} did not report UnsupportedCommand'.format(name))
 
 
 def test_reserved_opcode_zero_is_rejected(server, build_dir):
