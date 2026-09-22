@@ -14,8 +14,14 @@
 #include <errno.h>
 #include <string.h>
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
+#include <mutex>
+#include <thread>
 #include <unordered_map>
 
 #include "own_window.hpp"
@@ -304,12 +310,103 @@ void destroy_session_objects(remoting::ObjectTables& tables, VkInstance instance
     }
 }
 
+// A stalled server is indistinguishable from an idle one from the outside:
+// both are a process that is alive and reading nothing. That ambiguity cost a
+// whole Windows round trip, where all the evidence available (a frozen 5920
+// byte receive queue, no read syscalls on any of 58 threads) established only
+// that the server had stopped servicing the connection, and nothing at all
+// about where it had stopped.
+//
+// So the server says so itself. While a handler runs, its opcode and start
+// time are published here; a watchdog names any handler that has not returned
+// within the deadline. If it is blocked, the log names the exact command, and
+// a second line every deadline afterwards distinguishes "slow" from "never
+// coming back". If instead the server is genuinely idle, nothing is printed,
+// which is the other half of the answer.
+class StallWatchdog {
+public:
+    explicit StallWatchdog(double deadline_seconds)
+        : deadline_(deadline_seconds), thread_([this] { run(); }) {}
+
+    ~StallWatchdog() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stop_ = true;
+        }
+        cv_.notify_all();
+        thread_.join();
+    }
+
+    void enter(remoting::Opcode opcode) {
+        start_ = Clock::now();
+        opcode_.store(static_cast<uint32_t>(opcode), std::memory_order_relaxed);
+        running_.store(true, std::memory_order_release);
+    }
+
+    void leave() { running_.store(false, std::memory_order_release); }
+
+private:
+    using Clock = std::chrono::steady_clock;
+
+    void run() {
+        // Sampling, not instrumenting the fast path: a handler is only ever
+        // looked at from here, so an ordinary sub-millisecond command costs
+        // nothing and is never seen. The poll follows the deadline so that a
+        // short deadline is actually observable - with a fixed interval, any
+        // deadline below it could never be caught in the act.
+        const double interval = std::min(0.5, deadline_ / 2.0);
+        std::unique_lock<std::mutex> lock(mutex_);
+        unsigned reported = 0;
+        while (!stop_) {
+            cv_.wait_for(lock, std::chrono::duration<double>(interval),
+                         [this] { return stop_; });
+            if (stop_) break;
+            if (!running_.load(std::memory_order_acquire)) {
+                reported = 0;
+                continue;
+            }
+            const double elapsed =
+                std::chrono::duration<double>(Clock::now() - start_).count();
+            const unsigned overdue = static_cast<unsigned>(elapsed / deadline_);
+            if (overdue > reported) {
+                reported = overdue;
+                const auto opcode =
+                    static_cast<remoting::Opcode>(opcode_.load(std::memory_order_relaxed));
+                fprintf(stderr,
+                        "server: STALL: %s has not returned after %.2fs; the server is not "
+                        "reading the connection while this runs\n",
+                        remoting::opcode_name(opcode), elapsed);
+                fflush(stderr);
+            }
+        }
+    }
+
+    const double deadline_;
+    std::atomic<uint32_t> opcode_{0};
+    std::atomic<bool> running_{false};
+    Clock::time_point start_{};
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool stop_ = false;
+    std::thread thread_;
+};
+
+double stall_deadline_seconds() {
+    if (const char* env = getenv("VK_REMOTING_STALL_SECONDS")) {
+        const double value = atof(env);
+        if (value > 0.0) return value;
+    }
+    return 5.0;
+}
+
 }  // namespace
 
-void Server::serve(remoting::socket_t fd) {    fprintf(stderr, "server: client connected\n");
+void Server::serve(remoting::socket_t fd) {
+    fprintf(stderr, "server: client connected\n");
     remoting::ObjectTables tables;
     uint32_t oneway_errors = 0;
     g_current_error_counter = &oneway_errors;
+    StallWatchdog watchdog(stall_deadline_seconds());
 
     for (;;) {
         remoting::MessageHeader header{};
@@ -329,7 +426,9 @@ void Server::serve(remoting::socket_t fd) {    fprintf(stderr, "server: client c
             continue;
         }
 
+        watchdog.enter(opcode);
         handler(session);
+        watchdog.leave();
         // Only the Handshake handler ever sets this, on a command-set digest
         // mismatch; the original code returned from Server::serve() right
         // there, skipping the "client disconnected" log and the error-counter
