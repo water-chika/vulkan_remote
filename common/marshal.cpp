@@ -617,6 +617,10 @@ void write_CommandBufferAllocateInfo(Writer& w, const VkCommandBufferAllocateInf
 bool read_CommandBufferAllocateInfo(Reader& r, Arena&, const HandleResolver& hr,
                                      VkCommandBufferAllocateInfo* out) {
     if (!read_raw(r, out)) return false;
+    // Unlike the array-bearing structs, this count has no wire array whose
+    // length could bound it, so nothing else stops it before it sizes an
+    // allocation and is handed to the real driver to fill.
+    if (out->commandBufferCount > kMaxArrayElements) return false;
     patch_handle(&out->commandPool, [&](uint64_t id) { return hr.command_pool(id); });
     return true;
 }

@@ -119,11 +119,16 @@ void handle_DownloadMappedMemory(Session& c) {
     // std::length_error and kills the server. This is the same 64MB ceiling
     // recv_message already applies to a whole message.
     constexpr uint64_t kMaxRangeSize = 64ull * 1024u * 1024u;
+    uint64_t total = 0;
     for (const Range& range : ranges) {
-        if (range.size > kMaxRangeSize) {
+        // Bounding each range alone still lets many of them agree: a range
+        // costs 24 bytes to ask for and 64MB to answer, so the sum is what a
+        // peer can actually amplify. Subtracting keeps the test overflow-free.
+        if (range.size > kMaxRangeSize - total) {
             c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
             return;
         }
+        total += range.size;
     }
 
     c.writer.u32(static_cast<uint32_t>(Status::Ok));
