@@ -2,7 +2,9 @@
 
 #include <cstdio>
 #include <cstring>
+#include <thread>
 
+#include <poll.h>
 #include <wayland-client.h>
 #include <xdg-shell-client-protocol.h>
 
@@ -75,15 +77,12 @@ void OwnWindow::toplevel_close(void* data, xdg_toplevel*) {
 }
 
 void OwnWindow::pump() {
-    if (!display_) return;
-    // dispatch_pending only handles what has already been read off the
-    // socket, so it cannot block; the driver's own WSI reading is what puts
-    // events there. The flush pushes out the acks those handlers queued.
-    wl_display_dispatch_pending(display_);
-    wl_display_flush(display_);
+    // The dedicated pump thread owns this display after create() succeeds.
 }
 
 OwnWindow::~OwnWindow() {
+    stop_pump_.store(true);
+    if (pump_thread_.joinable()) pump_thread_.join();
     if (toplevel_) xdg_toplevel_destroy(toplevel_);
     if (xdg_surface_) xdg_surface_destroy(xdg_surface_);
     if (surface_) wl_surface_destroy(surface_);
@@ -131,5 +130,25 @@ bool OwnWindow::create() {
         fprintf(stderr, "server: own_window: compositor never configured the surface\n");
         return false;
     }
+
+    // The real driver's WSI can block in vkQueuePresentKHR waiting for the
+    // compositor. Keep this connection moving independently of the session
+    // thread, rather than relying on the next vkAcquireNextImageKHR to pump it.
+    pump_thread_ = std::thread([this] {
+        while (!stop_pump_.load()) {
+            std::lock_guard<std::mutex> lock(display_mutex_);
+            while (wl_display_prepare_read(display_) != 0) {
+                wl_display_dispatch_pending(display_);
+            }
+            wl_display_flush(display_);
+            pollfd pfd{wl_display_get_fd(display_), POLLIN, 0};
+            if (::poll(&pfd, 1, 1) > 0 && (pfd.revents & POLLIN)) {
+                wl_display_read_events(display_);
+            } else {
+                wl_display_cancel_read(display_);
+            }
+            wl_display_dispatch_pending(display_);
+        }
+    });
     return true;
 }

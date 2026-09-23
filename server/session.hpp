@@ -82,23 +82,19 @@ class Server {
     // --wayland, so it never touches m_wayland.
     OwnWindow* create_own_window();
 
-    // Remembers which server-owned window backs a given VkSurfaceKHR, so a
-    // later vkGetPhysicalDeviceSurfaceCapabilitiesKHR on that surface can
-    // answer with the size the compositor actually gave the window rather
-    // than the driver's "you choose" sentinel.
+    // Associates a Vulkan surface with its server-owned window. Removing the
+    // association also destroys that window, so failed creates and normal
+    // vkDestroySurfaceKHR calls do not leave compositor objects behind.
     void associate_surface(VkSurfaceKHR surface, OwnWindow* window);
+    void discard_own_window(OwnWindow* window);
+    void release_surface_window(VkSurfaceKHR surface);
     OwnWindow* window_for_surface(VkSurfaceKHR surface);
 
-    // Dispatches every server-owned window's pending events and reports
-    // whether any of them has been resized since the last call, clearing
-    // that state. Deliberately not per-swapchain: vkAcquireNextImageKHR is
-    // given a swapchain, and nothing here maps one back to its surface, so
-    // with more than one window open this errs towards telling a client its
-    // swapchain is suboptimal when it is another window that moved. That is
-    // harmless - VK_SUBOPTIMAL_KHR is advisory and costs a recreate - while
-    // the opposite error, staying silent, is the bug this exists to fix.
-    bool poll_windows_resized();
-    bool poll_windows_closed();
+    // Dispatches and reads state only for the window backing this surface. A
+    // resize or close on one client's window must never affect another
+    // client's swapchain.
+    bool poll_window_resized(VkSurfaceKHR surface);
+    bool poll_window_closed(VkSurfaceKHR surface);
 
     // Handles cross the wire as indices, never as pointers. A VkPhysicalDevice
     // is a host pointer; sending its bits would be meaningless remotely and

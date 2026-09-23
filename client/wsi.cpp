@@ -245,14 +245,16 @@ VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceFormatsKHR(VkPhysicalDevi
     reader.u32();  // status
     const VkResult remote_result = static_cast<VkResult>(reader.i32());
     const uint32_t count = reader.u32();
+    if (count > reader.remaining() / (2 * sizeof(uint32_t))) {
+        *pCount = 0;
+        return VK_ERROR_SURFACE_LOST_KHR;
+    }
     std::vector<VkSurfaceFormatKHR> formats(count);
     for (uint32_t i = 0; i < count; ++i) {
-        std::vector<char> raw;
-        if (!reader.bytes(&raw) || raw.size() != sizeof(VkSurfaceFormatKHR)) {
+        if (!read_SurfaceFormatKHR(reader, &formats[i])) {
             *pCount = 0;
             return VK_ERROR_SURFACE_LOST_KHR;
         }
-        memcpy(&formats[i], raw.data(), sizeof(VkSurfaceFormatKHR));
     }
     if (!reader.ok()) {
         *pCount = 0;

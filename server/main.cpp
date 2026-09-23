@@ -30,8 +30,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #if !defined(_WIN32)
 #include "proxy_server.hpp"
@@ -188,6 +190,13 @@ int main(int argc, char** argv) {
     fprintf(stderr, "server: listening on %s:%u (command set %s)\n", address.c_str(),
             static_cast<unsigned>(port), remoting::kCommandSetDigest);
 
+    struct ClientThread {
+        remoting::socket_t fd;
+        std::thread thread;
+        std::shared_ptr<std::atomic<bool>> done;
+    };
+    std::vector<ClientThread> clients;
+
     while (!g_stop.load()) {
         const remoting::socket_t fd = ::accept(listen_fd, nullptr, nullptr);
         if (fd == remoting::kInvalidSocket) {
@@ -200,23 +209,40 @@ int main(int argc, char** argv) {
         // One VkInstance is one connection, and a single process can hold
         // several open at once (CTS's CustomInstanceTest keeps its default
         // instance alive while asking for a differently-configured one for a
-        // single test). Serving connections one at a time here meant the
-        // second one sat in the kernel's accept queue forever while the
-        // first stayed open, and the client blocked in vkCreateInstance
-        // forever too - a wedge, not a crash, but just as fatal to a run.
-        // ObjectTables are already per-connection (see objects.hpp) so
-        // handing each connection its own thread costs nothing but a
-        // detached std::thread.
-        std::thread([&server, fd] {
-            server.serve(fd);
-            remoting::close_socket(fd);
-        }).detach();
+        // single test). Keep the threads joinable: shutdown must not destroy
+        // Server while a handler is still using its Vulkan instance or maps.
+        auto done = std::make_shared<std::atomic<bool>>(false);
+        clients.push_back({fd, std::thread([&server, fd, done] {
+                               server.serve(fd);
+                               remoting::close_socket(fd);
+                               done->store(true, std::memory_order_release);
+                           }),
+                           done});
+
+        for (auto it = clients.begin(); it != clients.end();) {
+            if (!it->done->load(std::memory_order_acquire)) {
+                ++it;
+                continue;
+            }
+            it->thread.join();
+            it = clients.erase(it);
+        }
     }
 
+    remoting::close_socket(listen_fd);
+    for (ClientThread& client : clients) {
+        if (!client.done->load(std::memory_order_acquire)) {
+#if defined(_WIN32)
+            ::shutdown(client.fd, SD_BOTH);
+#else
+            ::shutdown(client.fd, SHUT_RDWR);
+#endif
+        }
+    }
+    for (ClientThread& client : clients) client.thread.join();
 #if !defined(_WIN32)
     server.stop_wayland();
 #endif
-    remoting::close_socket(listen_fd);
     fprintf(stderr, "server: stopped\n");
     return 0;
 }

@@ -16,9 +16,9 @@
 
 #include <atomic>
 #include <cstdint>
+#include <thread>
 
 #if defined(_WIN32)
-#include <thread>
 
 // Forward-declared the same way <windows.h> itself defines them (HWND is
 // `struct HWND__*`, HINSTANCE is `struct HINSTANCE__*`), so this header never
@@ -31,6 +31,8 @@ using HWND = HWND__*;
 struct HINSTANCE__;
 using HINSTANCE = HINSTANCE__*;
 #else
+#include <mutex>
+
 struct wl_display;
 struct wl_registry;
 struct wl_compositor;
@@ -99,6 +101,9 @@ class OwnWindow {
     xdg_surface* xdg_surface_ = nullptr;
     xdg_toplevel* toplevel_ = nullptr;
     bool configured_ = false;
+    std::mutex display_mutex_;
+    std::atomic<bool> stop_pump_{false};
+    std::thread pump_thread_;
 #endif
 
    public:

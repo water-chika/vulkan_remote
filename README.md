@@ -37,6 +37,7 @@ dropped registrar is indistinguishable from an unsupported command at runtime.
 
 ```sh
 cmake -B build && cmake --build build -j8
+ctest --test-dir build --output-on-failure
 
 ./build/vulkan_remoting_server --validate --wayland          # GPU machine
 VK_DRIVER_FILES=$PWD/build/vulkan_remoting_icd.json \
@@ -212,10 +213,19 @@ vkcube.exe
 
 - `tools/offscreen` renders a triangle and reads it back: output is
   **byte-identical** whether run on the system driver or through this one.
-- `vkcube` runs, with its window on the remote compositor.
-- The Windows client works against the Linux server: the DLL loads, connects,
-  and `vulkaninfo.exe --summary` enumerates the server's GPUs by exact name.
-  Presenting a window from Windows is not yet exercised.
+- `vkcube` and `vkcubepp` each complete 20 frames through the server-owned
+  Wayland-window path. On 2026-09-23 they completed in 0.5 s and exited cleanly.
+- The Windows client works against the Linux server: a matched static DLL
+  (`a62b3b0d...`) made `vulkaninfo.exe --summary` enumerate all three server GPUs,
+  then `vkcube.exe --c 20`, `vkcubepp.exe --c 20`, and a repeated `vkcube` run
+  completed in 0.84 s, 0.93 s, and 0.91 s respectively. The run used a headless
+  Weston GL compositor; pixman is not a valid WSI control here because direct
+  `vkcube` also fails against it.
+- `VkSurfaceFormatKHR` is encoded field-by-field. Raw-copying this enum pair across
+  Win32 and Linux corrupted the selected format (`VK_FORMAT_UNDEFINED` or random
+  enum values), which made cube presentation hang or crash. Because that changes
+  the wire schema, `common/generate_remoting.py` includes a schema revision in the
+  handshake digest so mixed old/new peers are rejected before decoding messages.
 - CTS results drift as the suite grows and commands get implemented, so the
   pass/fail count is not pinned here. `tests/cts_baseline.txt` is the known-
   passing set (`dEQP-VK.api.smoke.*` and `dEQP-VK.api.info.*` so far); run
@@ -267,8 +277,18 @@ This is why remote rendering is done by shipping finished frames instead:
 Sunshine/Moonlight, or `waypipe` for a Wayland application. The driver here is
 a way to measure that conclusion rather than assume it.
 
-## Known limitations
+## TODO / known limitations
 
+- Add field-wise, schema-versioned encodings for the remaining raw-copied Vulkan
+  structs before claiming cross-ABI support beyond the tested Win64/Linux-x86-64
+  pair.
+- Add client-side diagnostics that name a rejected or unsupported opcode; today
+  the useful diagnostic is primarily in the server log.
+- Add the minimum command families needed by broader samples, in evidence-driven
+  order: transfer (`vkCmdCopyImage`/`vkCmdBlitImage`/`vkCmdFillBuffer`/
+  `vkCmdUpdateBuffer`), then compute (`vkCreateComputePipelines`/`vkCmdDispatch`).
+- Run pinned triangle, texture-upload, and compute samples after those APIs exist;
+  keep unsupported modern Vulkan and arbitrary `pNext` use explicitly out of scope.
 - `pNext` chains are dropped by the marshaller.
 - Shadow mappings are per-range; two mappings of overlapping memory are not
   reconciled.

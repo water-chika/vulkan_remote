@@ -247,6 +247,26 @@ void Server::associate_surface(VkSurfaceKHR surface, OwnWindow* window) {
     m_surface_windows[surface] = window;
 }
 
+void Server::discard_own_window(OwnWindow* window) {
+    if (window == nullptr) return;
+    std::lock_guard<std::mutex> lock(m_own_windows_mutex);
+    auto it = std::find_if(m_own_windows.begin(), m_own_windows.end(),
+                           [window](const auto& candidate) { return candidate.get() == window; });
+    if (it != m_own_windows.end()) m_own_windows.erase(it);
+}
+
+void Server::release_surface_window(VkSurfaceKHR surface) {
+    if (surface == VK_NULL_HANDLE) return;
+    std::lock_guard<std::mutex> lock(m_own_windows_mutex);
+    auto mapped = m_surface_windows.find(surface);
+    if (mapped == m_surface_windows.end()) return;
+    OwnWindow* window = mapped->second;
+    m_surface_windows.erase(mapped);
+    auto owned = std::find_if(m_own_windows.begin(), m_own_windows.end(),
+                              [window](const auto& candidate) { return candidate.get() == window; });
+    if (owned != m_own_windows.end()) m_own_windows.erase(owned);
+}
+
 OwnWindow* Server::window_for_surface(VkSurfaceKHR surface) {
     if (surface == VK_NULL_HANDLE) return nullptr;
     std::lock_guard<std::mutex> lock(m_own_windows_mutex);
@@ -254,26 +274,20 @@ OwnWindow* Server::window_for_surface(VkSurfaceKHR surface) {
     return it == m_surface_windows.end() ? nullptr : it->second;
 }
 
-bool Server::poll_windows_closed() {
+bool Server::poll_window_closed(VkSurfaceKHR surface) {
     std::lock_guard<std::mutex> lock(m_own_windows_mutex);
-    for (const auto& window : m_own_windows) {
-        window->pump();
-        if (window->closed()) return true;
-    }
-    return false;
+    auto it = m_surface_windows.find(surface);
+    if (it == m_surface_windows.end()) return false;
+    it->second->pump();
+    return it->second->closed();
 }
 
-bool Server::poll_windows_resized() {
+bool Server::poll_window_resized(VkSurfaceKHR surface) {
     std::lock_guard<std::mutex> lock(m_own_windows_mutex);
-    bool resized = false;
-    for (const auto& window : m_own_windows) {
-        window->pump();
-        // Not `resized = window->take_resized()` and not a short-circuiting
-        // ||: every window has to be cleared, or an unread flag on one of
-        // them would report a resize again on the next call forever.
-        if (window->take_resized()) resized = true;
-    }
-    return resized;
+    auto it = m_surface_windows.find(surface);
+    if (it == m_surface_windows.end()) return false;
+    it->second->pump();
+    return it->second->take_resized();
 }
 
 VkPhysicalDevice Server::physical_device_from_id(uint64_t id) const {
@@ -294,7 +308,8 @@ namespace {
 // what kept a compositor window alive after the client that owned it was
 // gone, and what produced 'queue destroyed while proxies still attached'
 // with fourteen objects still on it.
-void destroy_session_objects(remoting::ObjectTables& tables, VkInstance instance) {
+void destroy_session_objects(remoting::ObjectTables& tables, Server& server) {
+    const VkInstance instance = server.instance();
     for (VkSwapchainKHR swapchain : tables.swapchains.all()) {
         if (swapchain == VK_NULL_HANDLE) continue;
         const auto it = tables.swapchain_devices.find(swapchain);
@@ -303,10 +318,12 @@ void destroy_session_objects(remoting::ObjectTables& tables, VkInstance instance
         vkDestroySwapchainKHR(it->second, swapchain, nullptr);
     }
     tables.swapchain_devices.clear();
+    tables.swapchain_surfaces.clear();
 
     for (VkSurfaceKHR surface : tables.surfaces.all()) {
         if (surface == VK_NULL_HANDLE) continue;
         vkDestroySurfaceKHR(instance, surface, nullptr);
+        server.release_surface_window(surface);
     }
 }
 
@@ -434,12 +451,12 @@ void Server::serve(remoting::socket_t fd) {
         // there, skipping the "client disconnected" log and the error-counter
         // cleanup below, so this preserves that exactly.
         if (session.close_connection) {
-            destroy_session_objects(tables, instance());
+            destroy_session_objects(tables, *this);
             return;
         }
     }
 
-    destroy_session_objects(tables, instance());
+    destroy_session_objects(tables, *this);
     g_current_error_counter = nullptr;
     fprintf(stderr, "server: client disconnected\n");
 }

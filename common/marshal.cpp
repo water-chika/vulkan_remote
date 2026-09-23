@@ -1049,10 +1049,15 @@ bool read_SurfaceCapabilitiesKHR(Reader& r, Arena&, const HandleResolver&,
     return read_raw(r, out);
 }
 
-void write_SurfaceFormatKHR(Writer& w, const VkSurfaceFormatKHR& s) { w.bytes(&s, sizeof(s)); }
+void write_SurfaceFormatKHR(Writer& w, const VkSurfaceFormatKHR& s) {
+    w.i32(static_cast<int32_t>(s.format));
+    w.i32(static_cast<int32_t>(s.colorSpace));
+}
 
-bool read_SurfaceFormatKHR(Reader& r, Arena&, const HandleResolver&, VkSurfaceFormatKHR* out) {
-    return read_raw(r, out);
+bool read_SurfaceFormatKHR(Reader& r, VkSurfaceFormatKHR* out) {
+    out->format = static_cast<VkFormat>(r.i32());
+    out->colorSpace = static_cast<VkColorSpaceKHR>(r.i32());
+    return r.ok();
 }
 
 void write_PhysicalDeviceProperties(Writer& w, const VkPhysicalDeviceProperties& s) {

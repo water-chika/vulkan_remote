@@ -126,21 +126,29 @@ class Server:
         deadline = time.time() + 15.0
         while time.time() < deadline:
             if self.process.poll() is not None:
-                raise Failure('server exited early')
+                output = self.process.communicate()[0]
+                raise Failure('server exited early\n' + output)
             try:
                 connect(self.port, timeout=0.5).close()
                 return self
             except OSError:
                 time.sleep(0.2)
-        raise Failure('server did not start listening')
+        output = self.stop()
+        raise Failure('server did not start listening\n' + output)
+
+    def stop(self):
+        if not self.process:
+            return ''
+        if self.process.poll() is None:
+            self.process.terminate()
+        try:
+            return self.process.communicate(timeout=5)[0]
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            return self.process.communicate()[0]
 
     def __exit__(self, *exc):
-        if self.process and self.process.poll() is None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
+        self.stop()
         return False
 
     def alive(self):
@@ -174,7 +182,10 @@ def test_handshake_rejects_foreign_digest(server, build_dir):
             raise Failure('server accepted a foreign command set digest')
 
         send_message(sock, read_opcode(build_dir, 'vkEnumeratePhysicalDevices'))
-        opcode, _ = recv_message(sock)
+        try:
+            opcode, _ = recv_message(sock)
+        except (ConnectionResetError, TimeoutError):
+            opcode = None
         if opcode is not None:
             raise Failure('server kept serving a rejected peer')
 
@@ -288,6 +299,35 @@ def test_client_without_server_fails_cleanly(server, build_dir):
     return None
 
 
+def test_wsi_decode_errors_reply(server, build_dir):
+    """Every synchronous WSI handler must answer malformed input promptly."""
+    names = [
+        'vkCreateWaylandSurfaceKHR',
+        'vkCreateWin32SurfaceKHR',
+        'vkGetPhysicalDeviceWaylandPresentationSupportKHR',
+        'vkGetPhysicalDeviceSurfaceSupportKHR',
+        'vkGetPhysicalDeviceSurfaceCapabilitiesKHR',
+        'vkGetPhysicalDeviceSurfaceFormatsKHR',
+        'vkGetPhysicalDeviceSurfacePresentModesKHR',
+        'vkCreateSwapchainKHR',
+        'vkGetSwapchainImagesKHR',
+        'vkAcquireNextImageKHR',
+        'vkQueuePresentKHR',
+    ]
+    digest = read_digest(build_dir)
+    with connect(server.port) as sock:
+        if handshake(sock, digest) != STATUS_OK:
+            raise Failure('handshake failed')
+        for name in names:
+            expected_opcode = read_opcode(build_dir, name)
+            send_message(sock, expected_opcode, b'\x01')
+            opcode, response = recv_message(sock)
+            if opcode != expected_opcode:
+                raise Failure('{} reply had opcode {}'.format(name, opcode))
+            if len(response) < 4 or decode_u32(response) != STATUS_DECODE_ERROR:
+                raise Failure('{} did not report DecodeError'.format(name))
+
+
 def test_own_window_surface(server, build_dir):
     """vkCreateWin32SurfaceKHR must reply, never hang, even without Wayland.
 
@@ -311,8 +351,15 @@ def test_own_window_surface(server, build_dir):
         opcode, response = recv_message(sock)
         if opcode is None:
             raise Failure('server did not reply to vkCreateWin32SurfaceKHR')
+        if len(response) != 16:
+            raise Failure('vkCreateWin32SurfaceKHR reply had {} bytes, expected 16'.format(
+                len(response)))
         if decode_u32(response) != STATUS_OK:
             raise Failure('vkCreateWin32SurfaceKHR did not report Status::Ok')
+        result = struct.unpack_from('<i', response, 4)[0]
+        handle = struct.unpack_from('<Q', response, 8)[0]
+        if (result == 0) != (handle != 0):
+            raise Failure('vkCreateWin32SurfaceKHR result and handle disagree')
 
 
 TESTS = [
@@ -325,6 +372,7 @@ TESTS = [
     test_short_payload_for_known_command,
     test_abrupt_disconnect_is_survivable,
     test_client_without_server_fails_cleanly,
+    test_wsi_decode_errors_reply,
     test_own_window_surface,
 ]
 

@@ -57,9 +57,7 @@ bool force_own_window() {
 void handle_CreateWaylandSurfaceKHR(Session& c) {
     const uint32_t app_object_id = c.reader.u32();
     if (!c.reader.ok()) {
-        c.writer.u32(static_cast<uint32_t>(Status::Ok));
-        c.writer.i32(VK_ERROR_INITIALIZATION_FAILED);
-        c.writer.handle(0);
+        c.reply_status(Status::DecodeError);
         return;
     }
 
@@ -75,7 +73,11 @@ void handle_CreateWaylandSurfaceKHR(Session& c) {
             info.surface = window->surface();
             own_result = vkCreateWaylandSurfaceKHR(c.server.instance(), &info, nullptr,
                                                    &own_surface);
-            if (own_result == VK_SUCCESS) c.server.associate_surface(own_surface, window);
+            if (own_result == VK_SUCCESS) {
+                c.server.associate_surface(own_surface, window);
+            } else {
+                c.server.discard_own_window(window);
+            }
         } else {
             fprintf(stderr, "server: VK_REMOTING_FORCE_OWN_WINDOW: could not create a "
                             "server-owned window\n");
@@ -96,6 +98,7 @@ void handle_CreateWaylandSurfaceKHR(Session& c) {
         c.writer.u32(static_cast<uint32_t>(Status::Ok));
         c.writer.i32(VK_ERROR_INITIALIZATION_FAILED);
         c.writer.handle(0);
+        c.reply();
         return;
     }
 
@@ -110,6 +113,7 @@ void handle_CreateWaylandSurfaceKHR(Session& c) {
         c.writer.u32(static_cast<uint32_t>(Status::Ok));
         c.writer.i32(VK_ERROR_INITIALIZATION_FAILED);
         c.writer.handle(0);
+        c.reply();
         return;
     }
 
@@ -148,9 +152,7 @@ void handle_CreateWin32SurfaceKHR(Session& c) {
     (void)hwnd;
 #endif
     if (!c.reader.ok()) {
-        c.writer.u32(static_cast<uint32_t>(Status::Ok));
-        c.writer.i32(VK_ERROR_INITIALIZATION_FAILED);
-        c.writer.handle(0);
+        c.reply_status(Status::DecodeError);
         return;
     }
 
@@ -161,6 +163,7 @@ void handle_CreateWin32SurfaceKHR(Session& c) {
         c.writer.u32(static_cast<uint32_t>(Status::Ok));
         c.writer.i32(VK_ERROR_INITIALIZATION_FAILED);
         c.writer.handle(0);
+        c.reply();
         return;
     }
 
@@ -178,7 +181,11 @@ void handle_CreateWin32SurfaceKHR(Session& c) {
     info.surface = window->surface();
     const VkResult result = vkCreateWaylandSurfaceKHR(c.server.instance(), &info, nullptr, &vk_surface);
 #endif
-    if (result == VK_SUCCESS) c.server.associate_surface(vk_surface, window);
+    if (result == VK_SUCCESS) {
+        c.server.associate_surface(vk_surface, window);
+    } else {
+        c.server.discard_own_window(window);
+    }
     c.writer.u32(static_cast<uint32_t>(Status::Ok));
     c.writer.i32(result);
     c.writer.handle(result == VK_SUCCESS ? c.tables.surfaces.add(vk_surface) : 0);
@@ -192,7 +199,10 @@ void handle_DestroySurfaceKHR(Session& c) {
         mark_oneway_error(c);
         return;
     }
-    if (surface != VK_NULL_HANDLE) vkDestroySurfaceKHR(c.server.instance(), surface, nullptr);
+    if (surface != VK_NULL_HANDLE) {
+        vkDestroySurfaceKHR(c.server.instance(), surface, nullptr);
+        c.server.release_surface_window(surface);
+    }
 }
 
 #if !defined(_WIN32)
@@ -201,7 +211,7 @@ void handle_GetPhysicalDeviceWaylandPresentationSupportKHR(Session& c) {
     VkPhysicalDevice physdev = c.server.physical_device_from_id(pd_id);
     const uint32_t family = c.reader.u32();
     if (!c.reader.ok() || physdev == VK_NULL_HANDLE) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        c.reply_status(Status::DecodeError);
         return;
     }
     // The application's own wl_display is meaningless here (see icd.cpp);
@@ -226,8 +236,8 @@ void handle_GetPhysicalDeviceSurfaceSupportKHR(Session& c) {
     const uint32_t family = c.reader.u32();
     const uint64_t surf_id = c.reader.handle();
     VkSurfaceKHR surface = c.tables.surface(surf_id);
-    if (!c.reader.ok() || physdev == VK_NULL_HANDLE) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+    if (!c.reader.ok() || physdev == VK_NULL_HANDLE || surface == VK_NULL_HANDLE) {
+        c.reply_status(Status::DecodeError);
         return;
     }
     VkBool32 supported = VK_FALSE;
@@ -243,8 +253,8 @@ void handle_GetPhysicalDeviceSurfaceCapabilitiesKHR(Session& c) {
     VkPhysicalDevice physdev = c.server.physical_device_from_id(pd_id);
     const uint64_t surf_id = c.reader.handle();
     VkSurfaceKHR surface = c.tables.surface(surf_id);
-    if (!c.reader.ok() || physdev == VK_NULL_HANDLE) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+    if (!c.reader.ok() || physdev == VK_NULL_HANDLE || surface == VK_NULL_HANDLE) {
+        c.reply_status(Status::DecodeError);
         return;
     }
     VkSurfaceCapabilitiesKHR caps{};
@@ -277,8 +287,8 @@ void handle_GetPhysicalDeviceSurfaceFormatsKHR(Session& c) {
     VkPhysicalDevice physdev = c.server.physical_device_from_id(pd_id);
     const uint64_t surf_id = c.reader.handle();
     VkSurfaceKHR surface = c.tables.surface(surf_id);
-    if (!c.reader.ok() || physdev == VK_NULL_HANDLE) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+    if (!c.reader.ok() || physdev == VK_NULL_HANDLE || surface == VK_NULL_HANDLE) {
+        c.reply_status(Status::DecodeError);
         return;
     }
     uint32_t count = 0;
@@ -299,8 +309,8 @@ void handle_GetPhysicalDeviceSurfacePresentModesKHR(Session& c) {
     VkPhysicalDevice physdev = c.server.physical_device_from_id(pd_id);
     const uint64_t surf_id = c.reader.handle();
     VkSurfaceKHR surface = c.tables.surface(surf_id);
-    if (!c.reader.ok() || physdev == VK_NULL_HANDLE) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+    if (!c.reader.ok() || physdev == VK_NULL_HANDLE || surface == VK_NULL_HANDLE) {
+        c.reply_status(Status::DecodeError);
         return;
     }
     uint32_t count = 0;
@@ -323,12 +333,15 @@ void handle_CreateSwapchainKHR(Session& c) {
     VkSwapchainCreateInfoKHR info{};
     if (!c.reader.ok() || device == VK_NULL_HANDLE ||
         !remoting::read_SwapchainCreateInfoKHR(c.reader, arena, c.tables, &info)) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        c.reply_status(Status::DecodeError);
         return;
     }
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
     const VkResult result = vkCreateSwapchainKHR(device, &info, nullptr, &swapchain);
-    if (result == VK_SUCCESS) c.tables.swapchain_devices[swapchain] = device;
+    if (result == VK_SUCCESS) {
+        c.tables.swapchain_devices[swapchain] = device;
+        c.tables.swapchain_surfaces[swapchain] = info.surface;
+    }
     c.writer.u32(static_cast<uint32_t>(Status::Ok));
     c.writer.i32(result);
     c.writer.handle(result == VK_SUCCESS ? c.tables.swapchains.add(swapchain) : 0);
@@ -340,11 +353,15 @@ void handle_DestroySwapchainKHR(Session& c) {
     VkDevice device = c.tables.devices.get(device_id);
     const uint64_t swp_id = c.reader.handle();
     VkSwapchainKHR swapchain = c.tables.swapchains.take(swp_id);
-    if (!c.reader.ok() || device == VK_NULL_HANDLE) {
+    const auto owner = c.tables.swapchain_devices.find(swapchain);
+    if (!c.reader.ok() || device == VK_NULL_HANDLE || swapchain == VK_NULL_HANDLE ||
+        owner == c.tables.swapchain_devices.end() || owner->second != device) {
         mark_oneway_error(c);
         return;
     }
-    if (swapchain != VK_NULL_HANDLE) vkDestroySwapchainKHR(device, swapchain, nullptr);
+    vkDestroySwapchainKHR(device, swapchain, nullptr);
+    c.tables.swapchain_devices.erase(owner);
+    c.tables.swapchain_surfaces.erase(swapchain);
     c.tables.swapchain_image_ids.erase(swp_id);
 }
 
@@ -354,7 +371,7 @@ void handle_GetSwapchainImagesKHR(Session& c) {
     const uint64_t swp_id = c.reader.handle();
     VkSwapchainKHR swapchain = c.tables.swapchain(swp_id);
     if (!c.reader.ok() || device == VK_NULL_HANDLE || swapchain == VK_NULL_HANDLE) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        c.reply_status(Status::DecodeError);
         return;
     }
     uint32_t count = 0;
@@ -387,8 +404,10 @@ void handle_AcquireNextImageKHR(Session& c) {
     VkSemaphore semaphore = c.tables.semaphore(sem_id);
     const uint64_t fence_id = c.reader.handle();
     VkFence fence = c.tables.fence(fence_id);
-    if (!c.reader.ok() || device == VK_NULL_HANDLE) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+    if (!c.reader.ok() || device == VK_NULL_HANDLE || swapchain == VK_NULL_HANDLE ||
+        (sem_id != 0 && semaphore == VK_NULL_HANDLE) ||
+        (fence_id != 0 && fence == VK_NULL_HANDLE)) {
+        c.reply_status(Status::DecodeError);
         return;
     }
     uint32_t image_index = 0;
@@ -404,7 +423,11 @@ void handle_AcquireNextImageKHR(Session& c) {
     // capabilities again and gets the new extent. Only a success is
     // downgraded: a real error, or an out-of-date the driver raised itself,
     // already says at least as much and must not be weakened to advice.
-    if (result == VK_SUCCESS && c.server.poll_windows_resized()) {
+    const auto surface_it = c.tables.swapchain_surfaces.find(swapchain);
+    const VkSurfaceKHR surface = surface_it == c.tables.swapchain_surfaces.end()
+                                     ? VK_NULL_HANDLE
+                                     : surface_it->second;
+    if (result == VK_SUCCESS && c.server.poll_window_resized(surface)) {
         result = VK_SUBOPTIMAL_KHR;
     }
     // Checked after the resize, and allowed to override it: a window the
@@ -412,7 +435,7 @@ void handle_AcquireNextImageKHR(Session& c) {
     // only send the client round the swapchain-recreation loop again
     // against a surface that is never coming back.
     if (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) {
-        if (c.server.poll_windows_closed()) result = VK_ERROR_SURFACE_LOST_KHR;
+        if (c.server.poll_window_closed(surface)) result = VK_ERROR_SURFACE_LOST_KHR;
     }
 
     c.writer.u32(static_cast<uint32_t>(Status::Ok));
@@ -426,24 +449,31 @@ void handle_QueuePresentKHR(Session& c) {
     VkQueue queue = c.tables.queues.get(queue_id);
     const uint32_t wait_count = c.reader.u32();
     if (!count_fits(c.reader, wait_count, 8)) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        c.reply_status(Status::DecodeError);
         return;
     }
     std::vector<VkSemaphore> waits(wait_count);
-    for (uint32_t i = 0; i < wait_count; ++i) waits[i] = c.tables.semaphore(c.reader.handle());
+    bool handles_valid = true;
+    for (uint32_t i = 0; i < wait_count; ++i) {
+        const uint64_t id = c.reader.handle();
+        waits[i] = c.tables.semaphore(id);
+        handles_valid = handles_valid && id != 0 && waits[i] != VK_NULL_HANDLE;
+    }
     const uint32_t swp_count = c.reader.u32();
     if (!count_fits(c.reader, swp_count, 12)) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        c.reply_status(Status::DecodeError);
         return;
     }
     std::vector<VkSwapchainKHR> swapchains(swp_count);
     std::vector<uint32_t> indices(swp_count);
     for (uint32_t i = 0; i < swp_count; ++i) {
-        swapchains[i] = c.tables.swapchain(c.reader.handle());
+        const uint64_t id = c.reader.handle();
+        swapchains[i] = c.tables.swapchain(id);
+        handles_valid = handles_valid && id != 0 && swapchains[i] != VK_NULL_HANDLE;
         indices[i] = c.reader.u32();
     }
-    if (!c.reader.ok() || queue == VK_NULL_HANDLE) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+    if (!c.reader.ok() || queue == VK_NULL_HANDLE || !handles_valid) {
+        c.reply_status(Status::DecodeError);
         return;
     }
 

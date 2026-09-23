@@ -85,8 +85,10 @@ struct ObjectTables final : public HandleResolver {
 
     // A swapchain can only be destroyed through the device that created it,
     // and nothing in the handle it is given carries that back, so teardown
-    // would otherwise have no way to clean one up.
+    // would otherwise have no way to clean one up. Its source surface is also
+    // retained so server-owned window events affect only that swapchain.
     std::unordered_map<VkSwapchainKHR, VkDevice> swapchain_devices;
+    std::unordered_map<VkSwapchainKHR, VkSurfaceKHR> swapchain_surfaces;
 
     // GetSwapchainImagesKHR is idempotent on the real driver (same VkImages
     // every call), but Table::add is not - calling it twice for the same

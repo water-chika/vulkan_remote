@@ -110,7 +110,20 @@ int make_sealed_memfd(const std::vector<uint8_t>& content) {
 // Wraps the app-facing unix socket: pumps app -> link and link -> app,
 // applying the fd rules described in the module comment.
 class ProxyClient {
+    struct PendingAppMessage {
+        std::vector<uint8_t> bytes;
+        std::vector<int> fds;
+        size_t offset = 0;
+        bool fds_sent = false;
+    };
+
    public:
+    ~ProxyClient() {
+        for (PendingAppMessage& message : pending_app_) {
+            for (int fd : message.fds) ::close(fd);
+        }
+    }
+
     bool run(int app_fd, int link_fd) {
         app_fd_ = app_fd;
         link_fd_ = link_fd;
@@ -303,33 +316,33 @@ class ProxyClient {
                 return false;
             }
 
-            queue_app_message(frame.wire_bytes, fds);
-            for (int fd : fds) ::close(fd);  // app now owns its own dup
+            queue_app_message(frame.wire_bytes, std::move(fds));
         }
     }
 
-    // Queues one message for delivery to the app, along with fds it should
-    // carry (already ready to send; sendmsg dup()s them for the peer).
-    void queue_app_message(const std::vector<uint8_t>& wire_bytes, const std::vector<int>& fds) {
-        pending_app_.push_back({wire_bytes, fds});
+    // Queues one message for delivery to the app. Ownership of the reconstructed
+    // fds stays here until the first bytes carrying them have actually been sent.
+    void queue_app_message(const std::vector<uint8_t>& wire_bytes, std::vector<int> fds) {
+        pending_app_.push_back({wire_bytes, std::move(fds), 0, false});
     }
 
     bool flush_tx_app() {
         while (!pending_app_.empty()) {
-            const auto& [bytes, fds] = pending_app_.front();
-            iovec iov{const_cast<uint8_t*>(bytes.data()), bytes.size()};
+            PendingAppMessage& pending = pending_app_.front();
+            iovec iov{pending.bytes.data() + pending.offset,
+                      pending.bytes.size() - pending.offset};
             msghdr msg{};
             msg.msg_iov = &iov;
             msg.msg_iovlen = 1;
             char cmsgbuf[CMSG_SPACE(sizeof(int) * 16)];
-            if (!fds.empty()) {
+            if (!pending.fds_sent && !pending.fds.empty()) {
                 msg.msg_control = cmsgbuf;
-                msg.msg_controllen = CMSG_SPACE(sizeof(int) * fds.size());
+                msg.msg_controllen = CMSG_SPACE(sizeof(int) * pending.fds.size());
                 cmsghdr* c = CMSG_FIRSTHDR(&msg);
                 c->cmsg_level = SOL_SOCKET;
                 c->cmsg_type = SCM_RIGHTS;
-                c->cmsg_len = CMSG_LEN(sizeof(int) * fds.size());
-                memcpy(CMSG_DATA(c), fds.data(), sizeof(int) * fds.size());
+                c->cmsg_len = CMSG_LEN(sizeof(int) * pending.fds.size());
+                memcpy(CMSG_DATA(c), pending.fds.data(), sizeof(int) * pending.fds.size());
             }
             const ssize_t n = ::sendmsg(app_fd_, &msg, MSG_NOSIGNAL);
             if (n < 0) {
@@ -337,7 +350,15 @@ class ProxyClient {
                 if (errno == EINTR) continue;
                 return false;
             }
-            pending_app_.pop_front();
+            if (n == 0) return false;
+
+            pending.offset += static_cast<size_t>(n);
+            if (!pending.fds_sent) {
+                pending.fds_sent = true;
+                for (int fd : pending.fds) ::close(fd);
+                pending.fds.clear();
+            }
+            if (pending.offset == pending.bytes.size()) pending_app_.pop_front();
         }
         return true;
     }
@@ -360,7 +381,7 @@ class ProxyClient {
     int link_fd_ = -1;
     wire::ObjectTable objects_;
     std::vector<uint8_t> rx_app_, rx_link_, tx_link_;
-    std::deque<std::pair<std::vector<uint8_t>, std::vector<int>>> pending_app_;
+    std::deque<PendingAppMessage> pending_app_;
 };
 
 }  // namespace

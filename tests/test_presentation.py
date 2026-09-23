@@ -17,6 +17,7 @@ session's own if there is one and skips otherwise, rather than reporting a pass
 it did not earn.
 """
 
+import argparse
 import os
 import shutil
 import socket
@@ -44,9 +45,13 @@ def skip(reason: str) -> int:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--build-dir", default="")
+    args = parser.parse_args()
+
     here = os.path.dirname(os.path.abspath(__file__))
     root = os.path.dirname(here)
-    build = os.path.join(root, "build")
+    build = os.path.abspath(args.build_dir) if args.build_dir else os.path.join(root, "build")
     server = os.path.join(build, "vulkan_remoting_server")
     icd = os.path.join(build, "libvulkan_remoting_icd.so")
 
@@ -64,10 +69,16 @@ def main() -> int:
                      '"api_version":"1.3.0"}}\n' % icd)
 
     port, wayland_port = free_port(), free_port()
+    server_env = dict(os.environ)
+    # This test launches no proxy_client, so the application's local wl_surface
+    # can never exist in the server's Wayland connection. Exercise the
+    # server-owned window path instead; the standalone proxy tests cover the
+    # protocol-replay path.
+    server_env["VK_REMOTING_FORCE_OWN_WINDOW"] = "1"
     server_process = subprocess.Popen(
         [server, "--address", "127.0.0.1", "--port", str(port),
          "--wayland", "--wayland-port", str(wayland_port)],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        env=server_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
     # The server has a Vulkan instance to bring up before it listens, and
     # connecting too early is a spurious failure, not a finding.
@@ -84,7 +95,14 @@ def main() -> int:
         time.sleep(0.25)
     else:
         server_process.terminate()
+        try:
+            server_output = server_process.communicate(timeout=5)[0]
+        except subprocess.TimeoutExpired:
+            server_process.kill()
+            server_output = server_process.communicate()[0]
         print("FAIL: server never accepted a connection")
+        if server_output.strip():
+            print("SERVER OUTPUT:\n" + server_output.strip())
         return 1
 
     env = dict(os.environ)
@@ -114,12 +132,15 @@ def main() -> int:
     finally:
         server_process.terminate()
         try:
-            server_process.wait(timeout=5)
+            server_output = server_process.communicate(timeout=5)[0]
         except subprocess.TimeoutExpired:
             server_process.kill()
+            server_output = server_process.communicate()[0]
 
     if failure:
         print("FAIL: " + failure)
+        if server_output.strip():
+            print("SERVER OUTPUT:\n" + server_output.strip())
         return 1
     return 0
 

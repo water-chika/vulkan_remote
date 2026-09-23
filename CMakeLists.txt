@@ -10,6 +10,8 @@ cmake_minimum_required(VERSION 3.21)
 #   tools/   a direct client used to measure the link
 project(vulkan_remoting CXX)
 
+enable_testing()
+
 find_package(Vulkan REQUIRED)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
@@ -324,5 +326,28 @@ target_link_libraries(vulkan_remoting_test_own_window PRIVATE
     Threads::Threads
 )
 add_test(NAME own_window COMMAND vulkan_remoting_test_own_window)
+add_test(NAME wire
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wire.py
+            --build-dir ${CMAKE_CURRENT_BINARY_DIR}
+)
+set_tests_properties(wire PROPERTIES TIMEOUT 120)
+
+add_test(NAME presentation
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_presentation.py
+            --build-dir ${CMAKE_CURRENT_BINARY_DIR}
+)
+set_tests_properties(presentation PROPERTIES
+    TIMEOUT 60
+    SKIP_REGULAR_EXPRESSION "^SKIP:"
+)
+
+add_test(NAME wayland_proxy
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wayland_proxy.py
+            --build-dir ${CMAKE_CURRENT_BINARY_DIR}
+)
+set_tests_properties(wayland_proxy PROPERTIES
+    TIMEOUT 20
+    SKIP_REGULAR_EXPRESSION "^SKIP:"
+)
 
 endif()  # NOT WIN32

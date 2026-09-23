@@ -237,8 +237,7 @@ bool read_SurfaceCapabilitiesKHR(Reader& r, Arena& arena, const HandleResolver& 
                                   VkSurfaceCapabilitiesKHR* out);
 
 void write_SurfaceFormatKHR(Writer& w, const VkSurfaceFormatKHR& s);
-bool read_SurfaceFormatKHR(Reader& r, Arena& arena, const HandleResolver& hr,
-                            VkSurfaceFormatKHR* out);
+bool read_SurfaceFormatKHR(Reader& r, VkSurfaceFormatKHR* out);
 
 void write_PhysicalDeviceProperties(Writer& w, const VkPhysicalDeviceProperties& s);
 bool read_PhysicalDeviceProperties(Reader& r, Arena& arena, const HandleResolver& hr,

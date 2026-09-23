@@ -47,6 +47,17 @@ void handle_DestroyDevice(Session& c) {
         mark_oneway_error(c);
         return;
     }
+    for (VkSwapchainKHR swapchain : c.tables.swapchains.all()) {
+        const auto owner = c.tables.swapchain_devices.find(swapchain);
+        if (swapchain == VK_NULL_HANDLE || owner == c.tables.swapchain_devices.end() ||
+            owner->second != device) {
+            continue;
+        }
+        vkDeviceWaitIdle(device);
+        vkDestroySwapchainKHR(device, swapchain, nullptr);
+        c.tables.swapchain_devices.erase(owner);
+        c.tables.swapchain_surfaces.erase(swapchain);
+    }
     vkDestroyDevice(device, nullptr);
 }
 
