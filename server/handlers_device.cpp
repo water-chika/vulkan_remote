@@ -47,16 +47,23 @@ void handle_DestroyDevice(Session& c) {
         mark_oneway_error(c);
         return;
     }
-    for (VkSwapchainKHR swapchain : c.tables.swapchains.all()) {
+    bool waited = false;
+    for (size_t i = 0; i < c.tables.swapchains.all().size(); ++i) {
+        const VkSwapchainKHR swapchain = c.tables.swapchains.all()[i];
         const auto owner = c.tables.swapchain_devices.find(swapchain);
         if (swapchain == VK_NULL_HANDLE || owner == c.tables.swapchain_devices.end() ||
             owner->second != device) {
             continue;
         }
-        vkDeviceWaitIdle(device);
+        if (!waited) {
+            vkDeviceWaitIdle(device);
+            waited = true;
+        }
         vkDestroySwapchainKHR(device, swapchain, nullptr);
+        c.tables.swapchains.take(i + 1);
         c.tables.swapchain_devices.erase(owner);
         c.tables.swapchain_surfaces.erase(swapchain);
+        c.tables.swapchain_image_ids.erase(i + 1);
     }
     vkDestroyDevice(device, nullptr);
 }
