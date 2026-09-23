@@ -107,6 +107,12 @@ def recv_message(sock):
     return opcode, payload
 
 
+def free_port():
+    with socket.socket() as probe:
+        probe.bind(('127.0.0.1', 0))
+        return probe.getsockname()[1]
+
+
 def connect(port, host='127.0.0.1', timeout=5.0):
     sock = socket.create_connection((host, port), timeout=timeout)
     sock.settimeout(timeout)
@@ -380,7 +386,8 @@ TESTS = [
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--build-dir', default='build')
-    parser.add_argument('--port', type=int, default=24690)
+    parser.add_argument('--port', type=int, default=0,
+                        help='base port; zero selects a fresh ephemeral port per test')
     args = parser.parse_args()
 
     build_dir = os.path.abspath(args.build_dir)
@@ -395,7 +402,8 @@ def main():
         # A fresh server per test, so one test cannot mask another by leaving
         # the connection or the server in a strange state.
         try:
-            with Server(binary, args.port + index) as server:
+            port = args.port + index if args.port else free_port()
+            with Server(binary, port) as server:
                 note = test(server, build_dir)
             print('  ok   {}{}'.format(name, ' ({})'.format(note) if note else ''))
         except Failure as error:
