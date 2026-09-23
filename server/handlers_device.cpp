@@ -462,6 +462,45 @@ void handle_CreateGraphicsPipelines(Session& c) {
     c.reply();
 }
 
+void handle_CreateComputePipelines(Session& c) {
+    const uint64_t device_id = c.reader.handle();
+    VkDevice device = c.tables.devices.get(device_id);
+    const uint64_t cache_id = c.reader.handle();
+    VkPipelineCache cache = c.tables.pipeline_cache(cache_id);
+    const uint32_t count = c.reader.u32();
+    // Each create info begins with a length-prefixed raw struct. Bound both
+    // the bytes required on the wire and the number of vector elements.
+    if (count > remoting::kMaxArrayElements || !count_fits(c.reader, count, 4)) {
+        c.reply_status(Status::DecodeError);
+        return;
+    }
+
+    Arena arena;
+    std::vector<VkComputePipelineCreateInfo> infos(count);
+    bool ok = c.reader.ok() && device != VK_NULL_HANDLE &&
+              (!cache_id || cache != VK_NULL_HANDLE);
+    for (uint32_t i = 0; ok && i < count; ++i) {
+        ok = remoting::read_ComputePipelineCreateInfo(c.reader, arena, c.tables, &infos[i]);
+    }
+    if (!ok) {
+        c.reply_status(Status::DecodeError);
+        return;
+    }
+
+    std::vector<VkPipeline> pipelines(count, VK_NULL_HANDLE);
+    const VkResult result =
+        count ? vkCreateComputePipelines(device, cache, count, infos.data(), nullptr,
+                                          pipelines.data())
+              : VK_SUCCESS;
+    c.writer.u32(static_cast<uint32_t>(Status::Ok));
+    c.writer.i32(result);
+    c.writer.u32(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        c.writer.handle(pipelines[i] != VK_NULL_HANDLE ? c.tables.pipelines.add(pipelines[i]) : 0);
+    }
+    c.reply();
+}
+
 void handle_AllocateDescriptorSets(Session& c) {
     const uint64_t device_id = c.reader.handle();
     VkDevice device = c.tables.devices.get(device_id);
@@ -553,5 +592,6 @@ REGISTER_HANDLER(vkCreateDescriptorPool, handle_CreateDescriptorPool);
 REGISTER_HANDLER(vkDestroyDescriptorPool, handle_DestroyDescriptorPool);
 REGISTER_HANDLER(vkGetImageSubresourceLayout, handle_GetImageSubresourceLayout);
 REGISTER_HANDLER(vkCreateGraphicsPipelines, handle_CreateGraphicsPipelines);
+REGISTER_HANDLER(vkCreateComputePipelines, handle_CreateComputePipelines);
 REGISTER_HANDLER(vkAllocateDescriptorSets, handle_AllocateDescriptorSets);
 REGISTER_HANDLER(vkUpdateDescriptorSets, handle_UpdateDescriptorSets);

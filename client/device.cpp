@@ -477,6 +477,34 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateGraphicsPipelines(
     return result;
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL CreateComputePipelines(
+    VkDevice handle, VkPipelineCache pipelineCache, uint32_t createInfoCount,
+    const VkComputePipelineCreateInfo* pCreateInfos, const VkAllocationCallbacks*,
+    VkPipeline* pPipelines) {
+    RemoteDevice* device = to_device(handle);
+    Writer request;
+    request.handle(device->remote_id);
+    request.handle(id_from_handle(pipelineCache));
+    request.u32(createInfoCount);
+    for (uint32_t i = 0; i < createInfoCount; ++i) {
+        write_ComputePipelineCreateInfo(request, pCreateInfos[i]);
+    }
+
+    std::vector<char> reply;
+    if (!device->instance->connection.round_trip(Opcode::vkCreateComputePipelines, request,
+                                                  &reply)) {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    Reader r = payload_reader(reply);
+    const VkResult result = static_cast<VkResult>(r.i32());
+    const uint32_t count = r.u32();
+    for (uint32_t i = 0; i < count && i < createInfoCount; ++i) {
+        const uint64_t id = r.handle();
+        pPipelines[i] = id ? handle_from_id<VkPipeline>(id) : VK_NULL_HANDLE;
+    }
+    return r.ok() && count == createInfoCount ? result : VK_ERROR_INITIALIZATION_FAILED;
+}
+
 // ---------------------------------------------------------------------------
 // Descriptors
 // ---------------------------------------------------------------------------
@@ -569,6 +597,7 @@ const DeviceEntry* get_device_core_entries(size_t* count) {
         D(CreatePipelineLayout),
         D(DestroyPipelineLayout),
         D(CreateGraphicsPipelines),
+        D(CreateComputePipelines),
         D(DestroyPipeline),
         D(CreateRenderPass),
         D(DestroyRenderPass),

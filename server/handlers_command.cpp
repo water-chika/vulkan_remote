@@ -128,6 +128,19 @@ void handle_ResetCommandBuffer(Session& c) {
     if (vkResetCommandBuffer(cb, flags) != VK_SUCCESS) mark_oneway_error(c);
 }
 
+void handle_ResetCommandPool(Session& c) {
+    VkDevice device = c.tables.devices.get(c.reader.handle());
+    VkCommandPool pool = c.tables.command_pool(c.reader.handle());
+    const uint32_t flags = c.reader.u32();
+    if (!c.reader.ok() || device == VK_NULL_HANDLE || pool == VK_NULL_HANDLE) {
+        c.reply_status(Status::DecodeError);
+        return;
+    }
+    c.writer.u32(static_cast<uint32_t>(Status::Ok));
+    c.writer.i32(vkResetCommandPool(device, pool, flags));
+    c.reply();
+}
+
 void handle_CmdBeginRenderPass(Session& c) {
     VkCommandBuffer cb = c.tables.command_buffer(c.reader.handle());
     Arena arena;
@@ -280,6 +293,18 @@ void handle_CmdDraw(Session& c) {
     vkCmdDraw(cb, vertex_count, instance_count, first_vertex, first_instance);
 }
 
+void handle_CmdDispatch(Session& c) {
+    VkCommandBuffer cb = c.tables.command_buffer(c.reader.handle());
+    const uint32_t group_count_x = c.reader.u32();
+    const uint32_t group_count_y = c.reader.u32();
+    const uint32_t group_count_z = c.reader.u32();
+    if (!c.reader.ok() || cb == VK_NULL_HANDLE) {
+        mark_oneway_error(c);
+        return;
+    }
+    vkCmdDispatch(cb, group_count_x, group_count_y, group_count_z);
+}
+
 void handle_CmdDrawIndexed(Session& c) {
     VkCommandBuffer cb = c.tables.command_buffer(c.reader.handle());
     const uint32_t index_count = c.reader.u32();
@@ -404,6 +429,89 @@ void handle_CmdCopyImageToBuffer(Session& c) {
                            regions.data());
 }
 
+void handle_CmdCopyImage(Session& c) {
+    VkCommandBuffer cb = c.tables.command_buffer(c.reader.handle());
+    VkImage src = c.tables.image(c.reader.handle());
+    const int32_t src_layout = c.reader.i32();
+    VkImage dst = c.tables.image(c.reader.handle());
+    const int32_t dst_layout = c.reader.i32();
+    const uint32_t count = c.reader.u32();
+    if (count == 0 || !count_fits(c.reader, count, 4)) {
+        mark_oneway_error(c);
+        return;
+    }
+    Arena arena;
+    std::vector<VkImageCopy> regions(count);
+    bool ok = c.reader.ok();
+    for (uint32_t i = 0; ok && i < count; ++i) {
+        ok = remoting::read_ImageCopy(c.reader, arena, c.tables, &regions[i]);
+    }
+    if (!ok || cb == VK_NULL_HANDLE || src == VK_NULL_HANDLE || dst == VK_NULL_HANDLE) {
+        mark_oneway_error(c);
+        return;
+    }
+    vkCmdCopyImage(cb, src, static_cast<VkImageLayout>(src_layout), dst,
+                   static_cast<VkImageLayout>(dst_layout), count, regions.data());
+}
+
+void handle_CmdBlitImage(Session& c) {
+    VkCommandBuffer cb = c.tables.command_buffer(c.reader.handle());
+    VkImage src = c.tables.image(c.reader.handle());
+    const int32_t src_layout = c.reader.i32();
+    VkImage dst = c.tables.image(c.reader.handle());
+    const int32_t dst_layout = c.reader.i32();
+    const uint32_t count = c.reader.u32();
+    if (count == 0 || !count_fits(c.reader, count, 4)) {
+        mark_oneway_error(c);
+        return;
+    }
+    Arena arena;
+    std::vector<VkImageBlit> regions(count);
+    bool ok = c.reader.ok();
+    for (uint32_t i = 0; ok && i < count; ++i) {
+        ok = remoting::read_ImageBlit(c.reader, arena, c.tables, &regions[i]);
+    }
+    const int32_t filter = ok ? c.reader.i32() : 0;
+    if (!ok || !c.reader.ok() || cb == VK_NULL_HANDLE || src == VK_NULL_HANDLE ||
+        dst == VK_NULL_HANDLE) {
+        mark_oneway_error(c);
+        return;
+    }
+    vkCmdBlitImage(cb, src, static_cast<VkImageLayout>(src_layout), dst,
+                   static_cast<VkImageLayout>(dst_layout), count, regions.data(),
+                   static_cast<VkFilter>(filter));
+}
+
+void handle_CmdFillBuffer(Session& c) {
+    VkCommandBuffer cb = c.tables.command_buffer(c.reader.handle());
+    VkBuffer dst = c.tables.buffer(c.reader.handle());
+    const VkDeviceSize dst_offset = c.reader.u64();
+    const VkDeviceSize size = c.reader.u64();
+    const uint32_t data = c.reader.u32();
+    if (!c.reader.ok() || cb == VK_NULL_HANDLE || dst == VK_NULL_HANDLE ||
+        (dst_offset & 3) != 0 || (size != VK_WHOLE_SIZE && (size == 0 || (size & 3) != 0))) {
+        mark_oneway_error(c);
+        return;
+    }
+    vkCmdFillBuffer(cb, dst, dst_offset, size, data);
+}
+
+void handle_CmdUpdateBuffer(Session& c) {
+    VkCommandBuffer cb = c.tables.command_buffer(c.reader.handle());
+    VkBuffer dst = c.tables.buffer(c.reader.handle());
+    const VkDeviceSize dst_offset = c.reader.u64();
+    const VkDeviceSize data_size = c.reader.u64();
+    std::vector<char> data;
+    const bool bytes_ok = c.reader.bytes(&data, 65536);
+    if (!bytes_ok || !c.reader.ok() || cb == VK_NULL_HANDLE || dst == VK_NULL_HANDLE ||
+        (dst_offset & 3) != 0 || data_size == 0 || data_size > 65536 ||
+        (data_size & 3) != 0 || data.size() != data_size) {
+        mark_oneway_error(c);
+        return;
+    }
+    vkCmdUpdateBuffer(cb, dst, dst_offset, data_size, data.data());
+}
+
 void handle_CmdClearColorImage(Session& c) {
     VkCommandBuffer cb = c.tables.command_buffer(c.reader.handle());
     VkImage image = c.tables.image(c.reader.handle());
@@ -459,6 +567,7 @@ REGISTER_HANDLER(vkFreeCommandBuffers, handle_FreeCommandBuffers);
 REGISTER_HANDLER(vkBeginCommandBuffer, handle_BeginCommandBuffer);
 REGISTER_HANDLER(vkEndCommandBuffer, handle_EndCommandBuffer);
 REGISTER_HANDLER(vkResetCommandBuffer, handle_ResetCommandBuffer);
+REGISTER_HANDLER(vkResetCommandPool, handle_ResetCommandPool);
 REGISTER_HANDLER(vkCmdBeginRenderPass, handle_CmdBeginRenderPass);
 REGISTER_HANDLER(vkCmdEndRenderPass, handle_CmdEndRenderPass);
 REGISTER_HANDLER(vkCmdBindPipeline, handle_CmdBindPipeline);
@@ -468,10 +577,15 @@ REGISTER_HANDLER(vkCmdBindIndexBuffer, handle_CmdBindIndexBuffer);
 REGISTER_HANDLER(vkCmdSetViewport, handle_CmdSetViewport);
 REGISTER_HANDLER(vkCmdSetScissor, handle_CmdSetScissor);
 REGISTER_HANDLER(vkCmdDraw, handle_CmdDraw);
+REGISTER_HANDLER(vkCmdDispatch, handle_CmdDispatch);
 REGISTER_HANDLER(vkCmdDrawIndexed, handle_CmdDrawIndexed);
 REGISTER_HANDLER(vkCmdPipelineBarrier, handle_CmdPipelineBarrier);
 REGISTER_HANDLER(vkCmdCopyBuffer, handle_CmdCopyBuffer);
 REGISTER_HANDLER(vkCmdCopyBufferToImage, handle_CmdCopyBufferToImage);
 REGISTER_HANDLER(vkCmdCopyImageToBuffer, handle_CmdCopyImageToBuffer);
+REGISTER_HANDLER(vkCmdCopyImage, handle_CmdCopyImage);
+REGISTER_HANDLER(vkCmdBlitImage, handle_CmdBlitImage);
+REGISTER_HANDLER(vkCmdFillBuffer, handle_CmdFillBuffer);
+REGISTER_HANDLER(vkCmdUpdateBuffer, handle_CmdUpdateBuffer);
 REGISTER_HANDLER(vkCmdClearColorImage, handle_CmdClearColorImage);
 REGISTER_HANDLER(vkCmdPushConstants, handle_CmdPushConstants);

@@ -106,9 +106,9 @@ class Reader {
 
     uint64_t handle() { return u64(); }
 
-    bool bytes(std::vector<char>* out) {
+    bool bytes(std::vector<char>* out, size_t max_size = UINT32_MAX) {
         const uint32_t size = u32();
-        if (m_failed || m_pos + size > m_size) {
+        if (m_failed || size > max_size || size > m_size - m_pos) {
             m_failed = true;
             return false;
         }

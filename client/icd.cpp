@@ -65,20 +65,32 @@ VKAPI_ATTR VkResult VKAPI_CALL EnumerateInstanceExtensionProperties(const char* 
     // surface carries into its own server-owned window instead (see
     // server/handlers_wsi.cpp's handle_CreateWin32SurfaceKHR), so Win32
     // surface is what this driver offers here rather than Wayland surface.
-    static const char* const kNames[] = {VK_KHR_SURFACE_EXTENSION_NAME,
-                                         VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
-    static const uint32_t kVersions[] = {VK_KHR_SURFACE_SPEC_VERSION,
-                                        VK_KHR_WIN32_SURFACE_SPEC_VERSION};
+    static const char* const kNames[] = {
+        VK_KHR_SURFACE_EXTENSION_NAME,
+        VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
+        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
+    };
+    static const uint32_t kVersions[] = {
+        VK_KHR_SURFACE_SPEC_VERSION,
+        VK_KHR_WIN32_SURFACE_SPEC_VERSION,
+        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_SPEC_VERSION,
+    };
 #else
     // The only WSI platform this driver ever offers is Wayland, because that
     // is the only one wayland/proxy_server.hpp's WaylandProxy can name a
     // window on.
-    static const char* const kNames[] = {VK_KHR_SURFACE_EXTENSION_NAME,
-                                         VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME};
-    static const uint32_t kVersions[] = {VK_KHR_SURFACE_SPEC_VERSION,
-                                        VK_KHR_WAYLAND_SURFACE_SPEC_VERSION};
+    static const char* const kNames[] = {
+        VK_KHR_SURFACE_EXTENSION_NAME,
+        VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME,
+        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
+    };
+    static const uint32_t kVersions[] = {
+        VK_KHR_SURFACE_SPEC_VERSION,
+        VK_KHR_WAYLAND_SURFACE_SPEC_VERSION,
+        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_SPEC_VERSION,
+    };
 #endif
-    constexpr uint32_t kCount = 2;
+    constexpr uint32_t kCount = sizeof(kNames) / sizeof(kNames[0]);
 
     if (props == nullptr) {
         *count = kCount;

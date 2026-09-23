@@ -25,6 +25,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -149,7 +150,11 @@ struct Session {
     }
 };
 
-inline void mark_oneway_error(Session& s) { ++s.oneway_errors; }
+inline void mark_oneway_error(Session& s) {
+    ++s.oneway_errors;
+    fprintf(stderr, "server: command %s failed validation or execution\n",
+            opcode_name(s.opcode));
+}
 
 // True when a peer-supplied element count could actually be backed by the
 // bytes still unread. Handlers must consult this *before* sizing a container

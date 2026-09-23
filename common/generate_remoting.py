@@ -52,7 +52,7 @@ def generate(registry_xml, output):
     # Include an explicit schema revision as well as opcode names. Handler or
     # marshalling changes can otherwise leave two wire-incompatible builds
     # presenting the same digest and accepting each other.
-    schema_revision = 'wire-v2-explicit-surface-format'
+    schema_revision = 'wire-v5-transfer-commands'
     digest = hashlib.sha256(
         '\n'.join([schema_revision] + extras + names).encode('utf-8')).hexdigest()[:16]
 

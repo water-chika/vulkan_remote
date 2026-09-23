@@ -410,32 +410,22 @@ void handle_AcquireNextImageKHR(Session& c) {
         c.reply_status(Status::DecodeError);
         return;
     }
-    uint32_t image_index = 0;
-    VkResult result =
-        vkAcquireNextImageKHR(device, swapchain, timeout, semaphore, fence, &image_index);
-
-    // This is the only moment a resize of a server-owned window can be told
-    // to the client. The window belongs to the server, so the compositor's
-    // configure never reaches the application, and the driver has no reason
-    // to report the swapchain out of date - as far as it is concerned
-    // nothing changed. Reporting VK_SUBOPTIMAL_KHR is what makes a client
-    // recreate its swapchain, at which point it asks for surface
-    // capabilities again and gets the new extent. Only a success is
-    // downgraded: a real error, or an out-of-date the driver raised itself,
-    // already says at least as much and must not be weakened to advice.
+    // Detect server-owned window changes before acquiring. If a successful
+    // acquire were rewritten to SUBOPTIMAL or SURFACE_LOST afterwards, its
+    // semaphore would already be signaled even though callers commonly skip
+    // submission for a non-success result and recycle it as unsignaled.
     const auto surface_it = c.tables.swapchain_surfaces.find(swapchain);
     const VkSurfaceKHR surface = surface_it == c.tables.swapchain_surfaces.end()
                                      ? VK_NULL_HANDLE
                                      : surface_it->second;
-    if (result == VK_SUCCESS && c.server.poll_window_resized(surface)) {
-        result = VK_SUBOPTIMAL_KHR;
-    }
-    // Checked after the resize, and allowed to override it: a window the
-    // user has closed is not merely the wrong size, and SUBOPTIMAL would
-    // only send the client round the swapchain-recreation loop again
-    // against a surface that is never coming back.
-    if (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) {
-        if (c.server.poll_window_closed(surface)) result = VK_ERROR_SURFACE_LOST_KHR;
+    VkResult result = VK_SUCCESS;
+    uint32_t image_index = 0;
+    if (c.server.poll_window_closed(surface)) {
+        result = VK_ERROR_SURFACE_LOST_KHR;
+    } else if (c.server.poll_window_resized(surface)) {
+        result = VK_ERROR_OUT_OF_DATE_KHR;
+    } else {
+        result = vkAcquireNextImageKHR(device, swapchain, timeout, semaphore, fence, &image_index);
     }
 
     c.writer.u32(static_cast<uint32_t>(Status::Ok));

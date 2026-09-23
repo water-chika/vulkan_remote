@@ -25,7 +25,8 @@ compositor.
 | `client/` | the ICD: `icd.cpp` entry points, then one file per area |
 | `server/` | `main.cpp`, `session.*` dispatch, `handlers_*.cpp` |
 | `wayland/` | the protocol proxy and its own wire format |
-| `tools/offscreen.cpp` | ordinary Vulkan program used as the regression test |
+| `tools/offscreen.cpp` | ordinary Vulkan triangle used as an offscreen regression test |
+| `tools/texture_upload.cpp` | staging-uploaded checkerboard sampled and read back offscreen |
 | `tools/probe.cpp` | links no Vulkan; times round trips |
 
 Handlers register themselves by opcode at static initialisation, so adding a
@@ -211,8 +212,10 @@ vkcube.exe
 
 ## What works
 
-- `tools/offscreen` renders a triangle and reads it back: output is
-  **byte-identical** whether run on the system driver or through this one.
+- `tools/offscreen` renders a triangle and `tools/texture_upload` uploads and
+  samples a single-mip checkerboard; both read back deterministic images whose
+  PPM output is **byte-identical** on the system driver and through this one.
+  `tests/test_samples.py` verifies both paths with a fresh ephemeral server port.
 - `vkcube` and `vkcubepp` each complete 20 frames through the server-owned
   Wayland-window path. On 2026-09-23 they completed in 0.5 s and exited cleanly.
 - The Windows client works against the Linux server: a matched static DLL
@@ -287,8 +290,8 @@ a way to measure that conclusion rather than assume it.
 - Add the minimum command families needed by broader samples, in evidence-driven
   order: transfer (`vkCmdCopyImage`/`vkCmdBlitImage`/`vkCmdFillBuffer`/
   `vkCmdUpdateBuffer`), then compute (`vkCreateComputePipelines`/`vkCmdDispatch`).
-- Run pinned triangle, texture-upload, and compute samples after those APIs exist;
-  keep unsupported modern Vulkan and arbitrary `pNext` use explicitly out of scope.
+- Add a pinned compute sample after its APIs exist; keep unsupported modern Vulkan
+  and arbitrary `pNext` use explicitly out of scope.
 - `pNext` chains are dropped by the marshaller.
 - Shadow mappings are per-range; two mappings of overlapping memory are not
   reconciled.

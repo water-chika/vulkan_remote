@@ -121,6 +121,10 @@ void write_GraphicsPipelineCreateInfo(Writer& w, const VkGraphicsPipelineCreateI
 bool read_GraphicsPipelineCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                                       VkGraphicsPipelineCreateInfo* out);
 
+void write_ComputePipelineCreateInfo(Writer& w, const VkComputePipelineCreateInfo& s);
+bool read_ComputePipelineCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
+                                     VkComputePipelineCreateInfo* out);
+
 void write_FramebufferCreateInfo(Writer& w, const VkFramebufferCreateInfo& s);
 bool read_FramebufferCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                                  VkFramebufferCreateInfo* out);

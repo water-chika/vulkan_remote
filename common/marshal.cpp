@@ -589,6 +589,29 @@ bool read_GraphicsPipelineCreateInfo(Reader& r, Arena& arena, const HandleResolv
     return true;
 }
 
+void write_ComputePipelineCreateInfo(Writer& w, const VkComputePipelineCreateInfo& s) {
+    VkComputePipelineCreateInfo tmp = s;
+    tmp.pNext = nullptr;
+    w.bytes(&tmp, sizeof(tmp));
+    write_PipelineShaderStageCreateInfo(w, s.stage);
+}
+
+bool read_ComputePipelineCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
+                                    VkComputePipelineCreateInfo* out) {
+    if (!read_raw(r, out)) return false;
+    out->pNext = nullptr;
+    const uint64_t module_id = id_of(out->stage.module);
+    const uint64_t layout_id = id_of(out->layout);
+    const uint64_t base_pipeline_id = id_of(out->basePipelineHandle);
+    if (!read_PipelineShaderStageCreateInfo(r, arena, hr, &out->stage)) return false;
+    out->stage.pNext = nullptr;
+    patch_handle(&out->layout, [&](uint64_t id) { return hr.pipeline_layout(id); });
+    patch_handle(&out->basePipelineHandle, [&](uint64_t id) { return hr.pipeline(id); });
+    return (!module_id || out->stage.module != VK_NULL_HANDLE) &&
+           (!layout_id || out->layout != VK_NULL_HANDLE) &&
+           (!base_pipeline_id || out->basePipelineHandle != VK_NULL_HANDLE);
+}
+
 void write_FramebufferCreateInfo(Writer& w, const VkFramebufferCreateInfo& s) {
     VkFramebufferCreateInfo tmp = s;
     tmp.pNext = nullptr;

@@ -161,6 +161,9 @@ file(GENERATE
 add_executable(vulkan_remoting_offscreen tools/offscreen.cpp)
 target_link_libraries(vulkan_remoting_offscreen PRIVATE Vulkan::Vulkan)
 
+add_executable(vulkan_remoting_texture_upload tools/texture_upload.cpp)
+target_link_libraries(vulkan_remoting_texture_upload PRIVATE Vulkan::Vulkan)
+
 # wayland/: a waypipe-style protocol proxy, split so the replay half lives
 # inside whichever process on machine B also owns the Vulkan driver (see
 # wayland/proxy_server.hpp for why that placement is load-bearing, not
@@ -340,6 +343,12 @@ set_tests_properties(presentation PROPERTIES
     TIMEOUT 60
     SKIP_REGULAR_EXPRESSION "^SKIP:"
 )
+
+add_test(NAME samples
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_samples.py
+            --build-dir ${CMAKE_CURRENT_BINARY_DIR}
+)
+set_tests_properties(samples PROPERTIES TIMEOUT 180)
 
 add_test(NAME wayland_proxy
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wayland_proxy.py

@@ -263,6 +263,48 @@ def test_short_payload_for_known_command(server, build_dir):
             raise Failure('short payload was not reported as a decode error')
 
 
+def test_compute_pipeline_count_is_bounded(server, build_dir):
+    """A hostile outer createInfoCount must be rejected before allocation."""
+    with connect(server.port) as sock:
+        if handshake(sock, read_digest(build_dir)) != STATUS_OK:
+            raise Failure('handshake failed')
+
+        expected_opcode = read_opcode(build_dir, 'vkCreateComputePipelines')
+        payload = struct.pack('<QQI', 0, 0, 0xFFFFFFFF)
+        send_message(sock, expected_opcode, payload)
+        opcode, response = recv_message(sock)
+        if opcode != expected_opcode:
+            raise Failure('vkCreateComputePipelines reply had opcode {}'.format(opcode))
+        if len(response) < 4 or decode_u32(response) != STATUS_DECODE_ERROR:
+            raise Failure('hostile compute pipeline count was not rejected')
+
+
+def test_transfer_command_payloads_are_bounded(server, build_dir):
+    """Hostile transfer counts and byte lengths must not allocate or reach Vulkan."""
+    digest = read_digest(build_dir)
+    with connect(server.port) as sock:
+        if handshake(sock, digest) != STATUS_OK:
+            raise Failure('handshake failed')
+
+        # command buffer, source image, source layout, destination image,
+        # destination layout, and an impossible region count with no regions.
+        hostile_regions = struct.pack('<QQiQiI', 0, 0, 0, 0, 0, 0xFFFFFFFF)
+        send_message(sock, read_opcode(build_dir, 'vkCmdCopyImage'), hostile_regions)
+        send_message(sock, read_opcode(build_dir, 'vkCmdBlitImage'), hostile_regions)
+
+        # command buffer, destination buffer, offset, declared Vulkan dataSize,
+        # and a blob length larger than the handler's 64 KiB allocation cap.
+        hostile_update = struct.pack('<QQQQI', 0, 0, 0, 65536, 0xFFFFFFFF)
+        send_message(sock, read_opcode(build_dir, 'vkCmdUpdateBuffer'), hostile_update)
+
+    time.sleep(0.2)
+    if not server.alive():
+        raise Failure('server died on malformed transfer command payloads')
+    with connect(server.port) as good:
+        if handshake(good, digest) != STATUS_OK:
+            raise Failure('server stopped serving after malformed transfer commands')
+
+
 def test_abrupt_disconnect_is_survivable(server, build_dir):
     """Half a message, then vanish: the common case when a machine sleeps."""
     sock = connect(server.port)
@@ -376,6 +418,8 @@ TESTS = [
     test_truncated_payload_does_not_hang,
     test_oversized_payload_is_refused,
     test_short_payload_for_known_command,
+    test_compute_pipeline_count_is_bounded,
+    test_transfer_command_payloads_are_bounded,
     test_abrupt_disconnect_is_survivable,
     test_client_without_server_fails_cleanly,
     test_wsi_decode_errors_reply,

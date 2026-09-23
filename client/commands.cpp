@@ -107,6 +107,22 @@ VKAPI_ATTR VkResult VKAPI_CALL ResetCommandBuffer(VkCommandBuffer handle,
     return VK_SUCCESS;
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL ResetCommandPool(VkDevice handle, VkCommandPool pool,
+                                                VkCommandPoolResetFlags flags) {
+    RemoteDevice* device = to_device(handle);
+    Writer request;
+    request.handle(device->remote_id);
+    request.handle(id_from_handle(pool));
+    request.u32(flags);
+    std::vector<char> reply;
+    if (!device->instance->connection.round_trip(Opcode::vkResetCommandPool, request, &reply)) {
+        return VK_ERROR_DEVICE_LOST;
+    }
+    Reader r = payload_reader(reply);
+    const VkResult result = static_cast<VkResult>(r.i32());
+    return r.ok() ? result : VK_ERROR_DEVICE_LOST;
+}
+
 VKAPI_ATTR void VKAPI_CALL CmdBeginRenderPass(VkCommandBuffer handle,
                                               const VkRenderPassBeginInfo* pRenderPassBegin,
                                               VkSubpassContents contents) {
@@ -216,6 +232,17 @@ VKAPI_ATTR void VKAPI_CALL CmdDraw(VkCommandBuffer handle, uint32_t vertexCount,
     cb->device->instance->connection.send_oneway(Opcode::vkCmdDraw, request);
 }
 
+VKAPI_ATTR void VKAPI_CALL CmdDispatch(VkCommandBuffer handle, uint32_t groupCountX,
+                                       uint32_t groupCountY, uint32_t groupCountZ) {
+    RemoteCommandBuffer* cb = to_cmd(handle);
+    Writer request;
+    request.handle(cb->remote_id);
+    request.u32(groupCountX);
+    request.u32(groupCountY);
+    request.u32(groupCountZ);
+    cb->device->instance->connection.send_oneway(Opcode::vkCmdDispatch, request);
+}
+
 VKAPI_ATTR void VKAPI_CALL CmdDrawIndexed(VkCommandBuffer handle, uint32_t indexCount,
                                           uint32_t instanceCount, uint32_t firstIndex,
                                           int32_t vertexOffset, uint32_t firstInstance) {
@@ -297,6 +324,69 @@ VKAPI_ATTR void VKAPI_CALL CmdCopyImageToBuffer(VkCommandBuffer handle, VkImage 
     cb->device->instance->connection.send_oneway(Opcode::vkCmdCopyImageToBuffer, request);
 }
 
+VKAPI_ATTR void VKAPI_CALL CmdCopyImage(VkCommandBuffer handle, VkImage src,
+                                        VkImageLayout srcImageLayout, VkImage dst,
+                                        VkImageLayout dstImageLayout, uint32_t regionCount,
+                                        const VkImageCopy* pRegions) {
+    RemoteCommandBuffer* cb = to_cmd(handle);
+    Writer request;
+    request.handle(cb->remote_id);
+    request.handle(id_from_handle(src));
+    request.i32(static_cast<int32_t>(srcImageLayout));
+    request.handle(id_from_handle(dst));
+    request.i32(static_cast<int32_t>(dstImageLayout));
+    request.u32(regionCount);
+    for (uint32_t i = 0; i < regionCount; ++i) write_ImageCopy(request, pRegions[i]);
+    cb->device->instance->connection.send_oneway(Opcode::vkCmdCopyImage, request);
+}
+
+VKAPI_ATTR void VKAPI_CALL CmdBlitImage(VkCommandBuffer handle, VkImage src,
+                                        VkImageLayout srcImageLayout, VkImage dst,
+                                        VkImageLayout dstImageLayout, uint32_t regionCount,
+                                        const VkImageBlit* pRegions, VkFilter filter) {
+    RemoteCommandBuffer* cb = to_cmd(handle);
+    Writer request;
+    request.handle(cb->remote_id);
+    request.handle(id_from_handle(src));
+    request.i32(static_cast<int32_t>(srcImageLayout));
+    request.handle(id_from_handle(dst));
+    request.i32(static_cast<int32_t>(dstImageLayout));
+    request.u32(regionCount);
+    for (uint32_t i = 0; i < regionCount; ++i) write_ImageBlit(request, pRegions[i]);
+    request.i32(static_cast<int32_t>(filter));
+    cb->device->instance->connection.send_oneway(Opcode::vkCmdBlitImage, request);
+}
+
+VKAPI_ATTR void VKAPI_CALL CmdFillBuffer(VkCommandBuffer handle, VkBuffer dst,
+                                         VkDeviceSize dstOffset, VkDeviceSize size,
+                                         uint32_t data) {
+    RemoteCommandBuffer* cb = to_cmd(handle);
+    Writer request;
+    request.handle(cb->remote_id);
+    request.handle(id_from_handle(dst));
+    request.u64(dstOffset);
+    request.u64(size);
+    request.u32(data);
+    cb->device->instance->connection.send_oneway(Opcode::vkCmdFillBuffer, request);
+}
+
+VKAPI_ATTR void VKAPI_CALL CmdUpdateBuffer(VkCommandBuffer handle, VkBuffer dst,
+                                           VkDeviceSize dstOffset, VkDeviceSize dataSize,
+                                           const void* pData) {
+    RemoteCommandBuffer* cb = to_cmd(handle);
+    Writer request;
+    request.handle(cb->remote_id);
+    request.handle(id_from_handle(dst));
+    request.u64(dstOffset);
+    request.u64(dataSize);
+    if (dataSize != 0 && dataSize <= 65536 && (dataSize & 3) == 0 && pData != nullptr) {
+        request.bytes(pData, static_cast<size_t>(dataSize));
+    } else {
+        request.bytes(nullptr, 0);
+    }
+    cb->device->instance->connection.send_oneway(Opcode::vkCmdUpdateBuffer, request);
+}
+
 VKAPI_ATTR void VKAPI_CALL CmdClearColorImage(VkCommandBuffer handle, VkImage image,
                                               VkImageLayout imageLayout,
                                               const VkClearColorValue* pColor,
@@ -336,6 +426,7 @@ const DeviceEntry* get_command_entries(size_t* count) {
         D(BeginCommandBuffer),
         D(EndCommandBuffer),
         D(ResetCommandBuffer),
+        D(ResetCommandPool),
         D(CmdBeginRenderPass),
         D(CmdEndRenderPass),
         D(CmdBindPipeline),
@@ -345,11 +436,16 @@ const DeviceEntry* get_command_entries(size_t* count) {
         D(CmdSetViewport),
         D(CmdSetScissor),
         D(CmdDraw),
+        D(CmdDispatch),
         D(CmdDrawIndexed),
         D(CmdPipelineBarrier),
         D(CmdCopyBuffer),
         D(CmdCopyBufferToImage),
         D(CmdCopyImageToBuffer),
+        D(CmdCopyImage),
+        D(CmdBlitImage),
+        D(CmdFillBuffer),
+        D(CmdUpdateBuffer),
         D(CmdClearColorImage),
         D(CmdPushConstants),
 #undef D
