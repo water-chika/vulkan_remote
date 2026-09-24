@@ -23,6 +23,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 
 FRAMES = 20
@@ -69,7 +70,9 @@ def main() -> int:
                      '"api_version":"1.3.0"}}\n' % icd)
 
     port, wayland_port = free_port(), free_port()
+    loader_data = tempfile.TemporaryDirectory(prefix="vulkan-remoting-loader-")
     server_env = dict(os.environ)
+    server_env["XDG_DATA_HOME"] = loader_data.name
     # This test launches no proxy_client, so the application's local wl_surface
     # can never exist in the server's Wayland connection. Exercise the
     # server-owned window path instead; the standalone proxy tests cover the
@@ -106,6 +109,7 @@ def main() -> int:
         return 1
 
     env = dict(os.environ)
+    env["XDG_DATA_HOME"] = loader_data.name
     env["VK_ICD_FILENAMES"] = manifest
     env["VK_DRIVER_FILES"] = manifest
     env["VK_REMOTING_HOST"] = "127.0.0.1"

@@ -96,6 +96,9 @@ class Server {
     // client's swapchain.
     bool poll_window_resized(VkSurfaceKHR surface);
     bool poll_window_closed(VkSurfaceKHR surface);
+    std::vector<OwnWindow::InputEvent> poll_window_events(VkSurfaceKHR surface,
+                                                          uint32_t max_events,
+                                                          bool* overflowed);
 
     // Handles cross the wire as indices, never as pointers. A VkPhysicalDevice
     // is a host pointer; sending its bits would be meaningless remotely and

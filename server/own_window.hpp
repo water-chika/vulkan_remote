@@ -15,9 +15,13 @@
 // request" lifetime still does (see session.hpp's create_own_window).
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <thread>
+#include <unordered_set>
+#include <vector>
 
 #if defined(_WIN32)
 
@@ -38,13 +42,29 @@ struct wl_registry;
 struct wl_compositor;
 struct wl_surface;
 struct wl_array;
+struct wl_seat;
+struct wl_pointer;
+struct wl_keyboard;
 struct xdg_wm_base;
 struct xdg_surface;
 struct xdg_toplevel;
+struct xkb_context;
+struct xkb_keymap;
+struct xkb_state;
 #endif
 
 class OwnWindow {
    public:
+    enum class InputType : uint32_t { Motion = 1, Button = 2, Axis = 3, Key = 4, Focus = 5 };
+    struct InputEvent {
+        uint64_t sequence = 0;
+        InputType type = InputType::Motion;
+        int32_t a = 0;
+        int32_t b = 0;
+        int32_t c = 0;
+        int32_t d = 0;
+    };
+
     OwnWindow() = default;
     ~OwnWindow();
 
@@ -100,15 +120,62 @@ class OwnWindow {
     static void toplevel_configure(void* data, xdg_toplevel* toplevel, int32_t width,
                                    int32_t height, wl_array* states);
     static void toplevel_close(void* data, xdg_toplevel* toplevel);
+    static void seat_capabilities(void* data, wl_seat* seat, uint32_t capabilities);
+    static void seat_name(void*, wl_seat*, const char*) {}
+    static void pointer_enter(void* data, wl_pointer*, uint32_t, wl_surface*, int32_t, int32_t);
+    static void pointer_leave(void* data, wl_pointer*, uint32_t, wl_surface*);
+    static void pointer_motion(void* data, wl_pointer*, uint32_t, int32_t, int32_t);
+    static void pointer_button(void* data, wl_pointer*, uint32_t, uint32_t, uint32_t, uint32_t);
+    static void pointer_axis(void* data, wl_pointer*, uint32_t, uint32_t, int32_t);
+    static void pointer_frame(void* data, wl_pointer*);
+    static void pointer_axis_source(void*, wl_pointer*, uint32_t) {}
+    static void pointer_axis_stop(void*, wl_pointer*, uint32_t, uint32_t) {}
+    static void pointer_axis_discrete(void* data, wl_pointer*, uint32_t, int32_t);
+    static void pointer_axis_value120(void* data, wl_pointer*, uint32_t, int32_t);
+    static void keyboard_keymap(void* data, wl_keyboard*, uint32_t, int32_t fd, uint32_t size);
+    static void keyboard_enter(void* data, wl_keyboard*, uint32_t, wl_surface*, wl_array*);
+    static void keyboard_leave(void* data, wl_keyboard*, uint32_t, wl_surface*);
+    static void keyboard_key(void* data, wl_keyboard*, uint32_t, uint32_t, uint32_t, uint32_t);
+    static void keyboard_modifiers(void* data, wl_keyboard*, uint32_t, uint32_t depressed,
+                                   uint32_t latched, uint32_t locked, uint32_t group);
+    static void keyboard_repeat_info(void* data, wl_keyboard*, int32_t rate, int32_t delay);
 
    private:
     wl_display* display_ = nullptr;
     wl_compositor* compositor_ = nullptr;
+    wl_seat* seat_ = nullptr;
+    uint32_t seat_name_ = 0;
+    wl_pointer* pointer_ = nullptr;
+    uint32_t pointer_version_ = 0;
+    wl_keyboard* keyboard_ = nullptr;
+    uint32_t keyboard_version_ = 0;
     xdg_wm_base* wm_base_ = nullptr;
     wl_surface* surface_ = nullptr;
     xdg_surface* xdg_surface_ = nullptr;
     xdg_toplevel* toplevel_ = nullptr;
     bool configured_ = false;
+    bool pointer_inside_ = false;
+    bool keyboard_focused_ = false;
+    uint32_t pressed_pointer_buttons_ = 0;
+    int32_t axis_vertical_remainder_ = 0;
+    int32_t axis_horizontal_remainder_ = 0;
+    bool axis_vertical_discrete_ = false;
+    bool axis_horizontal_discrete_ = false;
+    int32_t pending_axis_vertical_ = 0;
+    int32_t pending_axis_horizontal_ = 0;
+    bool pending_axis_vertical_value120_ = false;
+    bool pending_axis_horizontal_value120_ = false;
+    std::unordered_set<uint32_t> pressed_keys_;
+    xkb_context* xkb_context_ = nullptr;
+    xkb_keymap* xkb_keymap_ = nullptr;
+    xkb_state* xkb_state_ = nullptr;
+    std::mutex repeat_mutex_;
+    std::condition_variable repeat_cv_;
+    std::thread repeat_thread_;
+    bool stop_repeat_ = false;
+    int32_t repeat_rate_ = 0;
+    int32_t repeat_delay_ = 0;
+    uint32_t repeating_key_ = 0;
     std::mutex display_mutex_;
     std::atomic<bool> stop_pump_{false};
     std::thread pump_thread_;
@@ -147,6 +214,10 @@ class OwnWindow {
     uint32_t width() const { return width_.load(); }
     uint32_t height() const { return height_.load(); }
 
+    std::vector<InputEvent> take_input_events(uint32_t max_events, bool* overflowed);
+    void record_input(InputType type, int32_t a = 0, int32_t b = 0,
+                      int32_t c = 0, int32_t d = 0);
+
    private:
     // Written from whichever thread dispatches events, read from session
     // threads.
@@ -154,5 +225,10 @@ class OwnWindow {
     std::atomic<uint32_t> height_{0};
     std::atomic<bool> resized_{false};
     std::atomic<bool> closed_{false};
+    std::mutex input_mutex_;
+    std::deque<InputEvent> input_events_;
+    uint64_t next_input_sequence_ = 1;
+    bool input_overflowed_ = false;
+    static constexpr size_t kMaxInputEvents = 1024;
 };
 

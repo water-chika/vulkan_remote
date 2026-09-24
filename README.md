@@ -159,6 +159,25 @@ retain the remote log and status, or `--dry-run` to inspect commands without
 contacting a host. Application runtime is unlimited by default; pass, for
 example, `--timeout 30` when a bounded diagnostic run is wanted.
 
+To keep the rendered window on the Windows application host, use the opt-in
+local-display mode with an explicit viewer path:
+
+```sh
+python3 tools/run_windows_app.py \
+  --windows-host <windows-host> \
+  --local-display \
+  --rfb-viewer 'C:\\path\\to\\vncviewer.exe' -- \
+  'C:\\VulkanSDK\\<version>\\Bin\\vkcube.exe'
+```
+
+This starts a private headless Sway output and loopback-only wayvnc on the GPU
+host, adds a second SSH reverse forward, and launches the viewer beside the app.
+Keyboard and mouse events are relayed to the app's HWND as ordinary Win32 window
+messages. This is sufficient for message-loop applications such as `vkcube`,
+but it does not emulate Raw Input, DirectInput, `GetAsyncKeyState`, true Windows
+focus, IME, or arbitrary keyboard-layout state. Those applications need a later
+process-local/native-input integration rather than this message bridge.
+
 Windows→Linux does **not** require `--wayland`, the Wayland proxy, or TCP port
 `24681`: a remote Win32 surface is translated to a server-owned Wayland window.
 The `--wayland`/`24681` path is only for Linux→Linux when preserving the Linux

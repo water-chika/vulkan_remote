@@ -21,10 +21,13 @@ import os
 import pathlib
 import random
 import re
+import shlex
+import shutil
 import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -68,6 +71,14 @@ class Config:
     server_port: int
     windows_port: int
     windows_port_auto: bool
+    local_display: bool
+    desktop_size: str
+    sway: str
+    wayvnc: str
+    wayvnc_port: int
+    windows_rfb_port: int
+    windows_rfb_port_auto: bool
+    rfb_viewer: str
     startup_timeout: float
     timeout: float
     cleanup_timeout: float
@@ -147,6 +158,16 @@ def choose_remote_port() -> int:
     return random.SystemRandom().randint(30000, 60000)
 
 
+def parse_size(value: str) -> tuple[int, int]:
+    match = re.fullmatch(r"([1-9][0-9]{1,4})x([1-9][0-9]{1,4})", value)
+    if not match:
+        raise LaunchError("--desktop-size must be WIDTHxHEIGHT")
+    width, height = int(match.group(1)), int(match.group(2))
+    if width > 16384 or height > 16384:
+        raise LaunchError("--desktop-size exceeds 16384x16384")
+    return width, height
+
+
 def server_environment(source: dict[str, str] | None = None) -> dict[str, str]:
     env = dict(os.environ if source is None else source)
     for name in CLIENT_ENV_VARS:
@@ -167,8 +188,81 @@ def server_command(config: Config) -> list[str]:
     return command
 
 
+@dataclasses.dataclass
+class HeadlessSession:
+    root: pathlib.Path
+    sway: OwnedProcess
+    wayvnc: OwnedProcess
+    env: dict[str, str]
+
+
+def start_headless_session(config: Config, run_id: str) -> HeadlessSession:
+    width, height = parse_size(config.desktop_size)
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    root = pathlib.Path(tempfile.mkdtemp(prefix=f"vulkan-remote-{run_id}-", dir=runtime))
+    sway = wayvnc = None
+    env_file, sway_config = root / "env", root / "sway.conf"
+    env_script = root / "report-env.sh"
+    env_script.write_text(
+        "#!/bin/sh\n"
+        f"tmp={shlex.quote(str(env_file) + '.tmp')}\n"
+        "printf 'WAYLAND_DISPLAY=%s\\nSWAYSOCK=%s\\n' \"$WAYLAND_DISPLAY\" \"$SWAYSOCK\" > \"$tmp\"\n"
+        f"mv \"$tmp\" {shlex.quote(str(env_file))}\n",
+        encoding="utf-8")
+    env_script.chmod(0o700)
+    sway_config.write_text(
+        f"output HEADLESS-1 resolution {width}x{height} position 0 0\n"
+        "output HEADLESS-1 bg #101010 solid_color\n"
+        "default_border none\ndefault_floating_border none\nfocus_follows_mouse no\n"
+        "for_window [app_id=\"vulkan_remoting\"] fullscreen enable\n"
+        f"exec {shlex.quote(str(env_script))}\n",
+        encoding="utf-8")
+    sway_env = server_environment()
+    for name in ("WAYLAND_DISPLAY", "SWAYSOCK", "DISPLAY"):
+        sway_env.pop(name, None)
+    sway_env.update(WLR_BACKENDS="headless", WLR_LIBINPUT_NO_DEVICES="1")
+    try:
+        sway = start_owned([config.sway, "-c", str(sway_config)], env=sway_env)
+        deadline = time.monotonic() + config.startup_timeout
+        while time.monotonic() < deadline:
+            if sway.process.poll() is not None:
+                raise LaunchError("headless Sway exited during startup\n" + sway.output.text())
+            if env_file.exists():
+                contents = env_file.read_text(encoding="utf-8")
+                if "WAYLAND_DISPLAY=" in contents and "SWAYSOCK=" in contents:
+                    break
+            time.sleep(0.1)
+        else:
+            raise LaunchError("headless Sway did not report its display")
+        child_env = server_environment()
+        child_env["XDG_RUNTIME_DIR"] = runtime
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            name, _, value = line.partition("=")
+            if name in ("WAYLAND_DISPLAY", "SWAYSOCK") and value:
+                child_env[name] = value
+        wayvnc = start_owned([config.wayvnc, "--output=HEADLESS-1", "--render-cursor",
+                              "127.0.0.1", str(config.wayvnc_port)], env=child_env)
+        wait_for_listener(wayvnc.process, config.wayvnc_port,
+                          config.startup_timeout, wayvnc.output)
+        return HeadlessSession(root, sway, wayvnc, child_env)
+    except BaseException:
+        stop_owned(wayvnc, config.cleanup_timeout)
+        stop_owned(sway, config.cleanup_timeout)
+        shutil.rmtree(root, ignore_errors=True)
+        raise
+
+
+def stop_headless_session(session: HeadlessSession | None, timeout: float) -> None:
+    if not session:
+        return
+    stop_owned(session.wayvnc, timeout)
+    stop_owned(session.sway, timeout)
+    import shutil
+    shutil.rmtree(session.root, ignore_errors=True)
+
+
 def tunnel_command(config: Config) -> list[str]:
-    return [
+    command = [
         "ssh",
         "-N",
         "-T",
@@ -184,10 +278,12 @@ def tunnel_command(config: Config) -> list[str]:
         "ServerAliveInterval=15",
         "-o",
         "ServerAliveCountMax=3",
-        "-R",
-        f"127.0.0.1:{config.windows_port}:127.0.0.1:{config.server_port}",
-        config.ssh_destination,
+        "-R", f"127.0.0.1:{config.windows_port}:127.0.0.1:{config.server_port}",
     ]
+    if config.local_display:
+        command += ["-R", f"127.0.0.1:{config.windows_rfb_port}:127.0.0.1:{config.wayvnc_port}"]
+    command.append(config.ssh_destination)
+    return command
 
 
 def remote_paths(config: Config, run_id: str) -> dict[str, str]:
@@ -201,9 +297,15 @@ def remote_paths(config: Config, run_id: str) -> dict[str, str]:
         "log": _win_join(run_dir, "app.log"),
         "started": _win_join(run_dir, "started"),
         "pid": _win_join(run_dir, "runner.pid"),
+        "viewer_pid": _win_join(run_dir, "viewer.pid"),
         "status_tmp": _win_join(run_dir, "status.tmp"),
         "status": _win_join(run_dir, "status"),
     }
+
+
+def viewer_command(config: Config) -> list[str]:
+    return ([config.rfb_viewer, f"127.0.0.1::{config.windows_rfb_port}"]
+            if config.local_display else [])
 
 
 def build_windows_wrapper(config: Config, paths: dict[str, str]) -> str:
@@ -213,19 +315,28 @@ def build_windows_wrapper(config: Config, paths: dict[str, str]) -> str:
     command = subprocess.list2cmdline(
         [config.windows_python, paths["launcher"], paths["config"]]
     )
-    return "\r\n".join(
-        [
-            "@echo off",
-            "setlocal",
-            f'>"{paths["started"]}" echo started',
-            f'{command} >"{paths["log"]}" 2>&1',
-            'set "RC=%ERRORLEVEL%"',
-            f'>"{paths["status_tmp"]}" echo %RC%',
-            f'move /Y "{paths["status_tmp"]}" "{paths["status"]}" >nul',
-            "exit /b %RC%",
-            "",
-        ]
-    )
+    lines = ["@echo off", "setlocal", f'>"{paths["started"]}" echo started']
+    viewer = viewer_command(config)
+    if viewer:
+        viewer_ps = (
+            "$ErrorActionPreference='Stop';"
+            "$p=Start-Process -PassThru -FilePath " + _ps_quote(viewer[0]) +
+            " -ArgumentList " + _ps_quote(viewer[1]) + ";"
+            "[IO.File]::WriteAllText(" + _ps_quote(paths["viewer_pid"]) +
+            ",$p.Id.ToString())"
+        )
+        encoded = base64.b64encode(viewer_ps.encode("utf-16le")).decode("ascii")
+        lines.append(f'powershell -NoProfile -EncodedCommand {encoded}')
+        lines.append('if errorlevel 1 (set "RC=%ERRORLEVEL%" & goto complete)')
+    lines += [
+        f'{command} >"{paths["log"]}" 2>&1',
+        'set "RC=%ERRORLEVEL%"',
+        ':complete',
+        f'>"{paths["status_tmp"]}" echo %RC%',
+        f'move /Y "{paths["status_tmp"]}" "{paths["status"]}" >nul',
+        "exit /b %RC%", "",
+    ]
+    return "\r\n".join(lines)
 
 
 def stage_commands(config: Config, paths: dict[str, str], wrapper: str) -> list[str]:
@@ -265,10 +376,16 @@ def stage_commands(config: Config, paths: dict[str, str], wrapper: str) -> list[
     ]
     for path, content in files:
         payload = base64.b64encode(content.encode("utf-8")).decode("ascii")
-        commands.append(
-            f"[IO.File]::WriteAllBytes({_ps_quote(path)},"
-            f"[Convert]::FromBase64String('{payload}'))"
-        )
+        commands.append(f"[IO.File]::WriteAllBytes({_ps_quote(path)},[byte[]]@())")
+        # wsh wraps the payload in another UTF-16/base64 command; keep every
+        # source command well below Windows' command-line limit.
+        for start in range(0, len(payload), 768):
+            chunk = payload[start:start + 768]
+            commands.append(
+                f"$b=[Convert]::FromBase64String('{chunk}');"
+                f"$f=[IO.File]::Open({_ps_quote(path)},'Append','Write','Read');"
+                "$f.Write($b,0,$b.Length);$f.Dispose()"
+            )
     return commands
 
 
@@ -426,14 +543,22 @@ def start_tunnel(config: Config, attempts: int = 5) -> tuple[Config, OwnedProces
             "remote forward failure",
             "cannot listen to port",
         ))
-        if not collision or not config.windows_port_auto or attempt == attempts:
+        can_retry = config.windows_port_auto or (
+            config.local_display and config.windows_rfb_port_auto)
+        if not collision or not can_retry or attempt == attempts:
             break
         old_port = config.windows_port
-        config = dataclasses.replace(config, windows_port=choose_remote_port())
-        progress(
-            f"Windows port {old_port} is unavailable; retrying with "
-            f"{config.windows_port}"
-        )
+        old_rfb_port = config.windows_rfb_port
+        replacements = {}
+        if config.windows_port_auto:
+            replacements["windows_port"] = choose_remote_port()
+        if config.local_display and config.windows_rfb_port_auto:
+            replacements["windows_rfb_port"] = choose_remote_port()
+        config = dataclasses.replace(config, **replacements)
+        message = f"Windows port {old_port} is unavailable; retrying with {config.windows_port}"
+        if config.local_display:
+            message += f" (RFB {old_rfb_port} -> {config.windows_rfb_port})"
+        progress(message)
     raise LaunchError(f"SSH reverse tunnel failed\n{last_error}")
 
 
@@ -446,7 +571,7 @@ def fetch_log_chunk(config: Config, paths: dict[str, str], offset: int) -> tuple
         "if(Test-Path -LiteralPath $p){"
         "$f=[IO.File]::Open($p,'Open','Read','ReadWrite');try{"
         "if($f.Length -lt $o){$o=0};$f.Seek($o,'Begin')|Out-Null;"
-        "$n=[int]($f.Length-$o);$b=New-Object byte[] $n;"
+        "$n=[int][Math]::Min([int64]1048576,$f.Length-$o);$b=New-Object byte[] $n;"
         "$read=$f.Read($b,0,$n);"
         "[Convert]::ToBase64String($b,0,$read)+':'+($o+$read)"
         "}finally{$f.Dispose()}}"
@@ -466,7 +591,7 @@ def fetch_log_chunk(config: Config, paths: dict[str, str], offset: int) -> tuple
 
 
 def poll_status(config: Config, paths: dict[str, str], server: OwnedProcess,
-                tunnel: OwnedProcess) -> int:
+                tunnel: OwnedProcess, headless: HeadlessSession | None = None) -> int:
     started = time.monotonic()
     deadline = None if config.timeout == 0 else started + config.timeout
     next_report = started + 15.0
@@ -481,6 +606,13 @@ def poll_status(config: Config, paths: dict[str, str], server: OwnedProcess,
             raise LaunchError(f"server exited while the application ran\n{server.output.text()}")
         if tunnel.process.poll() is not None:
             raise LaunchError(f"SSH tunnel exited while the application ran\n{tunnel.output.text()}")
+        if headless is not None:
+            if headless.sway.process.poll() is not None:
+                raise LaunchError("headless Sway exited while the application ran\n" +
+                                  headless.sway.output.text())
+            if headless.wayvnc.process.poll() is not None:
+                raise LaunchError("wayvnc exited while the application ran\n" +
+                                  headless.wayvnc.output.text())
         # Read status before judging a finished wsh process. The wrapper writes
         # status immediately before it exits, so the local transport may be
         # reaped by the time this polling iteration starts.
@@ -497,10 +629,14 @@ def poll_status(config: Config, paths: dict[str, str], server: OwnedProcess,
                 rc = int(text.splitlines()[-1].strip())
             except ValueError as error:
                 raise LaunchError(f"invalid Windows completion status: {text!r}") from error
-            chunk, log_offset = fetch_log_chunk(config, paths, log_offset)
-            if chunk:
-                sys.stdout.buffer.write(chunk)
-                sys.stdout.buffer.flush()
+            while True:
+                chunk, next_offset = fetch_log_chunk(config, paths, log_offset)
+                if chunk:
+                    sys.stdout.buffer.write(chunk)
+                    sys.stdout.buffer.flush()
+                if next_offset == log_offset or len(chunk) < 1048576:
+                    break
+                log_offset = next_offset
             return rc
 
         now = time.monotonic()
@@ -543,6 +679,15 @@ def cleanup_windows(config: Config, paths: dict[str, str], run_id: str,
                 timeout=config.cleanup_timeout)
         stop_owned_tree = (
             "$ErrorActionPreference='Stop';"
+            f"$vpf={_ps_quote(paths['viewer_pid'])};"
+            "if(Test-Path -LiteralPath $vpf){"
+            "$viewerPid=[int](Get-Content -Raw -LiteralPath $vpf);"
+            "$viewer=Get-CimInstance Win32_Process -Filter ('ProcessId='+$viewerPid);"
+            f"$rfbPort={_ps_quote(str(config.windows_rfb_port))};"
+            "if($viewer -and $viewer.Name -in @('vncviewer.exe','tvnviewer.exe') -and "
+            "$viewer.CommandLine -and $viewer.CommandLine.Contains($rfbPort)){"
+            "& taskkill.exe /PID $viewerPid /T /F | Out-Null;"
+            "if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}}};"
             f"$pf={_ps_quote(paths['pid'])};$owned={_ps_quote(paths['run_dir'])};"
             "if(Test-Path -LiteralPath $pf){"
             "$pidValue=[int](Get-Content -Raw -LiteralPath $pf);"
@@ -603,20 +748,31 @@ def launch(config: Config) -> int:
     if config.dry_run:
         return dry_run(config, run_id)
 
-    if not os.environ.get("XDG_RUNTIME_DIR") or not os.environ.get("WAYLAND_DISPLAY"):
-        raise LaunchError("XDG_RUNTIME_DIR and WAYLAND_DISPLAY must name the active session")
-    for path, name in ((config.server, "server"), (config.wsh, "wsh")):
+    if not os.environ.get("XDG_RUNTIME_DIR"):
+        raise LaunchError("XDG_RUNTIME_DIR must name the user's runtime directory")
+    if not config.local_display and not os.environ.get("WAYLAND_DISPLAY"):
+        raise LaunchError("WAYLAND_DISPLAY must name the active session")
+    required = [(config.server, "server"), (config.wsh, "wsh")]
+    if config.local_display:
+        required += [(config.sway, "sway"), (config.wayvnc, "wayvnc")]
+    for path, name in required:
         if not os.path.isfile(path):
             raise LaunchError(f"{name} does not exist: {path}")
 
     paths = remote_paths(config, run_id)
-    server = tunnel = None
+    server = tunnel = headless = None
     staged = False
     task_created = False
     primary_error: BaseException | None = None
     try:
+        server_env = server_environment()
+        if config.local_display:
+            progress(f"starting isolated {config.desktop_size} display")
+            headless = start_headless_session(config, run_id)
+            server_env = headless.env
+            progress(f"RFB server ready on 127.0.0.1:{config.wayvnc_port}")
         progress(f"starting local Vulkan server on 127.0.0.1:{config.server_port}")
-        server = start_owned(server_command(config), env=server_environment())
+        server = start_owned(server_command(config), env=server_env)
         wait_for_listener(
             server.process, config.server_port, config.startup_timeout, server.output
         )
@@ -640,7 +796,7 @@ def launch(config: Config) -> int:
         task_created = True
         progress("launching Windows application")
         run_wsh(config, task_run_command(run_id))
-        rc = poll_status(config, paths, server, tunnel)
+        rc = poll_status(config, paths, server, tunnel, headless)
         progress(f"exited with status {rc}")
         if rc != 0:
             primary_error = LaunchError(f"Windows application exited with status {rc}")
@@ -667,6 +823,7 @@ def launch(config: Config) -> int:
                 cleanup_errors = [str(error)]
         stop_owned(tunnel, config.cleanup_timeout)
         stop_owned(server, config.cleanup_timeout)
+        stop_headless_session(headless, config.cleanup_timeout)
         if cleanup_errors:
             sys.stderr.write("cleanup warning: " + "; ".join(cleanup_errors) + "\n")
             if primary_error is None:
@@ -686,6 +843,17 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
     root = pathlib.Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--windows-host", default=DEFAULT_WINDOWS_HOST)
+    parser.add_argument("--local-display", action="store_true",
+                        help="stream a private server display back through RFB")
+    parser.add_argument("--desktop-size", default="1280x720")
+    parser.add_argument("--sway", default="/usr/bin/sway")
+    parser.add_argument("--wayvnc", default="/usr/bin/wayvnc")
+    parser.add_argument("--wayvnc-port", type=int, default=0)
+    parser.add_argument("--windows-rfb-port", type=int, default=0)
+    parser.add_argument(
+        "--rfb-viewer", default="",
+        help="absolute Windows RFB viewer path (required with --local-display)",
+    )
     parser.add_argument("--ssh-destination", default="")
     parser.add_argument("--windows-user", default=DEFAULT_WINDOWS_USER)
     parser.add_argument("--windows-deploy-dir", default=DEFAULT_WINDOWS_DEPLOY)
@@ -713,6 +881,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
         _argument(value, f"application argument {index}")
         for index, value in enumerate(app)
     )
+    parse_size(args.desktop_size)
     windows_host = _plain(args.windows_host, "--windows-host")
     ssh_destination = _plain(args.ssh_destination or windows_host, "--ssh-destination")
     windows_user = _plain(args.windows_user, "--windows-user")
@@ -744,8 +913,14 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
             raise LaunchError(f"{name} must be positive")
     if args.timeout < 0:
         raise LaunchError("--timeout must be non-negative (0 waits indefinitely)")
+    if args.local_display:
+        _plain(args.rfb_viewer, "--rfb-viewer")
+        if args.server_port and args.wayvnc_port and args.server_port == args.wayvnc_port:
+            raise LaunchError("--server-port and --wayvnc-port must be different")
+        if args.windows_port and args.windows_rfb_port and args.windows_port == args.windows_rfb_port:
+            raise LaunchError("--windows-port and --windows-rfb-port must be different")
 
-    return Config(
+    config = Config(
         windows_host=windows_host,
         ssh_destination=ssh_destination,
         windows_user=windows_user,
@@ -758,6 +933,14 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
         server_port=_port(args.server_port, "--server-port") or choose_local_port(),
         windows_port=_port(args.windows_port, "--windows-port") or choose_remote_port(),
         windows_port_auto=args.windows_port == 0,
+        local_display=args.local_display,
+        desktop_size=args.desktop_size,
+        sway=args.sway,
+        wayvnc=args.wayvnc,
+        wayvnc_port=_port(args.wayvnc_port, "--wayvnc-port") or choose_local_port(),
+        windows_rfb_port=_port(args.windows_rfb_port, "--windows-rfb-port") or choose_remote_port(),
+        windows_rfb_port_auto=args.windows_rfb_port == 0,
+        rfb_viewer=args.rfb_viewer,
         startup_timeout=args.startup_timeout,
         timeout=args.timeout,
         cleanup_timeout=args.cleanup_timeout,
@@ -766,6 +949,11 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
         dry_run=args.dry_run,
         app_argv=checked_app,
     )
+    if config.local_display and config.server_port == config.wayvnc_port:
+        raise LaunchError("selected Vulkan and RFB server ports collided; specify one explicitly")
+    if config.local_display and config.windows_port == config.windows_rfb_port:
+        raise LaunchError("selected Windows Vulkan and RFB ports collided; specify one explicitly")
+    return config
 
 
 def main(argv: Sequence[str] | None = None) -> int:

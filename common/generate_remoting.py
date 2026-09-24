@@ -47,12 +47,12 @@ def generate(registry_xml, output):
     # writes through a pointer, and those bytes have to be moved explicitly.
     # They are part of what the two peers must agree on, so they go into the
     # digest as well.
-    extras = ['FlushMappedMemory', 'DownloadMappedMemory']
+    extras = ['FlushMappedMemory', 'DownloadMappedMemory', 'PollWindowEvents']
 
     # Include an explicit schema revision as well as opcode names. Handler or
     # marshalling changes can otherwise leave two wire-incompatible builds
     # presenting the same digest and accepting each other.
-    schema_revision = 'wire-v7-fieldwise-physical-device-properties'
+    schema_revision = 'wire-v8-window-input-events'
     with open(registry_xml, 'rb') as registry_file:
         registry_sha256 = hashlib.sha256(registry_file.read()).hexdigest()
     digest = hashlib.sha256(

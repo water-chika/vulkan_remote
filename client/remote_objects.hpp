@@ -45,6 +45,9 @@ struct Connection {
     // server counts them and reports the count back.
     bool send_oneway(Opcode opcode, const Writer& request);
     bool round_trip(Opcode opcode, const Writer& request, std::vector<char>* reply);
+    // Background input polling must never queue behind a frame-critical Vulkan
+    // RPC. If another call owns the connection, skip this poll and try later.
+    bool try_round_trip(Opcode opcode, const Writer& request, std::vector<char>* reply);
 };
 
 // One shadow allocation for a range the application has mapped.
@@ -63,9 +66,18 @@ struct MappedRange {
 };
 
 struct RemoteInstance {
+    RemoteInstance() = default;
+    ~RemoteInstance();
     VK_LOADER_DATA loader_data;
     Connection connection;
     std::vector<struct RemotePhysicalDevice*> physical_devices;
+#if defined(_WIN32)
+    std::mutex surface_input_mutex;
+    std::unordered_map<uint64_t, uintptr_t> surface_windows;
+    std::unordered_map<uint64_t, uint32_t> surface_mouse_buttons;
+    std::unordered_map<uint64_t, uint32_t> surface_mouse_positions;
+    std::unordered_map<uint64_t, std::vector<uint32_t>> surface_pressed_keys;
+#endif
 };
 
 struct RemotePhysicalDevice {

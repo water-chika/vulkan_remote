@@ -290,6 +290,15 @@ bool Server::poll_window_resized(VkSurfaceKHR surface) {
     return it->second->take_resized();
 }
 
+std::vector<OwnWindow::InputEvent> Server::poll_window_events(VkSurfaceKHR surface,
+                                                               uint32_t max_events,
+                                                               bool* overflowed) {
+    std::lock_guard<std::mutex> lock(m_own_windows_mutex);
+    auto it = m_surface_windows.find(surface);
+    if (it == m_surface_windows.end()) return {};
+    return it->second->take_input_events(max_events, overflowed);
+}
+
 VkPhysicalDevice Server::physical_device_from_id(uint64_t id) const {
     if (id == 0 || id > m_physical_devices.size()) return VK_NULL_HANDLE;
     return m_physical_devices[id - 1];

@@ -46,17 +46,21 @@ def stop_server(process):
         return process.communicate()[0]
 
 
-def clean_driver_env():
+def clean_driver_env(data_root):
     env = dict(os.environ)
     for name in REMOTING_ENV:
         env.pop(name, None)
+    # User loader settings may force third-party implicit layers into the
+    # remoting ICD. The caller owns a TemporaryDirectory for the whole sample,
+    # so the isolated loader root is removed after both direct and remote runs.
+    env["XDG_DATA_HOME"] = data_root
     return env
 
 
-def start_server(binary, port):
+def start_server(binary, port, loader_data_root):
     process = subprocess.Popen(
         [binary, "--address", "127.0.0.1", "--port", str(port)],
-        env=clean_driver_env(),
+        env=clean_driver_env(loader_data_root),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -120,7 +124,7 @@ def run_compute_sample(binary, env, label):
     return checksums[0]
 
 
-def test_sample(build_dir, sample_name, temporary_dir):
+def test_sample(build_dir, sample_name, temporary_dir, loader_data_root):
     binary = executable_path(build_dir, sample_name)
     server_binary = executable_path(build_dir, "vulkan_remoting_server")
     manifest = os.path.join(build_dir, "vulkan_remoting_icd.json")
@@ -128,7 +132,7 @@ def test_sample(build_dir, sample_name, temporary_dir):
         if not os.path.exists(path):
             raise Failure("required build output not found: " + path)
 
-    direct_env = clean_driver_env()
+    direct_env = clean_driver_env(loader_data_root)
     if sample_name == COMPUTE_SAMPLE:
         direct = run_compute_sample(binary, direct_env, sample_name + " direct")
     else:
@@ -137,11 +141,11 @@ def test_sample(build_dir, sample_name, temporary_dir):
             binary, direct_path, direct_env, sample_name + " direct")
 
     port = free_port()
-    server = start_server(server_binary, port)
+    server = start_server(server_binary, port, loader_data_root)
     server_output = ""
     error = None
     try:
-        remote_env = clean_driver_env()
+        remote_env = clean_driver_env(loader_data_root)
         remote_env["VK_DRIVER_FILES"] = manifest
         remote_env["VK_ICD_FILENAMES"] = manifest
         remote_env["VK_REMOTING_HOST"] = "127.0.0.1"
@@ -186,10 +190,11 @@ def main():
     build_dir = os.path.abspath(args.build_dir)
 
     failures = 0
-    with tempfile.TemporaryDirectory(prefix="vulkan-remoting-samples-") as temporary_dir:
+    with tempfile.TemporaryDirectory(prefix="vulkan-remoting-samples-") as temporary_dir, \
+         tempfile.TemporaryDirectory(prefix="vulkan-remoting-loader-") as loader_data_root:
         for sample in SAMPLES:
             try:
-                test_sample(build_dir, sample, temporary_dir)
+                test_sample(build_dir, sample, temporary_dir, loader_data_root)
             except Failure as error:
                 print("  FAIL {}: {}".format(sample, error))
                 failures += 1

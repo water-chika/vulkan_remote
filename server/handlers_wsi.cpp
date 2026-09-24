@@ -4,6 +4,7 @@
 // get-images/acquire/present. See wayland/proxy_server.hpp for the embedded
 // compositor proxy the Linux surface calls talk to.
 
+#include <algorithm>
 #include <cstring>
 #include <vector>
 
@@ -216,6 +217,31 @@ void handle_CreateWin32SurfaceKHR(Session& c) {
     c.writer.u32(static_cast<uint32_t>(Status::Ok));
     c.writer.i32(result);
     c.writer.handle(result == VK_SUCCESS ? c.tables.surfaces.add(vk_surface) : 0);
+    c.reply();
+}
+
+void handle_PollWindowEvents(Session& c) {
+    const uint64_t surface_id = c.reader.handle();
+    const uint32_t requested = c.reader.u32();
+    VkSurfaceKHR surface = c.tables.surface(surface_id);
+    if (!c.reader.ok() || surface == VK_NULL_HANDLE) {
+        c.reply_status(Status::DecodeError);
+        return;
+    }
+    bool overflowed = false;
+    const uint32_t limit = requested < 256u ? requested : 256u;
+    const auto events = c.server.poll_window_events(surface, limit, &overflowed);
+    c.writer.u32(static_cast<uint32_t>(Status::Ok));
+    c.writer.u32(overflowed ? 1u : 0u);
+    c.writer.u32(static_cast<uint32_t>(events.size()));
+    for (const auto& event : events) {
+        c.writer.u64(event.sequence);
+        c.writer.u32(static_cast<uint32_t>(event.type));
+        c.writer.i32(event.a);
+        c.writer.i32(event.b);
+        c.writer.i32(event.c);
+        c.writer.i32(event.d);
+    }
     c.reply();
 }
 
@@ -564,6 +590,7 @@ void handle_QueuePresentKHR(Session& c) {
 
 }  // namespace
 
+REGISTER_HANDLER(PollWindowEvents, handle_PollWindowEvents);
 REGISTER_HANDLER(vkCreateWaylandSurfaceKHR, handle_CreateWaylandSurfaceKHR);
 REGISTER_HANDLER(vkCreateWin32SurfaceKHR, handle_CreateWin32SurfaceKHR);
 REGISTER_HANDLER(vkDestroySurfaceKHR, handle_DestroySurfaceKHR);

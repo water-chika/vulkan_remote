@@ -73,6 +73,7 @@ add_executable(vulkan_remoting_server
     server/handlers_memory.cpp
     server/handlers_command.cpp
     server/handlers_wsi.cpp
+    server/own_window_input.cpp
     $<IF:$<BOOL:${WIN32}>,server/own_window_win32.cpp,server/own_window.cpp>
 )
 target_link_libraries(vulkan_remoting_server PRIVATE vulkan_remoting_wire Vulkan::Vulkan
@@ -192,6 +193,7 @@ target_link_libraries(vulkan_remoting_compute PRIVATE Vulkan::Vulkan)
 if(NOT WIN32)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(WAYLAND_CLIENT REQUIRED wayland-client)
+pkg_check_modules(XKBCOMMON REQUIRED xkbcommon)
 
 if(NOT DEFINED wayland_xml)
     find_file(wayland_xml NAMES wayland.xml PATHS /usr/share/wayland)
@@ -257,7 +259,9 @@ target_compile_features(vulkan_remoting_wayland_proxy_server PUBLIC cxx_std_17)
 # here), so this only has to add the proxy library itself.
 target_link_libraries(vulkan_remoting_server PRIVATE
     vulkan_remoting_wayland_proxy_server
+    ${XKBCOMMON_LIBRARIES}
 )
+target_include_directories(vulkan_remoting_server PRIVATE ${XKBCOMMON_INCLUDE_DIRS})
 
 # The client-side ICD only needs wl_proxy_get_id to name the app's surface
 # (see client/icd.cpp); it never opens its own Wayland connection.
@@ -326,6 +330,7 @@ target_include_directories(vulkan_remoting_server PRIVATE ${CMAKE_CURRENT_BINARY
 add_executable(vulkan_remoting_test_own_window
     tests/test_own_window.cpp
     server/own_window.cpp
+    server/own_window_input.cpp
     ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-client-protocol.h
 )
 target_include_directories(vulkan_remoting_test_own_window PRIVATE
@@ -336,8 +341,10 @@ target_include_directories(vulkan_remoting_test_own_window PRIVATE
 target_link_libraries(vulkan_remoting_test_own_window PRIVATE
     vulkan_remoting_wayland_proxy_server
     ${WAYLAND_CLIENT_LIBRARIES}
+    ${XKBCOMMON_LIBRARIES}
     Threads::Threads
 )
+target_include_directories(vulkan_remoting_test_own_window PRIVATE ${XKBCOMMON_INCLUDE_DIRS})
 add_test(NAME own_window COMMAND vulkan_remoting_test_own_window)
 
 add_test(NAME presentation

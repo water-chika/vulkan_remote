@@ -17,28 +17,38 @@
 
 namespace remoting {
 
+RemoteInstance::~RemoteInstance() = default;
+
 bool Connection::send_oneway(Opcode opcode, const Writer& request) {
     std::lock_guard<std::mutex> lock(mutex);
     if (fd == kInvalidSocket) return false;
     return send_message(fd, static_cast<uint32_t>(opcode), request.data());
 }
 
-bool Connection::round_trip(Opcode opcode, const Writer& request, std::vector<char>* reply) {
-    std::lock_guard<std::mutex> lock(mutex);
+namespace {
+bool round_trip_locked(socket_t fd, Opcode opcode, const Writer& request,
+                       std::vector<char>* reply) {
     if (fd == kInvalidSocket) return false;
     if (!send_message(fd, static_cast<uint32_t>(opcode), request.data())) return false;
-
     MessageHeader header{};
     if (!recv_message(fd, &header, reply)) return false;
-
-    // A reply for a different opcode means the two ends have lost step, and
-    // every later call would be answered with the wrong data. Fail loudly.
     if (header.opcode != static_cast<uint32_t>(opcode)) return false;
     if (reply->size() < sizeof(uint32_t)) return false;
-
     uint32_t status = 0;
     std::memcpy(&status, reply->data(), sizeof(status));
     return status == static_cast<uint32_t>(Status::Ok);
+}
+}  // namespace
+
+bool Connection::round_trip(Opcode opcode, const Writer& request, std::vector<char>* reply) {
+    std::lock_guard<std::mutex> lock(mutex);
+    return round_trip_locked(fd, opcode, request, reply);
+}
+
+bool Connection::try_round_trip(Opcode opcode, const Writer& request, std::vector<char>* reply) {
+    std::unique_lock<std::mutex> lock(mutex, std::try_to_lock);
+    if (!lock.owns_lock()) return false;
+    return round_trip_locked(fd, opcode, request, reply);
 }
 
 bool RemoteDevice::flush_mapped() {

@@ -42,6 +42,14 @@ def config(**changes):
         server_port=24680,
         windows_port=34680,
         windows_port_auto=False,
+        local_display=False,
+        desktop_size="1280x720",
+        sway="/usr/bin/sway",
+        wayvnc="/usr/bin/wayvnc",
+        wayvnc_port=35900,
+        windows_rfb_port=45900,
+        windows_rfb_port_auto=False,
+        rfb_viewer=r"C:\Program Files\TigerVNC\vncviewer.exe",
         startup_timeout=2.0,
         timeout=5.0,
         cleanup_timeout=1.0,
@@ -107,6 +115,24 @@ class LauncherTests(unittest.TestCase):
             launcher.parse_args(["--timeout", "-1", "--", r"C:\app.exe"])
         got = launcher.parse_args(["--timeout", "30", "--", r"C:\app.exe"])
         self.assertEqual(got.timeout, 30.0)
+
+    def test_local_display_rejects_colliding_explicit_ports(self):
+        with self.assertRaisesRegex(launcher.LaunchError, "server-port"):
+            launcher.parse_args([
+                "--local-display", "--rfb-viewer", r"C:\viewer.exe",
+                "--server-port", "30000", "--wayvnc-port", "30000",
+                "--", r"C:\app.exe",
+            ])
+        with self.assertRaisesRegex(launcher.LaunchError, "windows-port"):
+            launcher.parse_args([
+                "--local-display", "--rfb-viewer", r"C:\viewer.exe",
+                "--windows-port", "30001",
+                "--windows-rfb-port", "30001", "--", r"C:\app.exe",
+            ])
+
+    def test_local_display_requires_viewer_path(self):
+        with self.assertRaisesRegex(launcher.LaunchError, "rfb-viewer"):
+            launcher.parse_args(["--local-display", "--", r"C:\app.exe"])
 
     def test_accepts_empty_application_argument(self):
         with mock.patch.object(launcher, "choose_local_port", return_value=21000), \
@@ -185,6 +211,130 @@ class LauncherTests(unittest.TestCase):
                 launcher.start_tunnel(cfg)
         choose.assert_not_called()
 
+    def test_local_display_adds_rfb_forward_and_viewer(self):
+        cfg = config(local_display=True)
+        tunnel = launcher.tunnel_command(cfg)
+        self.assertIn("127.0.0.1:45900:127.0.0.1:35900", tunnel)
+        self.assertEqual(launcher.viewer_command(cfg)[-1], "127.0.0.1::45900")
+        paths = launcher.remote_paths(cfg, "abc")
+        wrapper = launcher.build_windows_wrapper(cfg, paths)
+        encoded = next(
+            line.rsplit(" ", 1)[-1]
+            for line in wrapper.splitlines()
+            if "-EncodedCommand" in line
+        )
+        viewer_script = base64.b64decode(encoded).decode("utf-16le")
+        self.assertIn("TigerVNC", viewer_script)
+        self.assertIn(paths["viewer_pid"], viewer_script)
+        self.assertIn("$ErrorActionPreference='Stop'", viewer_script)
+        self.assertIn("goto complete", wrapper)
+
+    def test_local_display_retries_both_automatic_ports(self):
+        cfg = config(local_display=True, windows_port_auto=True,
+                     windows_rfb_port_auto=True)
+        failed_process = mock.Mock(); failed_process.poll.return_value = 255
+        failed_output = mock.Mock(); failed_output.text.return_value = "remote port forwarding failed"
+        failed = launcher.OwnedProcess(failed_process, failed_output)
+        ready_process = mock.Mock(); ready_process.poll.return_value = None
+        ready = launcher.OwnedProcess(ready_process, mock.Mock())
+        with mock.patch.object(launcher, "start_owned", side_effect=[failed, ready]), \
+             mock.patch.object(launcher, "stop_owned"), \
+             mock.patch.object(launcher, "choose_remote_port", side_effect=[45678, 45679]), \
+             mock.patch.object(launcher, "verify_remote_forward"):
+            updated, _ = launcher.start_tunnel(cfg)
+        self.assertEqual(updated.windows_port, 45678)
+        self.assertEqual(updated.windows_rfb_port, 45679)
+
+    def test_explicit_rfb_port_is_preserved_when_vulkan_port_retries(self):
+        cfg = config(local_display=True, windows_port_auto=True,
+                     windows_rfb_port_auto=False)
+        failed_process = mock.Mock(); failed_process.poll.return_value = 255
+        failed_output = mock.Mock(); failed_output.text.return_value = "remote port forwarding failed"
+        failed = launcher.OwnedProcess(failed_process, failed_output)
+        ready_process = mock.Mock(); ready_process.poll.return_value = None
+        ready = launcher.OwnedProcess(ready_process, mock.Mock())
+        with mock.patch.object(launcher, "start_owned", side_effect=[failed, ready]), \
+             mock.patch.object(launcher, "stop_owned"), \
+             mock.patch.object(launcher, "choose_remote_port", return_value=45678), \
+             mock.patch.object(launcher, "verify_remote_forward"):
+            updated, _ = launcher.start_tunnel(cfg)
+        self.assertEqual(updated.windows_port, 45678)
+        self.assertEqual(updated.windows_rfb_port, cfg.windows_rfb_port)
+
+    def test_automatic_rfb_port_retries_with_explicit_vulkan_port(self):
+        cfg = config(local_display=True, windows_port_auto=False,
+                     windows_rfb_port_auto=True)
+        failed_process = mock.Mock(); failed_process.poll.return_value = 255
+        failed_output = mock.Mock(); failed_output.text.return_value = "remote port forwarding failed"
+        failed = launcher.OwnedProcess(failed_process, failed_output)
+        ready_process = mock.Mock(); ready_process.poll.return_value = None
+        ready = launcher.OwnedProcess(ready_process, mock.Mock())
+        with mock.patch.object(launcher, "start_owned", side_effect=[failed, ready]), \
+             mock.patch.object(launcher, "stop_owned"), \
+             mock.patch.object(launcher, "choose_remote_port", return_value=45679), \
+             mock.patch.object(launcher, "verify_remote_forward"):
+            updated, _ = launcher.start_tunnel(cfg)
+        self.assertEqual(updated.windows_port, cfg.windows_port)
+        self.assertEqual(updated.windows_rfb_port, 45679)
+
+    def test_headless_sway_environment_is_sanitized(self):
+        cfg = config(local_display=True)
+        process = mock.Mock(); process.poll.return_value = None; process.stdout = mock.Mock()
+        owned = launcher.OwnedProcess(process, mock.Mock())
+        with mock.patch.dict(launcher.os.environ, {
+                 "XDG_RUNTIME_DIR": "/tmp", "WAYLAND_DISPLAY": "live",
+                 "SWAYSOCK": "live.sock", "DISPLAY": ":0"}, clear=True), \
+             mock.patch.object(launcher.tempfile, "mkdtemp", return_value="/tmp/vr-test"), \
+             mock.patch.object(launcher.pathlib.Path, "write_text"), \
+             mock.patch.object(launcher.pathlib.Path, "chmod"), \
+             mock.patch.object(launcher.pathlib.Path, "exists", side_effect=[False, True, True]), \
+             mock.patch.object(launcher.pathlib.Path, "read_text",
+                               return_value="WAYLAND_DISPLAY=headless\nSWAYSOCK=headless.sock\n"), \
+             mock.patch.object(launcher, "start_owned", side_effect=[owned, owned]) as start, \
+             mock.patch.object(launcher, "wait_for_listener"):
+            session = launcher.start_headless_session(cfg, "abc")
+        sway_env = start.call_args_list[0].kwargs["env"]
+        self.assertNotIn("WAYLAND_DISPLAY", sway_env)
+        self.assertNotIn("SWAYSOCK", sway_env)
+        self.assertNotIn("DISPLAY", sway_env)
+        self.assertEqual(session.env["WAYLAND_DISPLAY"], "headless")
+
+    def test_headless_startup_failure_cleans_sway_and_runtime(self):
+        cfg = config(local_display=True)
+        process = mock.Mock(); process.poll.return_value = None; process.stdout = mock.Mock()
+        owned = launcher.OwnedProcess(process, mock.Mock())
+        with mock.patch.dict(launcher.os.environ, {"XDG_RUNTIME_DIR": "/tmp"}, clear=True), \
+             mock.patch.object(launcher.tempfile, "mkdtemp", return_value="/tmp/vr-fail"), \
+             mock.patch.object(launcher.pathlib.Path, "write_text"), \
+             mock.patch.object(launcher.pathlib.Path, "chmod"), \
+             mock.patch.object(launcher.pathlib.Path, "exists", return_value=False), \
+             mock.patch.object(launcher, "start_owned", return_value=owned), \
+             mock.patch.object(launcher.time, "monotonic", side_effect=[0.0, 3.0]), \
+             mock.patch.object(launcher, "stop_owned") as stop, \
+             mock.patch("shutil.rmtree") as remove:
+            with self.assertRaisesRegex(launcher.LaunchError, "did not report"):
+                launcher.start_headless_session(cfg, "abc")
+        stop.assert_called_with(owned, cfg.cleanup_timeout)
+        remove.assert_called_with(launcher.pathlib.Path("/tmp/vr-fail"), ignore_errors=True)
+
+    def test_local_display_does_not_require_existing_wayland_display(self):
+        cfg = config(local_display=True)
+        headless = mock.Mock(); headless.env = {"WAYLAND_DISPLAY": "headless"}
+        server = launcher.OwnedProcess(mock.Mock(), mock.Mock())
+        tunnel = launcher.OwnedProcess(mock.Mock(), mock.Mock())
+        server.process.poll.return_value = None; tunnel.process.poll.return_value = None
+        with mock.patch.dict(launcher.os.environ, {"XDG_RUNTIME_DIR": "/tmp"}, clear=True), \
+             mock.patch.object(launcher.os.path, "isfile", return_value=True), \
+             mock.patch.object(launcher, "start_headless_session", return_value=headless), \
+             mock.patch.object(launcher, "start_owned", return_value=server), \
+             mock.patch.object(launcher, "wait_for_listener"), \
+             mock.patch.object(launcher, "start_tunnel", return_value=(cfg, tunnel)), \
+             mock.patch.object(launcher, "require_active_session", side_effect=launcher.LaunchError("stop")), \
+             mock.patch.object(launcher, "stop_owned"), \
+             mock.patch.object(launcher, "stop_headless_session"):
+            with self.assertRaisesRegex(launcher.LaunchError, "stop"):
+                launcher.launch(cfg)
+
     def test_wrapper_preserves_arbitrary_argv(self):
         cfg = config()
         paths = launcher.remote_paths(cfg, "abc")
@@ -200,17 +350,23 @@ class LauncherTests(unittest.TestCase):
     def test_stage_is_base64_and_uuid_scoped(self):
         cfg = config()
         paths = launcher.remote_paths(cfg, "deadbeef")
-        commands = launcher.stage_commands(cfg, paths, "@echo off\r\necho a&b\r\n")
-        self.assertEqual(len(commands), 5)
+        contents = ["@echo off\r\necho a&b\r\n", "manifest", "config", "helper"]
+        commands = launcher.stage_commands(cfg, paths, contents[0])
+        self.assertGreaterEqual(len(commands), 9)
         self.assertIn(paths["run_dir"], commands[0])
         self.assertNotIn("echo a&b", "".join(commands))
-        payload = base64.b64encode(b"@echo off\r\necho a&b\r\n").decode("ascii")
-        self.assertTrue(any(payload in command for command in commands))
-        encoded_files = [
+        self.assertTrue(all(len(command) < 1200 for command in commands))
+        payloads = [
             command.split("FromBase64String('", 1)[1].split("')", 1)[0]
-            for command in commands[1:]
+            for command in commands if "FromBase64String('" in command
         ]
-        decoded = [base64.b64decode(value).decode("utf-8") for value in encoded_files]
+        decoded = []
+        for command in commands:
+            if "WriteAllBytes(" in command:
+                decoded.append("")
+            elif "FromBase64String('" in command:
+                payload = command.split("FromBase64String('", 1)[1].split("')", 1)[0]
+                decoded[-1] += base64.b64decode(payload).decode("utf-8")
         self.assertTrue(any('"library_path": "C:\\\\vulkan_remote' in value for value in decoded))
         launch_config = next(value for value in decoded if '"argv":' in value)
         decoded_config = __import__("json").loads(launch_config)
@@ -292,6 +448,9 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("CommandLine.Contains", kill)
         self.assertIn("/PID $pidValue /T /F", kill)
         self.assertIn(paths["manifest"], kill)
+        self.assertIn(paths["viewer_pid"], kill)
+        self.assertIn("vncviewer.exe", kill)
+        self.assertIn("tvnviewer.exe", kill)
         self.assertIn("Remove-ItemProperty", kill)
 
     def test_cleanup_removes_staged_files_when_app_never_started(self):

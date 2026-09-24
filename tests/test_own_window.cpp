@@ -103,6 +103,26 @@ void close_is_recorded_and_sticks() {
 }  // namespace
 
 int main() {
+    {
+        OwnWindow window;
+        for (int i = 0; i < 1100; ++i) {
+            window.record_input(OwnWindow::InputType::Key, i, 1);
+        }
+        bool overflowed = false;
+        auto events = window.take_input_events(2048, &overflowed);
+        if (!overflowed || !events.empty()) {
+            fprintf(stderr, "input overflow did not discard stale transitions\n");
+            return 1;
+        }
+        window.record_input(OwnWindow::InputType::Motion, 1, 2);
+        window.record_input(OwnWindow::InputType::Motion, 3, 4);
+        events = window.take_input_events(8, &overflowed);
+        if (events.size() != 1 || events[0].a != 3 || events[0].b != 4) {
+            fprintf(stderr, "pointer motion was not coalesced\n");
+            return 1;
+        }
+    }
+
     configure_records_both_axes();
     configure_records_a_single_axis();
     resize_flag_clears_on_read();
