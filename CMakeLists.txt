@@ -10,6 +10,11 @@ cmake_minimum_required(VERSION 3.21)
 #   tools/   a direct client used to measure the link
 project(vulkan_remoting CXX)
 
+if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR CMAKE_CXX_BYTE_ORDER STREQUAL "BIG_ENDIAN" OR
+   NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
+    message(FATAL_ERROR "vulkan_remoting currently supports only little-endian x86-64 peers")
+endif()
+
 enable_testing()
 
 find_package(Vulkan REQUIRED)
@@ -25,18 +30,13 @@ find_package(Threads REQUIRED)
 # disagrees. The generated digest makes a mismatch fail at connect time
 # instead of silently invoking the wrong command.
 if(NOT DEFINED vulkan_registry_xml)
-    find_file(vulkan_registry_xml
-        NAMES vk.xml
-        PATHS
-            /usr/share/vulkan/registry
-            ${Vulkan_INCLUDE_DIR}/../share/vulkan/registry
-        DOC "Vulkan registry vk.xml used to generate wire opcodes"
-    )
+    set(vulkan_registry_xml "${CMAKE_CURRENT_SOURCE_DIR}/registry/vk.xml")
 endif()
-if(NOT vulkan_registry_xml)
-    message(FATAL_ERROR "vk.xml not found; pass -Dvulkan_registry_xml=/path/to/vk.xml")
+if(NOT EXISTS "${vulkan_registry_xml}")
+    message(FATAL_ERROR "vk.xml not found at ${vulkan_registry_xml}; pass -Dvulkan_registry_xml=/path/to/vk.xml")
 endif()
-message(STATUS "vulkan_remoting: registry ${vulkan_registry_xml}")
+file(SHA256 "${vulkan_registry_xml}" vulkan_registry_sha256)
+message(STATUS "vulkan_remoting: registry ${vulkan_registry_xml} (${vulkan_registry_sha256})")
 
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/remoting_commands.inl
@@ -58,8 +58,12 @@ target_include_directories(vulkan_remoting_wire PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/common
     ${CMAKE_CURRENT_BINARY_DIR}
 )
+target_link_libraries(vulkan_remoting_wire PUBLIC Vulkan::Headers)
 target_compile_features(vulkan_remoting_wire PUBLIC cxx_std_17)
 set_target_properties(vulkan_remoting_wire PROPERTIES POSITION_INDEPENDENT_CODE ON)
+if(WIN32)
+    target_link_libraries(vulkan_remoting_wire PUBLIC ws2_32)
+endif()
 
 add_executable(vulkan_remoting_server
     server/main.cpp
@@ -101,6 +105,9 @@ add_library(vulkan_remoting_icd SHARED
 )
 target_link_libraries(vulkan_remoting_icd PRIVATE vulkan_remoting_wire Vulkan::Headers)
 if(WIN32)
+    # Export the Vulkan loader entry points without changing the linkage of the
+    # declarations supplied by vk_icd.h.
+    set_target_properties(vulkan_remoting_icd PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
     # The client speaks Winsock instead of BSD sockets on Windows (see
     # common/wire.cpp); ws2_32 is where WSAStartup/getaddrinfo/socket/etc.
     # live there.
@@ -163,6 +170,9 @@ target_link_libraries(vulkan_remoting_offscreen PRIVATE Vulkan::Vulkan)
 
 add_executable(vulkan_remoting_texture_upload tools/texture_upload.cpp)
 target_link_libraries(vulkan_remoting_texture_upload PRIVATE Vulkan::Vulkan)
+
+add_executable(vulkan_remoting_compute tools/compute.cpp)
+target_link_libraries(vulkan_remoting_compute PRIVATE Vulkan::Vulkan)
 
 # wayland/: a waypipe-style protocol proxy, split so the replay half lives
 # inside whichever process on machine B also owns the Vulkan driver (see
@@ -329,11 +339,6 @@ target_link_libraries(vulkan_remoting_test_own_window PRIVATE
     Threads::Threads
 )
 add_test(NAME own_window COMMAND vulkan_remoting_test_own_window)
-add_test(NAME wire
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wire.py
-            --build-dir ${CMAKE_CURRENT_BINARY_DIR}
-)
-set_tests_properties(wire PROPERTIES TIMEOUT 120)
 
 add_test(NAME presentation
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_presentation.py
@@ -343,12 +348,6 @@ set_tests_properties(presentation PROPERTIES
     TIMEOUT 60
     SKIP_REGULAR_EXPRESSION "^SKIP:"
 )
-
-add_test(NAME samples
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_samples.py
-            --build-dir ${CMAKE_CURRENT_BINARY_DIR}
-)
-set_tests_properties(samples PROPERTIES TIMEOUT 180)
 
 add_test(NAME wayland_proxy
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wayland_proxy.py
@@ -360,3 +359,22 @@ set_tests_properties(wayland_proxy PROPERTIES
 )
 
 endif()  # NOT WIN32
+
+# These exercise only the common TCP protocol and ordinary Vulkan samples, so
+# register them on every platform where the server and ICD build.
+add_test(NAME wire
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wire.py
+            --build-dir ${CMAKE_CURRENT_BINARY_DIR}
+)
+set_tests_properties(wire PROPERTIES TIMEOUT 120)
+
+add_test(NAME samples
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_samples.py
+            --build-dir ${CMAKE_CURRENT_BINARY_DIR}
+)
+set_tests_properties(samples PROPERTIES TIMEOUT 240)
+
+add_test(NAME trace
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_trace.py
+)
+set_tests_properties(trace PROPERTIES TIMEOUT 60)

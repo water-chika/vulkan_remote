@@ -9,9 +9,9 @@
 // On Windows there is no libwayland to link and nothing of the application's
 // HINSTANCE/HWND that the server could use either (see
 // server/handlers_wsi.cpp's handle_CreateWin32SurfaceKHR, which reads and
-// discards both): the server answers by opening its own Wayland window
-// instead (see server/own_window.cpp), which is exactly what commit 75c3bb4
-// added to make a windowless Windows client possible at all.
+// discards both): the server answers by opening its own native window instead
+// (Wayland on Linux, HWND on Windows). The inverse translation lets a Windows
+// server accept a Wayland-source opcode in exactly the same way.
 
 #include <string.h>
 
@@ -151,6 +151,22 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateWin32SurfaceKHR(VkInstance handle,
     if (result != VK_SUCCESS) return result;
     *pSurface = handle_from_id<VkSurfaceKHR>(id);
     return VK_SUCCESS;
+}
+VKAPI_ATTR VkBool32 VKAPI_CALL GetPhysicalDeviceWin32PresentationSupportKHR(
+    VkPhysicalDevice handle, uint32_t queueFamilyIndex) {
+    RemotePhysicalDevice* device = to_physical_device(handle);
+    Writer request;
+    request.handle(device->remote_id);
+    request.u32(queueFamilyIndex);
+    std::vector<char> reply;
+    if (!round_trip(device->instance, Opcode::vkGetPhysicalDeviceWin32PresentationSupportKHR,
+                    request, &reply)) {
+        return VK_FALSE;
+    }
+    Reader reader(reply.data(), reply.size());
+    reader.u32();  // status
+    const uint32_t supported = reader.u32();
+    return reader.ok() && supported != 0 ? VK_TRUE : VK_FALSE;
 }
 #endif  // defined(_WIN32)
 
@@ -436,6 +452,7 @@ const DeviceEntry* get_wsi_instance_entries(size_t* count) {
 #define D(name) {"vk" #name, reinterpret_cast<PFN_vkVoidFunction>(name)}
 #if defined(_WIN32)
         D(CreateWin32SurfaceKHR),
+        D(GetPhysicalDeviceWin32PresentationSupportKHR),
 #else
         D(CreateWaylandSurfaceKHR),
         D(GetPhysicalDeviceWaylandPresentationSupportKHR),

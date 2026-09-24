@@ -85,10 +85,11 @@ VKAPI_ATTR void VKAPI_CALL GetPhysicalDeviceProperties(VkPhysicalDevice handle,
     }
 
     Reader reader(reply.data(), reply.size());
-    reader.u32();  // status
-    std::vector<char> raw;
-    if (!reader.bytes(&raw) || raw.size() != sizeof(*pProperties)) return;
-    memcpy(pProperties, raw.data(), sizeof(*pProperties));
+    if (reader.u32() != static_cast<uint32_t>(remoting::Status::Ok) ||
+        !remoting::read_PhysicalDeviceProperties(reader, pProperties)) {
+        memset(pProperties, 0, sizeof(*pProperties));
+        return;
+    }
 
     // Report 1.0 regardless of what the remote device supports. Advertising
     // the remote 1.4 would invite the application to call 1.1+ entry points

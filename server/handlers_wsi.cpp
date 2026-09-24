@@ -18,6 +18,7 @@
 #define VK_USE_PLATFORM_WIN32_KHR
 #else
 #define VK_USE_PLATFORM_WAYLAND_KHR
+#include <wayland-client.h>
 #endif
 
 #include <vulkan/vulkan.h>
@@ -36,7 +37,6 @@ using remoting::Session;
 using remoting::Status;
 using remoting::mark_oneway_error;
 
-#if !defined(_WIN32)
 #if !defined(_WIN32)
 // A Linux client always asks for a Wayland surface, so it always takes the
 // proxy path and can never exercise the server-owned window that backs
@@ -61,7 +61,35 @@ void handle_CreateWaylandSurfaceKHR(Session& c) {
         return;
     }
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+    // A Wayland object id has meaning only to the Linux proxy connection. A
+    // Windows server accepts the same source-platform opcode but translates it
+    // to a server-owned HWND, just as a Linux server translates a Win32-source
+    // request to a server-owned Wayland window.
+    (void)app_object_id;
+    OwnWindow* window = c.server.create_own_window();
+    VkSurfaceKHR vk_surface = VK_NULL_HANDLE;
+    VkResult result = VK_ERROR_INITIALIZATION_FAILED;
+    if (window) {
+        VkWin32SurfaceCreateInfoKHR info{};
+        info.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+        info.hinstance = window->hinstance();
+        info.hwnd = window->hwnd();
+        result = vkCreateWin32SurfaceKHR(c.server.instance(), &info, nullptr, &vk_surface);
+        if (result == VK_SUCCESS) {
+            c.server.associate_surface(vk_surface, window);
+        } else {
+            c.server.discard_own_window(window);
+        }
+    } else {
+        fprintf(stderr,
+                "server: vkCreateWaylandSurfaceKHR: could not create a server-owned window\n");
+    }
+    c.writer.u32(static_cast<uint32_t>(Status::Ok));
+    c.writer.i32(result);
+    c.writer.handle(result == VK_SUCCESS ? c.tables.surfaces.add(vk_surface) : 0);
+    c.reply();
+#else
     if (force_own_window()) {
         OwnWindow* window = c.server.create_own_window();
         VkSurfaceKHR own_surface = VK_NULL_HANDLE;
@@ -88,7 +116,6 @@ void handle_CreateWaylandSurfaceKHR(Session& c) {
         c.reply();
         return;
     }
-#endif
 
     WaylandProxy* wayland = c.server.wayland();
     if (!wayland) {
@@ -128,8 +155,8 @@ void handle_CreateWaylandSurfaceKHR(Session& c) {
     c.writer.i32(result);
     c.writer.handle(result == VK_SUCCESS ? c.tables.surfaces.add(vk_surface) : 0);
     c.reply();
+#endif
 }
-#endif  // !defined(_WIN32)
 
 void handle_CreateWin32SurfaceKHR(Session& c) {
     const uint64_t hinstance = c.reader.u64();
@@ -205,7 +232,6 @@ void handle_DestroySurfaceKHR(Session& c) {
     }
 }
 
-#if !defined(_WIN32)
 void handle_GetPhysicalDeviceWaylandPresentationSupportKHR(Session& c) {
     const uint64_t pd_id = c.reader.handle();
     VkPhysicalDevice physdev = c.server.physical_device_from_id(pd_id);
@@ -214,21 +240,52 @@ void handle_GetPhysicalDeviceWaylandPresentationSupportKHR(Session& c) {
         c.reply_status(Status::DecodeError);
         return;
     }
-    // The application's own wl_display is meaningless here (see icd.cpp);
-    // the real question - can this device present to *a* Wayland surface at
-    // all - is answered against the proxy's own compositor connection, if
-    // there is one.
     VkBool32 supported = VK_FALSE;
+#if defined(_WIN32)
+    // A Wayland-source surface becomes a server-owned Win32 surface here, so
+    // answer in terms of the native backend that will actually present it.
+    supported = vkGetPhysicalDeviceWin32PresentationSupportKHR(physdev, family);
+#else
+    // Preserve Linux-to-Linux proxy semantics: the application's wl_display is
+    // represented by this proxy connection, not by a server-owned window.
     WaylandProxy* wayland = c.server.wayland();
     if (wayland) {
         supported = vkGetPhysicalDeviceWaylandPresentationSupportKHR(physdev, family,
                                                                       wayland->display());
     }
+#endif
     c.writer.u32(static_cast<uint32_t>(Status::Ok));
     c.writer.u32(supported ? 1 : 0);
     c.reply();
 }
-#endif  // !defined(_WIN32)
+
+void handle_GetPhysicalDeviceWin32PresentationSupportKHR(Session& c) {
+    const uint64_t pd_id = c.reader.handle();
+    VkPhysicalDevice physdev = c.server.physical_device_from_id(pd_id);
+    const uint32_t family = c.reader.u32();
+    if (!c.reader.ok() || physdev == VK_NULL_HANDLE) {
+        c.reply_status(Status::DecodeError);
+        return;
+    }
+
+    VkBool32 supported = VK_FALSE;
+#if defined(_WIN32)
+    supported = vkGetPhysicalDeviceWin32PresentationSupportKHR(physdev, family);
+#else
+    // Win32-source surfaces become server-owned Wayland surfaces on Linux. The
+    // native support query needs only a display, not a surface, so avoid
+    // flashing a visible OwnWindow for every queue-family probe.
+    wl_display* display = wl_display_connect(nullptr);
+    if (display) {
+        supported =
+            vkGetPhysicalDeviceWaylandPresentationSupportKHR(physdev, family, display);
+        wl_display_disconnect(display);
+    }
+#endif
+    c.writer.u32(static_cast<uint32_t>(Status::Ok));
+    c.writer.u32(supported ? 1 : 0);
+    c.reply();
+}
 
 void handle_GetPhysicalDeviceSurfaceSupportKHR(Session& c) {
     const uint64_t pd_id = c.reader.handle();
@@ -337,7 +394,26 @@ void handle_CreateSwapchainKHR(Session& c) {
         return;
     }
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
-    const VkResult result = vkCreateSwapchainKHR(device, &info, nullptr, &swapchain);
+    VkResult result = VK_ERROR_INITIALIZATION_FAILED;
+#if !defined(_WIN32)
+    if (c.server.window_for_surface(info.surface) &&
+        info.presentMode == VK_PRESENT_MODE_FIFO_KHR) {
+        // MVP compatibility deviation: RADV FIFO presentation can block forever
+        // after the compositor configures a server-owned xdg_toplevel. Present
+        // is a synchronous RPC, so moving it to another server thread cannot
+        // unblock the client waiting for its reply. Use mailbox only for this
+        // translated own-window path; native/proxied surfaces keep the exact
+        // requested mode. Retry FIFO if mailbox is unavailable.
+        fprintf(stderr,
+                "server: own_window: substituting MAILBOX for requested FIFO present mode\n");
+        VkSwapchainCreateInfoKHR mailbox_info = info;
+        mailbox_info.presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+        result = vkCreateSwapchainKHR(device, &mailbox_info, nullptr, &swapchain);
+    }
+#endif
+    if (result != VK_SUCCESS) {
+        result = vkCreateSwapchainKHR(device, &info, nullptr, &swapchain);
+    }
     if (result == VK_SUCCESS) {
         c.tables.swapchain_devices[swapchain] = device;
         c.tables.swapchain_surfaces[swapchain] = info.surface;
@@ -488,15 +564,13 @@ void handle_QueuePresentKHR(Session& c) {
 
 }  // namespace
 
-#if !defined(_WIN32)
 REGISTER_HANDLER(vkCreateWaylandSurfaceKHR, handle_CreateWaylandSurfaceKHR);
-#endif
 REGISTER_HANDLER(vkCreateWin32SurfaceKHR, handle_CreateWin32SurfaceKHR);
 REGISTER_HANDLER(vkDestroySurfaceKHR, handle_DestroySurfaceKHR);
-#if !defined(_WIN32)
 REGISTER_HANDLER(vkGetPhysicalDeviceWaylandPresentationSupportKHR,
                   handle_GetPhysicalDeviceWaylandPresentationSupportKHR);
-#endif
+REGISTER_HANDLER(vkGetPhysicalDeviceWin32PresentationSupportKHR,
+                  handle_GetPhysicalDeviceWin32PresentationSupportKHR);
 REGISTER_HANDLER(vkGetPhysicalDeviceSurfaceSupportKHR, handle_GetPhysicalDeviceSurfaceSupportKHR);
 REGISTER_HANDLER(vkGetPhysicalDeviceSurfaceCapabilitiesKHR,
                   handle_GetPhysicalDeviceSurfaceCapabilitiesKHR);

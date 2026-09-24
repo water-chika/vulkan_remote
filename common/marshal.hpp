@@ -244,8 +244,7 @@ void write_SurfaceFormatKHR(Writer& w, const VkSurfaceFormatKHR& s);
 bool read_SurfaceFormatKHR(Reader& r, VkSurfaceFormatKHR* out);
 
 void write_PhysicalDeviceProperties(Writer& w, const VkPhysicalDeviceProperties& s);
-bool read_PhysicalDeviceProperties(Reader& r, Arena& arena, const HandleResolver& hr,
-                                    VkPhysicalDeviceProperties* out);
+bool read_PhysicalDeviceProperties(Reader& r, VkPhysicalDeviceProperties* out);
 
 void write_PhysicalDeviceMemoryProperties(Writer& w, const VkPhysicalDeviceMemoryProperties& s);
 bool read_PhysicalDeviceMemoryProperties(Reader& r, Arena& arena, const HandleResolver& hr,

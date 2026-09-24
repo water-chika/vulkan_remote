@@ -1,6 +1,7 @@
 #include "marshal.hpp"
 
 #include <cstring>
+#include <limits>
 
 namespace remoting {
 namespace {
@@ -1083,14 +1084,205 @@ bool read_SurfaceFormatKHR(Reader& r, VkSurfaceFormatKHR* out) {
     return r.ok();
 }
 
+#define VK_PHYSICAL_DEVICE_LIMITS_U32_FIELDS(X)             \
+    X(maxImageDimension1D)                                   \
+    X(maxImageDimension2D)                                   \
+    X(maxImageDimension3D)                                   \
+    X(maxImageDimensionCube)                                 \
+    X(maxImageArrayLayers)                                   \
+    X(maxTexelBufferElements)                                \
+    X(maxUniformBufferRange)                                 \
+    X(maxStorageBufferRange)                                 \
+    X(maxPushConstantsSize)                                  \
+    X(maxMemoryAllocationCount)                              \
+    X(maxSamplerAllocationCount)                             \
+    X(maxBoundDescriptorSets)                                \
+    X(maxPerStageDescriptorSamplers)                         \
+    X(maxPerStageDescriptorUniformBuffers)                   \
+    X(maxPerStageDescriptorStorageBuffers)                   \
+    X(maxPerStageDescriptorSampledImages)                    \
+    X(maxPerStageDescriptorStorageImages)                    \
+    X(maxPerStageDescriptorInputAttachments)                 \
+    X(maxPerStageResources)                                  \
+    X(maxDescriptorSetSamplers)                              \
+    X(maxDescriptorSetUniformBuffers)                        \
+    X(maxDescriptorSetUniformBuffersDynamic)                 \
+    X(maxDescriptorSetStorageBuffers)                        \
+    X(maxDescriptorSetStorageBuffersDynamic)                 \
+    X(maxDescriptorSetSampledImages)                         \
+    X(maxDescriptorSetStorageImages)                         \
+    X(maxDescriptorSetInputAttachments)                      \
+    X(maxVertexInputAttributes)                              \
+    X(maxVertexInputBindings)                                \
+    X(maxVertexInputAttributeOffset)                         \
+    X(maxVertexInputBindingStride)                           \
+    X(maxVertexOutputComponents)                             \
+    X(maxTessellationGenerationLevel)                        \
+    X(maxTessellationPatchSize)                              \
+    X(maxTessellationControlPerVertexInputComponents)        \
+    X(maxTessellationControlPerVertexOutputComponents)       \
+    X(maxTessellationControlPerPatchOutputComponents)        \
+    X(maxTessellationControlTotalOutputComponents)           \
+    X(maxTessellationEvaluationInputComponents)              \
+    X(maxTessellationEvaluationOutputComponents)             \
+    X(maxGeometryShaderInvocations)                          \
+    X(maxGeometryInputComponents)                            \
+    X(maxGeometryOutputComponents)                           \
+    X(maxGeometryOutputVertices)                             \
+    X(maxGeometryTotalOutputComponents)                      \
+    X(maxFragmentInputComponents)                            \
+    X(maxFragmentOutputAttachments)                          \
+    X(maxFragmentDualSrcAttachments)                         \
+    X(maxFragmentCombinedOutputResources)                    \
+    X(maxComputeSharedMemorySize)                            \
+    X(maxComputeWorkGroupInvocations)                        \
+    X(subPixelPrecisionBits)                                 \
+    X(subTexelPrecisionBits)                                 \
+    X(mipmapPrecisionBits)                                   \
+    X(maxDrawIndexedIndexValue)                              \
+    X(maxDrawIndirectCount)                                  \
+    X(maxViewports)                                          \
+    X(viewportSubPixelBits)                                  \
+    X(maxTexelOffset)                                        \
+    X(maxTexelGatherOffset)                                  \
+    X(subPixelInterpolationOffsetBits)                       \
+    X(maxFramebufferWidth)                                   \
+    X(maxFramebufferHeight)                                  \
+    X(maxFramebufferLayers)                                  \
+    X(framebufferColorSampleCounts)                          \
+    X(framebufferDepthSampleCounts)                          \
+    X(framebufferStencilSampleCounts)                        \
+    X(framebufferNoAttachmentsSampleCounts)                  \
+    X(maxColorAttachments)                                   \
+    X(sampledImageColorSampleCounts)                         \
+    X(sampledImageIntegerSampleCounts)                       \
+    X(sampledImageDepthSampleCounts)                         \
+    X(sampledImageStencilSampleCounts)                       \
+    X(storageImageSampleCounts)                              \
+    X(maxSampleMaskWords)                                    \
+    X(timestampComputeAndGraphics)                           \
+    X(maxClipDistances)                                      \
+    X(maxCullDistances)                                      \
+    X(maxCombinedClipAndCullDistances)                       \
+    X(discreteQueuePriorities)                               \
+    X(strictLines)                                           \
+    X(standardSampleLocations)
+
+#define VK_PHYSICAL_DEVICE_LIMITS_U64_FIELDS(X) \
+    X(bufferImageGranularity)                    \
+    X(sparseAddressSpaceSize)                    \
+    X(minTexelBufferOffsetAlignment)             \
+    X(minUniformBufferOffsetAlignment)           \
+    X(minStorageBufferOffsetAlignment)           \
+    X(optimalBufferCopyOffsetAlignment)          \
+    X(optimalBufferCopyRowPitchAlignment)        \
+    X(nonCoherentAtomSize)
+
+#define VK_PHYSICAL_DEVICE_LIMITS_F32_FIELDS(X) \
+    X(maxSamplerLodBias)                         \
+    X(maxSamplerAnisotropy)                      \
+    X(minInterpolationOffset)                    \
+    X(maxInterpolationOffset)                    \
+    X(timestampPeriod)                           \
+    X(pointSizeGranularity)                      \
+    X(lineWidthGranularity)
+
+#define VK_PHYSICAL_DEVICE_SPARSE_U32_FIELDS(X)          \
+    X(residencyStandard2DBlockShape)                     \
+    X(residencyStandard2DMultisampleBlockShape)          \
+    X(residencyStandard3DBlockShape)                     \
+    X(residencyAlignedMipSize)                           \
+    X(residencyNonResidentStrict)
+
 void write_PhysicalDeviceProperties(Writer& w, const VkPhysicalDeviceProperties& s) {
-    w.bytes(&s, sizeof(s));
+    w.u32(s.apiVersion);
+    w.u32(s.driverVersion);
+    w.u32(s.vendorID);
+    w.u32(s.deviceID);
+    w.i32(static_cast<int32_t>(s.deviceType));
+    w.bytes(s.deviceName, sizeof(s.deviceName));
+    w.bytes(s.pipelineCacheUUID, sizeof(s.pipelineCacheUUID));
+
+    const VkPhysicalDeviceLimits& l = s.limits;
+#define WRITE_LIMIT_U32(field) w.u32(static_cast<uint32_t>(l.field));
+    VK_PHYSICAL_DEVICE_LIMITS_U32_FIELDS(WRITE_LIMIT_U32)
+#undef WRITE_LIMIT_U32
+#define WRITE_LIMIT_U64(field) w.u64(static_cast<uint64_t>(l.field));
+    VK_PHYSICAL_DEVICE_LIMITS_U64_FIELDS(WRITE_LIMIT_U64)
+#undef WRITE_LIMIT_U64
+#define WRITE_LIMIT_F32(field) w.f32(l.field);
+    VK_PHYSICAL_DEVICE_LIMITS_F32_FIELDS(WRITE_LIMIT_F32)
+#undef WRITE_LIMIT_F32
+    for (uint32_t value : l.maxComputeWorkGroupCount) w.u32(value);
+    for (uint32_t value : l.maxComputeWorkGroupSize) w.u32(value);
+    for (uint32_t value : l.maxViewportDimensions) w.u32(value);
+    for (float value : l.viewportBoundsRange) w.f32(value);
+    w.u64(static_cast<uint64_t>(l.minMemoryMapAlignment));
+    w.i32(l.minTexelOffset);
+    w.i32(l.minTexelGatherOffset);
+    for (float value : l.pointSizeRange) w.f32(value);
+    for (float value : l.lineWidthRange) w.f32(value);
+
+#define WRITE_SPARSE_U32(field) w.u32(static_cast<uint32_t>(s.sparseProperties.field));
+    VK_PHYSICAL_DEVICE_SPARSE_U32_FIELDS(WRITE_SPARSE_U32)
+#undef WRITE_SPARSE_U32
 }
 
-bool read_PhysicalDeviceProperties(Reader& r, Arena&, const HandleResolver&,
-                                    VkPhysicalDeviceProperties* out) {
-    return read_raw(r, out);
+bool read_PhysicalDeviceProperties(Reader& r, VkPhysicalDeviceProperties* out) {
+    *out = {};
+    out->apiVersion = r.u32();
+    out->driverVersion = r.u32();
+    out->vendorID = r.u32();
+    out->deviceID = r.u32();
+    out->deviceType = static_cast<VkPhysicalDeviceType>(r.i32());
+
+    std::vector<char> device_name;
+    std::vector<char> pipeline_cache_uuid;
+    if (!r.bytes(&device_name, sizeof(out->deviceName)) ||
+        device_name.size() != sizeof(out->deviceName) ||
+        !r.bytes(&pipeline_cache_uuid, sizeof(out->pipelineCacheUUID)) ||
+        pipeline_cache_uuid.size() != sizeof(out->pipelineCacheUUID)) {
+        return false;
+    }
+    std::memcpy(out->deviceName, device_name.data(), device_name.size());
+    std::memcpy(out->pipelineCacheUUID, pipeline_cache_uuid.data(), pipeline_cache_uuid.size());
+    // A conformant server supplies a terminated deviceName. Force termination
+    // anyway so malformed remote input can never make client code over-read it.
+    out->deviceName[sizeof(out->deviceName) - 1] = '\0';
+
+    VkPhysicalDeviceLimits& l = out->limits;
+#define READ_LIMIT_U32(field) l.field = r.u32();
+    VK_PHYSICAL_DEVICE_LIMITS_U32_FIELDS(READ_LIMIT_U32)
+#undef READ_LIMIT_U32
+#define READ_LIMIT_U64(field) l.field = r.u64();
+    VK_PHYSICAL_DEVICE_LIMITS_U64_FIELDS(READ_LIMIT_U64)
+#undef READ_LIMIT_U64
+#define READ_LIMIT_F32(field) l.field = r.f32();
+    VK_PHYSICAL_DEVICE_LIMITS_F32_FIELDS(READ_LIMIT_F32)
+#undef READ_LIMIT_F32
+    for (uint32_t& value : l.maxComputeWorkGroupCount) value = r.u32();
+    for (uint32_t& value : l.maxComputeWorkGroupSize) value = r.u32();
+    for (uint32_t& value : l.maxViewportDimensions) value = r.u32();
+    for (float& value : l.viewportBoundsRange) value = r.f32();
+    const uint64_t min_memory_map_alignment = r.u64();
+    // Parentheses avoid expansion of Windows' legacy max macro.
+    if (min_memory_map_alignment > (std::numeric_limits<size_t>::max)()) return false;
+    l.minMemoryMapAlignment = static_cast<size_t>(min_memory_map_alignment);
+    l.minTexelOffset = r.i32();
+    l.minTexelGatherOffset = r.i32();
+    for (float& value : l.pointSizeRange) value = r.f32();
+    for (float& value : l.lineWidthRange) value = r.f32();
+
+#define READ_SPARSE_U32(field) out->sparseProperties.field = r.u32();
+    VK_PHYSICAL_DEVICE_SPARSE_U32_FIELDS(READ_SPARSE_U32)
+#undef READ_SPARSE_U32
+    return r.ok();
 }
+
+#undef VK_PHYSICAL_DEVICE_SPARSE_U32_FIELDS
+#undef VK_PHYSICAL_DEVICE_LIMITS_F32_FIELDS
+#undef VK_PHYSICAL_DEVICE_LIMITS_U64_FIELDS
+#undef VK_PHYSICAL_DEVICE_LIMITS_U32_FIELDS
 
 void write_PhysicalDeviceMemoryProperties(Writer& w, const VkPhysicalDeviceMemoryProperties& s) {
     w.bytes(&s, sizeof(s));

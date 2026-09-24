@@ -17,11 +17,24 @@ using remoting::Session;
 using remoting::Status;
 
 void handle_Handshake(Session& s) {
+    std::string client_schema;
+    std::string client_registry;
+    std::string client_abi;
     std::string client_digest;
+    s.reader.string(&client_schema);
+    s.reader.string(&client_registry);
+    s.reader.string(&client_abi);
     s.reader.string(&client_digest);
-    const bool match = s.reader.ok() && client_digest == remoting::kCommandSetDigest;
+    const bool match = s.reader.ok() && client_schema == remoting::kWireSchemaRevision &&
+                       client_registry == remoting::kRegistrySha256 &&
+                       client_abi == remoting::kWireAbi &&
+                       client_digest == remoting::kCommandSetDigest;
     if (!match) {
-        fprintf(stderr, "server: rejecting client, command set digest %s != %s\n",
+        fprintf(stderr,
+                "server: rejecting client: schema=%s/%s registry=%s/%s ABI=%s/%s "
+                "commands=%s/%s\n",
+                client_schema.c_str(), remoting::kWireSchemaRevision, client_registry.c_str(),
+                remoting::kRegistrySha256, client_abi.c_str(), remoting::kWireAbi,
                 client_digest.c_str(), remoting::kCommandSetDigest);
     }
     s.writer.u32(match ? static_cast<uint32_t>(Status::Ok)
@@ -52,11 +65,9 @@ void handle_vkGetPhysicalDeviceProperties(Session& s) {
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(device, &props);
     s.writer.u32(static_cast<uint32_t>(Status::Ok));
-    // Sent as one flat struct (limits included) rather than field by field:
-    // the client clamping apiVersion to 1.0 was masking a real bug where
-    // limits stayed zeroed, which made every later create call fail
-    // validation against a driver that looked like it had no framebuffer, no
-    // viewports, nothing.
+    // Marshal each field explicitly: client and server ABIs may differ (most
+    // notably size_t inside limits), but applications still need every limit
+    // for valid create calls.
     remoting::write_PhysicalDeviceProperties(s.writer, props);
     s.reply();
 }

@@ -27,6 +27,9 @@ compositor.
 | `wayland/` | the protocol proxy and its own wire format |
 | `tools/offscreen.cpp` | ordinary Vulkan triangle used as an offscreen regression test |
 | `tools/texture_upload.cpp` | staging-uploaded checkerboard sampled and read back offscreen |
+| `tools/compute.cpp` | deterministic storage-buffer compute regression |
+| `tools/remoting_trace.py` | record, inspect, and exactly replay one headless wire session |
+| `tests/run_matrix.py` | inventory-driven four-mode acceptance runner |
 | `tools/probe.cpp` | links no Vulkan; times round trips |
 
 Handlers register themselves by opcode at static initialisation, so adding a
@@ -45,95 +48,43 @@ VK_DRIVER_FILES=$PWD/build/vulkan_remoting_icd.json \
 VK_REMOTING_HOST=<gpu-machine> vkcube                        # other machine
 ```
 
-### Running the client on Windows
+### Windows builds and cross-platform modes
 
-The client half builds for Windows; the server half does not, and is not
-meant to. The split is the point: the server is where the GPU and the
-compositor are, so it stays Linux/Wayland, and a Windows box is a *client*
-needing no GPU of its own. Since the server owns the window, the Windows
-client links no libwayland at all.
+Both the ICD and GPU-side server build natively on Windows. Configure every
+endpoint from the repository-pinned `registry/vk.xml`; its hash participates in
+the command digest and handshake, so independently installed SDK registries
+cannot silently assign different opcodes. The supported MVP wire ABI is
+little-endian x86-64 (Win64 and Linux).
 
-Cross-built from Linux, which is how the DLL below was produced:
+The four live modes are Linux→Linux, Windows→Linux, Linux→Windows, and
+Windows→Windows. The application's surface opcode describes the **client** WSI,
+while the server translates it to its own native surface: Wayland on Linux or an
+owned HWND on Windows. Linux→Linux can additionally use the Wayland protocol
+proxy, which preserves the application's actual surface identity; the other
+modes use a server-owned native window.
 
-```sh
-mkdir -p /tmp/vkinc && ln -s /usr/include/vulkan /usr/include/vk_video /tmp/vkinc/
-x86_64-w64-mingw32-g++ -std=c++17 -O2 -shared -static -I/tmp/vkinc \
-    -Icommon -Iclient -Ibuild -o vulkan_remoting_icd.dll \
-    client/*.cpp common/wire.cpp common/marshal.cpp -lws2_32
+One MVP limitation is explicit rather than silent: on a Linux server-owned
+window, a requested FIFO swapchain is attempted as MAILBOX because RADV/Sway
+otherwise blocks in the first post-resize `vkQueuePresentKHR`; the server logs
+the substitution and falls back to FIFO if MAILBOX is unavailable. Proxy-backed
+Linux surfaces and Windows surfaces preserve the requested presentation mode.
+
+On Windows, build with a native Visual Studio environment and CMake, then point
+both loader variables at the generated manifest:
+
+```bat
+cmake -S . -B build -G Ninja -Dvulkan_registry_xml=%CD%\registry\vk.xml
+cmake --build build
+set VK_ICD_FILENAMES=%CD%\build\vulkan_remoting_icd.json
+set VK_DRIVER_FILES=%CD%\build\vulkan_remoting_icd.json
+set VK_REMOTING_HOST=127.0.0.1
 ```
 
-Pass only the Vulkan headers, not `-I/usr/include`: the latter puts glibc's
-`stdlib.h` ahead of mingw's and the build dies on a redefined `div_t`.
-
-`-static` is not optional, and is the fix for a real failure. Without it the
-DLL imports `libstdc++-6.dll`, `libgcc_s_seh-1.dll` and
-`libwinpthread-1.dll`, none of which ship with Windows, and `LoadLibrary`
-then fails with **error 126**. That error names only the module it was asked
-to load, never the dependency that was actually missing, so it reads as
-"your ICD is broken" when the ICD is fine. Copying those three DLLs alongside
-also works, but an ICD is loaded into another program's process, so the
-search runs on the host's terms; a host that already loaded a different
-`libstdc++-6.dll` gives an ABI mismatch instead of an honest failure.
-`cmake` does this for you (see the `if(WIN32)` block); the statically linked
-DLL imports only `KERNEL32`, `WS2_32` and the UCRT, and is 2.7 MB against
-438 KB.
-
-Installing it on the Windows machine is three steps, because the Vulkan
-loader finds a driver differently there than on Linux:
-
-1. Put `vulkan_remoting_icd.dll` anywhere readable, say `C:\vulkan_remoting\`.
-2. Write an ICD manifest next to it, `C:\vulkan_remoting\icd.json`, whose
-   `library_path` is an **absolute** path to the DLL:
-
-   ```json
-   {"file_format_version": "1.0.0",
-    "ICD": {"library_path": "C:\\vulkan_remoting\\vulkan_remoting_icd.dll",
-            "api_version": "1.0.0"}}
-   ```
-
-   The spec says a relative `library_path` resolves against the manifest's
-   own directory, and this document used to claim so, but in practice on
-   Windows a relative path was not found and an absolute one was needed. Note
-   that this ICD cannot paper over that itself: `library_path` is read by the
-   loader in order to decide what to load, so our code does not exist yet at
-   the moment the path is resolved. Whoever writes the manifest has to get it
-   right.
-
-3. Point the loader at that manifest. Set **both** variables, to the absolute
-   path of the JSON - `VK_ICD_FILENAMES` is the older name and some loaders
-   still honour only it:
-
-   ```
-   set VK_ICD_FILENAMES=C:\vulkan_remoting\icd.json
-   set VK_DRIVER_FILES=C:\vulkan_remoting\icd.json
-   ```
-
-   The loader **ignores both for elevated processes**, and a plain `ssh`
-   session on Windows lands elevated in session 0, where they are silently
-   dropped. The run that proved this client worked used a non-elevated
-   session-1 launch; if the driver appears to be ignored, check this first.
-
-   There is also a registry route - a `REG_DWORD` named for the manifest's
-   full path, data 0, under `HKLM\SOFTWARE\Khronos\Vulkan\Drivers` or the
-   `HKCU` equivalent - which avoids the environment entirely. It is
-   *untested* here: the working run used the variables above, not the
-   registry.
-
-Then point it at the Linux server, which must already be running:
-
-```
-set VK_REMOTING_HOST=<gpu-machine>
-vkcube.exe
-```
-
-Proven on a Windows client against a Linux server: the DLL loads, connects
-over TCP, and `vulkaninfo.exe --summary` enumerates the server's real GPUs by
-their exact names - which is also a struct-ABI check, since those names
-arrive as real values rather than garbage. Both peers blit whole Vulkan
-structs over the wire, so they must agree on that ABI; Windows and Linux on
-x86-64 do, but a 32-bit or ARM peer would misread every struct with no
-handshake failure to warn it. Not yet exercised from Windows: presenting a
-window, and so any frame rate figure.
+The loader ignores these variables for elevated processes. Run presentation in
+a normal interactive desktop session; SSH-launched GUI processes normally land
+in session 0. `tools/remoting_run.py` checks this and prepares an absolute-path
+manifest. Keep the unauthenticated server on loopback and use an SSH tunnel for
+cross-machine runs.
 
 ## Keeping the port off the network
 
@@ -209,6 +160,36 @@ ssh -N -L 127.0.0.1:24680:127.0.0.1:24680 user@gpu-machine
 set VK_REMOTING_HOST=127.0.0.1
 vkcube.exe
 ```
+
+## Record and replay deterministic wire traffic
+
+`tools/remoting_trace.py` records one complete, headless ICD connection through
+a loopback proxy and can inspect or replay it later:
+
+```sh
+python3 tools/remoting_trace.py record run.vkrt \
+  --listen-port 24682 --upstream-port 24680 \
+  --protocol-file build/remoting_commands.inl --metadata sample=compute
+python3 tools/remoting_trace.py inspect run.vkrt
+python3 tools/remoting_trace.py replay run.vkrt --port 24680 \
+  --protocol-file build/remoting_commands.inl
+```
+
+Point `VK_REMOTING_PORT` at the recorder's listening port while recording. The
+container checks its schema, registry, ABI, record CRCs, and whole-file digest
+before replay contacts a server. Replay uses a fresh server session and compares
+responses exactly. It intentionally supports deterministic offscreen, texture,
+and compute samples only. The default `outputs` verification checks protocol status and
+mapped readback data while tolerating implementation-dependent query bytes; use
+`--verify exact` when every response byte is expected to be stable. Traces retain
+server-derived handles and memory/queue choices and are not portable across unrelated
+GPU/driver configurations. Trace
+payloads include mapped-memory contents and may therefore contain sensitive
+application data; generated `.vkrt` files are test artifacts, not source files.
+
+`tests/run_matrix.py print-example` emits a host-neutral inventory template for
+the four live OS pairings. Commands are explicit argv arrays and hostnames are
+kept outside the repository.
 
 ## What works
 
@@ -287,11 +268,8 @@ a way to measure that conclusion rather than assume it.
   pair.
 - Add client-side diagnostics that name a rejected or unsupported opcode; today
   the useful diagnostic is primarily in the server log.
-- Add the minimum command families needed by broader samples, in evidence-driven
-  order: transfer (`vkCmdCopyImage`/`vkCmdBlitImage`/`vkCmdFillBuffer`/
-  `vkCmdUpdateBuffer`), then compute (`vkCreateComputePipelines`/`vkCmdDispatch`).
-- Add a pinned compute sample after its APIs exist; keep unsupported modern Vulkan
-  and arbitrary `pNext` use explicitly out of scope.
+- Add further command families only when a concrete sample or application requires them;
+  transfer and compute have deterministic regression coverage.
 - `pNext` chains are dropped by the marshaller.
 - Shadow mappings are per-range; two mappings of overlapping memory are not
   reconciled.

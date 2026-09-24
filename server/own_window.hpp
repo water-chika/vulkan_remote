@@ -2,9 +2,9 @@
 
 // A window the server creates and owns itself, rather than one replayed from
 // an application (see wayland/proxy_server.hpp for that other path). This is
-// what backs vkCreateWin32SurfaceKHR: a Win32 client has no Wayland
-// connection (or, on a Windows server, no window at all) of its own, so
-// there is nothing to adopt, and the server has to make its own surface to
+// what backs a surface opcode whose source window system is not native to the
+// server: the client's platform handles have no meaning in the server process,
+// so there is nothing to adopt and the server has to make its own surface to
 // present through.
 //
 // On Linux this deliberately opens its own wl_display connection instead of
@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <thread>
 
 #if defined(_WIN32)
@@ -31,7 +32,6 @@ using HWND = HWND__*;
 struct HINSTANCE__;
 using HINSTANCE = HINSTANCE__*;
 #else
-#include <mutex>
 
 struct wl_display;
 struct wl_registry;
@@ -65,11 +65,19 @@ class OwnWindow {
     bool create();
 
     HINSTANCE hinstance() const { return hinstance_; }
-    HWND hwnd() const { return hwnd_; }
+    HWND hwnd() const { return hwnd_.load(); }
+
+    // Called by the window procedure on the pump thread. These are public so
+    // the Win32 callback can stay outside the class without exposing windows.h
+    // from this platform-neutral header.
+    void record_size(uint32_t width, uint32_t height);
+    void record_close() { closed_.store(true); }
+    void record_destroyed() { hwnd_.store(nullptr); }
 
    private:
     HINSTANCE hinstance_ = nullptr;
-    HWND hwnd_ = nullptr;
+    std::atomic<HWND> hwnd_{nullptr};
+    std::atomic<bool> shown_{false};
     std::thread pump_thread_;
 #else
     // Connects to the compositor, creates a wl_surface -> xdg_surface ->

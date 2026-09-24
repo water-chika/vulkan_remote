@@ -11,10 +11,12 @@ import time
 
 STARTUP_TIMEOUT = 15.0
 SAMPLE_TIMEOUT = 30.0
-SAMPLES = (
+GRAPHICS_SAMPLES = (
     "vulkan_remoting_offscreen",
     "vulkan_remoting_texture_upload",
 )
+COMPUTE_SAMPLE = "vulkan_remoting_compute"
+SAMPLES = GRAPHICS_SAMPLES + (COMPUTE_SAMPLE,)
 REMOTING_ENV = (
     "VK_DRIVER_FILES",
     "VK_ICD_FILENAMES",
@@ -73,10 +75,15 @@ def start_server(binary, port):
         STARTUP_TIMEOUT, output))
 
 
-def run_sample(binary, output, env, label):
+def executable_path(build_dir, name):
+    suffix = ".exe" if os.name == "nt" else ""
+    return os.path.join(build_dir, name + suffix)
+
+
+def run_process(command, env, label):
     try:
         result = subprocess.run(
-            [binary, "--no-validate", output],
+            command,
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -92,23 +99,42 @@ def run_sample(binary, output, env, label):
     if result.returncode != 0:
         raise Failure("{} exited {}\n{}".format(
             label, result.returncode, result.stdout))
+    return result.stdout
+
+
+def run_graphics_sample(binary, output, env, label):
+    run_process([binary, "--no-validate", output], env, label)
     if not os.path.isfile(output):
         raise Failure("{} did not write {}".format(label, output))
     with open(output, "rb") as handle:
         return handle.read()
 
 
+def run_compute_sample(binary, env, label):
+    output = run_process([binary, "--no-validate"], env, label)
+    expected = "PASS: compute checksum=ead71172 elements=64"
+    checksums = [line.strip() for line in output.splitlines()
+                 if line.startswith("PASS: compute checksum=")]
+    if checksums != [expected]:
+        raise Failure("{} produced unexpected checksum output\n{}".format(label, output))
+    return checksums[0]
+
+
 def test_sample(build_dir, sample_name, temporary_dir):
-    binary = os.path.join(build_dir, sample_name)
-    server_binary = os.path.join(build_dir, "vulkan_remoting_server")
+    binary = executable_path(build_dir, sample_name)
+    server_binary = executable_path(build_dir, "vulkan_remoting_server")
     manifest = os.path.join(build_dir, "vulkan_remoting_icd.json")
     for path in (binary, server_binary, manifest):
         if not os.path.exists(path):
             raise Failure("required build output not found: " + path)
 
     direct_env = clean_driver_env()
-    direct_path = os.path.join(temporary_dir, sample_name + "-direct.ppm")
-    direct = run_sample(binary, direct_path, direct_env, sample_name + " direct")
+    if sample_name == COMPUTE_SAMPLE:
+        direct = run_compute_sample(binary, direct_env, sample_name + " direct")
+    else:
+        direct_path = os.path.join(temporary_dir, sample_name + "-direct.ppm")
+        direct = run_graphics_sample(
+            binary, direct_path, direct_env, sample_name + " direct")
 
     port = free_port()
     server = start_server(server_binary, port)
@@ -120,13 +146,20 @@ def test_sample(build_dir, sample_name, temporary_dir):
         remote_env["VK_ICD_FILENAMES"] = manifest
         remote_env["VK_REMOTING_HOST"] = "127.0.0.1"
         remote_env["VK_REMOTING_PORT"] = str(port)
-        remote_path = os.path.join(temporary_dir, sample_name + "-remote.ppm")
-        remote = run_sample(binary, remote_path, remote_env, sample_name + " remoted")
-        if direct != remote:
-            mismatch = next((i for i, pair in enumerate(zip(direct, remote))
-                             if pair[0] != pair[1]), min(len(direct), len(remote)))
-            raise Failure("{} output differs at byte {} ({} direct bytes, {} remoted bytes)".format(
-                sample_name, mismatch, len(direct), len(remote)))
+        if sample_name == COMPUTE_SAMPLE:
+            remote = run_compute_sample(binary, remote_env, sample_name + " remoted")
+            if direct != remote:
+                raise Failure("{} checksum output differs: direct {!r}, remoted {!r}".format(
+                    sample_name, direct, remote))
+        else:
+            remote_path = os.path.join(temporary_dir, sample_name + "-remote.ppm")
+            remote = run_graphics_sample(
+                binary, remote_path, remote_env, sample_name + " remoted")
+            if direct != remote:
+                mismatch = next((i for i, pair in enumerate(zip(direct, remote))
+                                 if pair[0] != pair[1]), min(len(direct), len(remote)))
+                raise Failure("{} output differs at byte {} ({} direct bytes, {} remoted bytes)".format(
+                    sample_name, mismatch, len(direct), len(remote)))
     except BaseException as caught:
         error = caught
     finally:
@@ -140,7 +173,10 @@ def test_sample(build_dir, sample_name, temporary_dir):
             message += "\nSERVER OUTPUT:\n" + server_output.strip()
         raise Failure(message) from error
 
-    print("  ok   {} ({} byte-identical bytes)".format(sample_name, len(direct)))
+    if sample_name == COMPUTE_SAMPLE:
+        print("  ok   {} ({})".format(sample_name, direct))
+    else:
+        print("  ok   {} ({} byte-identical bytes)".format(sample_name, len(direct)))
 
 
 def main():

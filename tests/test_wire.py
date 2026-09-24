@@ -34,14 +34,23 @@ class Failure(Exception):
     pass
 
 
-def read_digest(build_dir):
-    """The digest is generated, so the test must read it rather than hardcode it."""
+def read_protocol_constants(build_dir):
+    """Read generated compatibility values rather than duplicating them in tests."""
     path = os.path.join(build_dir, 'remoting_commands.inl')
     with open(path) as handle:
-        match = re.search(r'kCommandSetDigest = "([0-9a-f]+)"', handle.read())
-    if not match:
-        raise Failure('no command set digest in {}'.format(path))
-    return match.group(1)
+        generated = handle.read()
+    values = {}
+    for name in ('kWireSchemaRevision', 'kRegistrySha256', 'kWireAbi',
+                 'kCommandSetDigest'):
+        match = re.search(r'{} = "([^"]+)"'.format(name), generated)
+        if not match:
+            raise Failure('no {} in {}'.format(name, path))
+        values[name] = match.group(1)
+    return values
+
+
+def read_digest(build_dir):
+    return read_protocol_constants(build_dir)['kCommandSetDigest']
 
 
 def read_opcode(build_dir, name):
@@ -161,8 +170,17 @@ class Server:
         return self.process.poll() is None
 
 
-def handshake(sock, digest):
-    send_message(sock, OPCODE_HANDSHAKE, encode_string(digest))
+def handshake(sock, digest, build_dir=None):
+    values = read_protocol_constants(build_dir) if build_dir else {
+        'kWireSchemaRevision': 'wire-v6-mvp-abi-handshake',
+        'kRegistrySha256': '0' * 64,
+        'kWireAbi': 'x86_64-little-endian-v1',
+    }
+    payload = (encode_string(values['kWireSchemaRevision']) +
+               encode_string(values['kRegistrySha256']) +
+               encode_string(values['kWireAbi']) +
+               encode_string(digest))
+    send_message(sock, OPCODE_HANDSHAKE, payload)
     opcode, payload = recv_message(sock)
     if opcode != OPCODE_HANDSHAKE:
         raise Failure('handshake reply had opcode {}'.format(opcode))
@@ -171,7 +189,7 @@ def handshake(sock, digest):
 
 def test_handshake_accepts_matching_digest(server, build_dir):
     with connect(server.port) as sock:
-        status = handshake(sock, read_digest(build_dir))
+        status = handshake(sock, read_digest(build_dir), build_dir)
         if status != STATUS_OK:
             raise Failure('server rejected its own digest (status {})'.format(status))
 
@@ -183,7 +201,7 @@ def test_handshake_rejects_foreign_digest(server, build_dir):
     every later call would invoke some other command and appear to work.
     """
     with connect(server.port) as sock:
-        status = handshake(sock, 'deadbeefdeadbeef')
+        status = handshake(sock, 'deadbeefdeadbeef', build_dir)
         if status == STATUS_OK:
             raise Failure('server accepted a foreign command set digest')
 
@@ -198,7 +216,7 @@ def test_handshake_rejects_foreign_digest(server, build_dir):
 
 def test_unknown_opcode_is_reported(server, build_dir):
     with connect(server.port) as sock:
-        if handshake(sock, read_digest(build_dir)) != STATUS_OK:
+        if handshake(sock, read_digest(build_dir), build_dir) != STATUS_OK:
             raise Failure('handshake failed')
 
         name, unhandled = unhandled_opcode(build_dir)
@@ -212,7 +230,7 @@ def test_unknown_opcode_is_reported(server, build_dir):
 
 def test_reserved_opcode_zero_is_rejected(server, build_dir):
     with connect(server.port) as sock:
-        if handshake(sock, read_digest(build_dir)) != STATUS_OK:
+        if handshake(sock, read_digest(build_dir), build_dir) != STATUS_OK:
             raise Failure('handshake failed')
         send_message(sock, OPCODE_INVALID)
         opcode, payload = recv_message(sock)
@@ -252,7 +270,7 @@ def test_oversized_payload_is_refused(server, build_dir):
 def test_short_payload_for_known_command(server, build_dir):
     """A command whose payload is too short to decode must report, not guess."""
     with connect(server.port) as sock:
-        if handshake(sock, read_digest(build_dir)) != STATUS_OK:
+        if handshake(sock, read_digest(build_dir), build_dir) != STATUS_OK:
             raise Failure('handshake failed')
 
         send_message(sock, read_opcode(build_dir, 'vkGetPhysicalDeviceProperties'), b'\x01\x00\x00')
@@ -266,7 +284,7 @@ def test_short_payload_for_known_command(server, build_dir):
 def test_compute_pipeline_count_is_bounded(server, build_dir):
     """A hostile outer createInfoCount must be rejected before allocation."""
     with connect(server.port) as sock:
-        if handshake(sock, read_digest(build_dir)) != STATUS_OK:
+        if handshake(sock, read_digest(build_dir), build_dir) != STATUS_OK:
             raise Failure('handshake failed')
 
         expected_opcode = read_opcode(build_dir, 'vkCreateComputePipelines')
@@ -283,7 +301,7 @@ def test_transfer_command_payloads_are_bounded(server, build_dir):
     """Hostile transfer counts and byte lengths must not allocate or reach Vulkan."""
     digest = read_digest(build_dir)
     with connect(server.port) as sock:
-        if handshake(sock, digest) != STATUS_OK:
+        if handshake(sock, digest, build_dir) != STATUS_OK:
             raise Failure('handshake failed')
 
         # command buffer, source image, source layout, destination image,
@@ -301,7 +319,7 @@ def test_transfer_command_payloads_are_bounded(server, build_dir):
     if not server.alive():
         raise Failure('server died on malformed transfer command payloads')
     with connect(server.port) as good:
-        if handshake(good, digest) != STATUS_OK:
+        if handshake(good, digest, build_dir) != STATUS_OK:
             raise Failure('server stopped serving after malformed transfer commands')
 
 
@@ -316,7 +334,7 @@ def test_abrupt_disconnect_is_survivable(server, build_dir):
         raise Failure('server died when a peer vanished mid-header')
 
     with connect(server.port) as good:
-        if handshake(good, read_digest(build_dir)) != STATUS_OK:
+        if handshake(good, read_digest(build_dir), build_dir) != STATUS_OK:
             raise Failure('server stopped serving after a peer vanished')
 
 
@@ -364,7 +382,7 @@ def test_wsi_decode_errors_reply(server, build_dir):
     ]
     digest = read_digest(build_dir)
     with connect(server.port) as sock:
-        if handshake(sock, digest) != STATUS_OK:
+        if handshake(sock, digest, build_dir) != STATUS_OK:
             raise Failure('handshake failed')
         for name in names:
             expected_opcode = read_opcode(build_dir, name)
@@ -388,7 +406,7 @@ def test_own_window_surface(server, build_dir):
     appeared".
     """
     with connect(server.port) as sock:
-        if handshake(sock, read_digest(build_dir)) != STATUS_OK:
+        if handshake(sock, read_digest(build_dir), build_dir) != STATUS_OK:
             raise Failure('handshake failed')
 
         # hinstance, hwnd: both discarded server-side (see
@@ -435,7 +453,8 @@ def main():
     args = parser.parse_args()
 
     build_dir = os.path.abspath(args.build_dir)
-    binary = os.path.join(build_dir, 'vulkan_remoting_server')
+    suffix = '.exe' if os.name == 'nt' else ''
+    binary = os.path.join(build_dir, 'vulkan_remoting_server' + suffix)
     if not os.path.exists(binary):
         print('server binary not found at {}'.format(binary))
         return 2

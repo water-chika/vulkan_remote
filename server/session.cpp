@@ -371,7 +371,8 @@ private:
         // nothing and is never seen. The poll follows the deadline so that a
         // short deadline is actually observable - with a fixed interval, any
         // deadline below it could never be caught in the act.
-        const double interval = std::min(0.5, deadline_ / 2.0);
+        // Parentheses avoid expansion of Windows' legacy min macro.
+        const double interval = (std::min)(0.5, deadline_ / 2.0);
         std::unique_lock<std::mutex> lock(mutex_);
         unsigned reported = 0;
         while (!stop_) {

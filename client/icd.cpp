@@ -131,13 +131,17 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo*,
 
     {
         Writer request;
+        request.string(remoting::kWireSchemaRevision);
+        request.string(remoting::kRegistrySha256);
+        request.string(remoting::kWireAbi);
         request.string(remoting::kCommandSetDigest);
         std::vector<char> reply;
         if (!round_trip(instance, Opcode::Handshake, request, &reply)) {
             fprintf(stderr,
-                    "vulkan-remoting: handshake refused; server was generated from a different "
-                    "vk.xml (ours is %s)\n",
-                    remoting::kCommandSetDigest);
+                    "vulkan-remoting: handshake refused; server wire schema, registry, ABI, or "
+                    "command set differs (ours: schema=%s registry=%s ABI=%s commands=%s)\n",
+                    remoting::kWireSchemaRevision, remoting::kRegistrySha256,
+                    remoting::kWireAbi, remoting::kCommandSetDigest);
             remoting::close_socket(instance->connection.fd);
             delete instance;
             return VK_ERROR_INCOMPATIBLE_DRIVER;
@@ -178,7 +182,7 @@ const DeviceEntry* get_icd_core_entries(size_t* count) {
 
 extern "C" {
 
-__attribute__((visibility("default"))) VKAPI_ATTR VkResult VKAPI_CALL
+VKAPI_ATTR VkResult VKAPI_CALL
 vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t* pVersion) {
     // Version 5 is the highest this driver implements; the loader lowers its
     // own expectation to whatever is written back here.
@@ -186,12 +190,12 @@ vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t* pVersion) {
     return VK_SUCCESS;
 }
 
-__attribute__((visibility("default"))) VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 vk_icdGetInstanceProcAddr(VkInstance, const char* pName) {
     return remoting::lookup(pName);
 }
 
-__attribute__((visibility("default"))) VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 vk_icdGetPhysicalDeviceProcAddr(VkInstance, const char* pName) {
     return remoting::lookup(pName);
 }

@@ -8,7 +8,9 @@
 
 #include <stdio.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <unistd.h>
+#endif
 
 #include <chrono>
 #include <string>
@@ -32,7 +34,7 @@ struct Call {
     bool ok = false;
 };
 
-Call call(int fd, remoting::Opcode opcode, const remoting::Writer& request) {
+Call call(remoting::socket_t fd, remoting::Opcode opcode, const remoting::Writer& request) {
     Call result;
     const auto start = std::chrono::steady_clock::now();
 
@@ -83,12 +85,15 @@ int main(int argc, char** argv) {
         }
     }
 
-    const int fd = remoting::connect_to(host, port);
-    if (fd < 0) return 1;
+    const remoting::socket_t fd = remoting::connect_to(host, port);
+    if (fd == remoting::kInvalidSocket) return 1;
     printf("connected to %s:%u\n", host.c_str(), static_cast<unsigned>(port));
 
     {
         remoting::Writer request;
+        request.string(remoting::kWireSchemaRevision);
+        request.string(remoting::kRegistrySha256);
+        request.string(remoting::kWireAbi);
         request.string(remoting::kCommandSetDigest);
         const Call reply = call(fd, remoting::Opcode::Handshake, request);
         if (!reply.ok) return 1;
@@ -172,6 +177,6 @@ int main(int argc, char** argv) {
                16700.0 / mean);
     }
 
-    ::close(fd);
+    remoting::close_socket(fd);
     return 0;
 }
