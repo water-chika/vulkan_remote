@@ -378,3 +378,13 @@ add_test(NAME trace
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_trace.py
 )
 set_tests_properties(trace PROPERTIES TIMEOUT 60)
+
+# Pure unit tests for the Linux-side Windows application orchestrator.  Every
+# process, socket and remote response is mocked; CTest never contacts a host.
+add_test(NAME windows_app_launcher
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_windows_app_launcher.py
+)
+set_tests_properties(windows_app_launcher PROPERTIES
+    TIMEOUT 30
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+)

@@ -1,4 +1,4 @@
-# vulkan_remoting
+# vulkan_remote
 
 Run Vulkan on a machine that has no GPU, by forwarding the API to one that has.
 
@@ -39,127 +39,154 @@ dropped registrar is indistinguishable from an unsupported command at runtime.
 
 ## Build and run
 
-```sh
-cmake -B build && cmake --build build -j8
-ctest --test-dir build --output-on-failure
+Both endpoints must be little-endian x86-64 and built from the same source
+revision. In particular, use the repository-pinned `registry/vk.xml`: the
+registry hash, wire schema, ABI identifier, and generated command-set digest are
+checked during the handshake so incompatible peers fail before decoding calls.
 
-./build/vulkan_remoting_server --validate --wayland          # GPU machine
-VK_DRIVER_FILES=$PWD/build/vulkan_remoting_icd.json \
-VK_REMOTING_HOST=<gpu-machine> vkcube                        # other machine
+### Windows application → Linux GPU quick start
+
+In this mode the unmodified application and its CPU-side Vulkan logic run on
+Windows. The remoting ICD forwards Vulkan calls to the Linux server, where the
+real ICD owns the Vulkan objects and executes GPU work. A server-owned Wayland
+window appears on the **Linux GPU machine**; pixels are not streamed back to the
+Windows desktop.
+
+Windows needs a native Visual Studio C++ environment, CMake, Ninja, Python, the
+Vulkan SDK/loader, and OpenSSH. Linux needs CMake 3.21+, a C++17 compiler,
+Python, Vulkan headers and loader development files, a working Vulkan ICD,
+`pkg-config`, Wayland client/protocol development files, and access to an active
+Wayland compositor.
+
+Build and test the Linux server:
+
+```sh
+cmake -S . -B build
+cmake --build build -j8
+ctest --test-dir build --output-on-failure
 ```
 
-### Windows builds and cross-platform modes
-
-Both the ICD and GPU-side server build natively on Windows. Configure every
-endpoint from the repository-pinned `registry/vk.xml`; its hash participates in
-the command digest and handshake, so independently installed SDK registries
-cannot silently assign different opcodes. The supported MVP wire ABI is
-little-endian x86-64 (Win64 and Linux).
-
-The four live modes are Linux→Linux, Windows→Linux, Linux→Windows, and
-Windows→Windows. The application's surface opcode describes the **client** WSI,
-while the server translates it to its own native surface: Wayland on Linux or an
-owned HWND on Windows. Linux→Linux can additionally use the Wayland protocol
-proxy, which preserves the application's actual surface identity; the other
-modes use a server-owned native window.
-
-One MVP limitation is explicit rather than silent: on a Linux server-owned
-window, a requested FIFO swapchain is attempted as MAILBOX because RADV/Sway
-otherwise blocks in the first post-resize `vkQueuePresentKHR`; the server logs
-the substitution and falls back to FIFO if MAILBOX is unavailable. Proxy-backed
-Linux surfaces and Windows surfaces preserve the requested presentation mode.
-
-On Windows, build with a native Visual Studio environment and CMake, then point
-both loader variables at the generated manifest:
+Build the Windows client from a native Visual Studio command prompt:
 
 ```bat
 cmake -S . -B build -G Ninja -Dvulkan_registry_xml=%CD%\registry\vk.xml
 cmake --build build
-set VK_ICD_FILENAMES=%CD%\build\vulkan_remoting_icd.json
-set VK_DRIVER_FILES=%CD%\build\vulkan_remoting_icd.json
-set VK_REMOTING_HOST=127.0.0.1
 ```
 
-The loader ignores these variables for elevated processes. Run presentation in
-a normal interactive desktop session; SSH-launched GUI processes normally land
-in session 0. `tools/remoting_run.py` checks this and prepares an absolute-path
-manifest. Keep the unauthenticated server on loopback and use an SSH tunnel for
-cross-machine runs.
-
-## Keeping the port off the network
-
-The server binds `127.0.0.1` by default. This protocol has no authentication
-- the handshake compares a command-set digest, which proves the peer was
-built from the same generated table and nothing about who it is - and every
-connection it accepts gets a detached thread with a path to the GPU. On
-`0.0.0.0` that was offered to the whole LAN.
-
-Remote access goes through an SSH tunnel instead, so authentication,
-encryption, integrity and host verification all come from ssh and this
-project carries no crypto of its own:
+On the Linux GPU machine, start the server from its graphical session. Check the
+actual `WAYLAND_DISPLAY` instead of assuming its value:
 
 ```sh
-./build/vulkan_remoting_server --validate --wayland        # GPU machine, loopback only
-python3 tools/remoting_run.py user@gpu-machine -- vkcube   # client machine, one command
+XDG_RUNTIME_DIR=/run/user/$(id -u) WAYLAND_DISPLAY=<wayland-display> \
+  ./build/vulkan_remoting_server --validate
 ```
 
-`remoting_run.py` is not specific to vkcube, or to any program: the client is
-an ICD, so anything that loads the Vulkan loader is remoted without knowing
-it. Whatever follows `--` is launched with the environment already right - it
-generates the ICD manifest with an absolute `library_path`, sets both
-`VK_ICD_FILENAMES` and `VK_DRIVER_FILES`, opens the tunnel, and closes it
-afterwards. On Windows it also refuses to run elevated, since the loader
-would silently ignore the driver. Those are the three ways this setup
-actually fails in practice, so the script removes them rather than
-documenting them.
+Keep the default `127.0.0.1:24680` binding. The protocol is unauthenticated; its
+handshake establishes build compatibility, not peer identity. On Windows, first
+make one interactive SSH connection to establish host-key trust and verify
+key-based login, then leave this tunnel running in a separate terminal:
 
-The steps it automates, if you would rather run them yourself:
+```bat
+ssh user@<linux-gpu-host>
+ssh -N -L 127.0.0.1:24680:127.0.0.1:24680 user@<linux-gpu-host>
+```
+
+Run `vkcube` from a normal interactive Windows desktop terminal:
+
+```bat
+python tools\remoting_run.py --no-tunnel ^
+  --library build\vulkan_remoting_icd.dll ^
+  127.0.0.1 -- C:\VulkanSDK\<version>\Bin\vkcube.exe --c 20
+```
+
+The helper writes an ICD manifest with an absolute DLL path, sets both
+`VK_ICD_FILENAMES` and `VK_DRIVER_FILES`, and selects `127.0.0.1:24680`.
+Windows OpenSSH lacks `ControlMaster`/`ControlPath`, so a separate tunnel is the
+most predictable workflow and must be stopped manually afterward.
+
+The helper can instead request the tunnel itself:
+
+```bat
+python tools\remoting_run.py user@<linux-gpu-host> -- ^
+  C:\VulkanSDK\<version>\Bin\vkcube.exe --c 20
+```
+
+For manual loader setup, ensure the manifest's `library_path` is absolute and
+set **both** loader variables; loader versions differ in which name they honor:
+
+```bat
+set VK_ICD_FILENAMES=C:\path\to\build\vulkan_remoting_icd.json
+set VK_DRIVER_FILES=C:\path\to\build\vulkan_remoting_icd.json
+set VK_REMOTING_HOST=127.0.0.1
+set VK_REMOTING_PORT=24680
+C:\VulkanSDK\<version>\Bin\vkcube.exe --c 20
+```
+
+The Windows Vulkan loader ignores environment-based driver selection for an
+elevated process. A normal desktop terminal is preferred. If the helper is
+already elevated, it temporarily registers its generated manifest under
+`HKLM\SOFTWARE\Khronos\Vulkan\Drivers`, launches the child, and unregisters the
+manifest on exit. A GUI process launched through Windows SSH still normally
+lands in non-interactive session 0.
+
+#### Launch from the Linux display host
+
+`tools/run_windows_app.py` turns the preceding manual steps into one foreground
+command run on the Linux machine where the window should appear:
 
 ```sh
-./build/vulkan_remoting_server --validate --wayland        # GPU machine, loopback only
-python3 tools/remoting_tunnel.py open user@gpu-machine     # client machine
-VK_DRIVER_FILES=$PWD/build/vulkan_remoting_icd.json \
-VK_REMOTING_HOST=127.0.0.1 vkcube
-python3 tools/remoting_tunnel.py close user@gpu-machine
+python3 tools/run_windows_app.py -- \
+  C:\\VulkanSDK\\<version>\\Bin\\vkcube.exe --c 20
 ```
 
-Both ends of the forward are pinned to loopback, key-based auth is required
-(`BatchMode=yes`, so a host wanting a password fails instead of hanging),
-host key checking stays on, and the connection is multiplexed with
-`ControlPersist` so a second run does not pay another handshake. A LAN-only
-run is still possible with `--address`, but it is now a deliberate choice
-rather than the default.
+It starts a loopback-only local server, opens an SSH **reverse** forward whose
+`127.0.0.1` listener is on the Windows host, then creates a UUID-named scheduled
+task with `/it /rl limited`. The task runs in the logged-in Windows user's
+interactive desktop with normal integrity; plain Windows SSH runs in session 0
+and is not suitable for `vkcube`'s Win32 window setup. The client HWND remains an
+opaque token and the Linux server creates the visible Wayland window.
 
-Cost, measured on loopback with `tools/offscreen` (a full instance/device
-setup, render and readback, so many round trips): **19-22 ms direct against
-25-27 ms tunnelled**, about +5.7 ms. Loopback is where this looks worst,
-because direct TCP there has almost no latency for ssh to hide behind; over a
-real link with milliseconds of round-trip time that fixed cost is dwarfed by
-the protocol's own ~2 synchronous round trips per frame. The ceiling stays
-protocol-bound, not encryption-bound.
+Defaults target `water-banana`, user `water`, deployment `C:\vulkan_remote`, and
+`/mnt/worktrees/windows-debug-scripts/ssh/wsh`; each has a command-line override
+shown by `--help`. The launcher prints concise startup phases, forwards newly
+available application stdout/stderr to the local terminal, emits a 15-second
+heartbeat while quiet, returns the Windows application's exit code, and on
+completion, an explicitly requested timeout, or Ctrl-C removes only its UUID
+task/artifacts and terminates only its owned Windows
+PID tree, server, and SSH process groups. PID cleanup first verifies that the
+command line contains the UUID run directory. Use `--keep-windows-artifacts` to
+retain the remote log and status, or `--dry-run` to inspect commands without
+contacting a host. Application runtime is unlimited by default; pass, for
+example, `--timeout 30` when a bounded diagnostic run is wanted.
 
-### On Windows
+Windows→Linux does **not** require `--wayland`, the Wayland proxy, or TCP port
+`24681`: a remote Win32 surface is translated to a server-owned Wayland window.
+The `--wayland`/`24681` path is only for Linux→Linux when preserving the Linux
+application's actual Wayland surface identity. Linux→Windows and
+Windows→Windows likewise use server-owned native windows.
 
-Windows 10 and later ship the OpenSSH client, so nothing needs installing.
-What the machine does need:
+On a Linux server-owned window, requested FIFO presentation is attempted as
+MAILBOX because RADV/Sway can otherwise block after resize. The server logs the
+substitution and falls back to FIFO when MAILBOX is unavailable.
 
-- a key pair (`ssh-keygen -t ed25519`) with the public half in the GPU
-  machine's `~/.ssh/authorized_keys`, since `BatchMode=yes` means a password
-  prompt is a failure rather than a question;
-- one interactive `ssh user@gpu-machine` first, to record the host key in
-  `%USERPROFILE%\.ssh\known_hosts` - host key checking is not disabled here;
-- the tunnel left running in its own window, because **Windows OpenSSH does
-  not implement `ControlMaster`/`ControlPath`**. `tools/remoting_tunnel.py`
-  detects this and omits those options, so `open` works, but there is no
-  multiplexed connection to reuse or to close with `close`; stop the ssh
-  process instead. The cost is one handshake per tunnel, which is once per
-  session rather than once per frame.
+### Troubleshooting
 
-```
-ssh -N -L 127.0.0.1:24680:127.0.0.1:24680 user@gpu-machine
-set VK_REMOTING_HOST=127.0.0.1
-vkcube.exe
-```
+| Symptom | Check |
+|---|---|
+| Connection refused | The server says it is listening on `127.0.0.1:24680` and the SSH tunnel terminal remains open. |
+| SSH exits immediately | Establish host-key trust interactively and install a key; helpers use `BatchMode=yes`. |
+| Handshake rejected | Rebuild both endpoints from the same commit and pinned `registry/vk.xml`. |
+| Local/shipping GPU is used | Use an absolute manifest path and set both loader variables; avoid an elevated terminal unless using the helper's temporary registration. |
+| No Linux window | Start the server with the active compositor's `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY`; verify the real ICD supports Wayland surfaces. |
+| Tunnel remains after the app | Windows OpenSSH cannot use multiplexed close; stop the separate `ssh -N` process, or use `run_windows_app.py`, which owns its reverse tunnel. |
+| Reverse forward fails | Check SSH server policy and whether the selected Windows loopback port is already occupied; override it with `--windows-port`. |
+| Remote command exits without status | Re-run with `--keep-windows-artifacts` and inspect the UUID run directory under `C:\vulkan_remote\runs`. |
+
+Cost, measured on loopback with `tools/offscreen` (a full instance/device setup,
+render and readback): **19-22 ms direct against 25-27 ms tunnelled**, about
++5.7 ms. Over a real link that fixed SSH cost is dwarfed by the protocol's own
+roughly two synchronous round trips per frame; the ceiling is protocol-bound,
+not encryption-bound.
 
 ## Record and replay deterministic wire traffic
 
@@ -248,7 +275,7 @@ server resolves it against the replayed object.
 |---|---|---|
 | loopback | 15.8 us mean | ~1059 |
 | arch2.dorm → water.n2n | 7,187 us mean | **2** |
-| apple.water → water.n2n | 39,205 us mean | **0** |
+| higher-latency remote link | 39,205 us mean | **0** |
 
 `vkcube` over the real link runs at **under about 7 fps**.
 

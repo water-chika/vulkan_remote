@@ -15,11 +15,12 @@ of them are where it actually breaks in practice:
   * both VK_ICD_FILENAMES and VK_DRIVER_FILES want setting, because loaders
     differ in which they honour, and setting one of the two silently falls
     back to the system driver, which looks like the remoting failing;
-  * the loader ignores both variables for ELEVATED processes, and a plain
-    ssh session on Windows lands elevated in session 0. A child process
-    inherits this script's token, so running it from an ordinary desktop
-    terminal is already correct - and if it is elevated, this refuses to run
-    rather than producing a confusing "the driver did nothing" result.
+  * the loader ignores both variables for ELEVATED processes. An ordinary
+    desktop terminal is preferred; when this script is elevated on Windows it
+    temporarily registers the generated manifest under HKLM, launches the
+    child, and removes that registration on exit. A plain ssh session still
+    lands in non-interactive session 0, so it is unsuitable for visible GUI
+    presentation even though registry-based ICD discovery works there.
 
 Usage:
     python3 tools/remoting_run.py user@gpu-machine -- vkcube
