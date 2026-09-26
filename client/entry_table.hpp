@@ -40,5 +40,6 @@ const DeviceEntry* get_wsi_device_entries(size_t* count);
 // The single place that does string comparison against either table; see
 // entry_table.cpp.
 PFN_vkVoidFunction lookup(const char* name);
+PFN_vkVoidFunction lookup_instance(VkInstance instance, const char* name);
 
 }  // namespace remoting

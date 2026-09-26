@@ -175,6 +175,9 @@ target_link_libraries(vulkan_remoting_texture_upload PRIVATE Vulkan::Vulkan)
 add_executable(vulkan_remoting_compute tools/compute.cpp)
 target_link_libraries(vulkan_remoting_compute PRIVATE Vulkan::Vulkan)
 
+add_executable(vulkan_remoting_buffer_ops tools/buffer_ops.cpp)
+target_link_libraries(vulkan_remoting_buffer_ops PRIVATE Vulkan::Vulkan)
+
 # wayland/: a waypipe-style protocol proxy, split so the replay half lives
 # inside whichever process on machine B also owns the Vulkan driver (see
 # wayland/proxy_server.hpp for why that placement is load-bearing, not
@@ -395,3 +398,16 @@ set_tests_properties(windows_app_launcher PROPERTIES
     TIMEOUT 30
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
 )
+
+add_test(NAME core_coverage
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_core_coverage.py
+            --source-dir ${CMAKE_CURRENT_SOURCE_DIR}
+            --icd $<TARGET_FILE:vulkan_remoting_icd>
+)
+set_tests_properties(core_coverage PROPERTIES TIMEOUT 30)
+
+add_test(NAME capabilities
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_capabilities.py
+            --icd $<TARGET_FILE:vulkan_remoting_icd>
+)
+set_tests_properties(capabilities PROPERTIES TIMEOUT 30)

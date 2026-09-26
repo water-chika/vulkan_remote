@@ -351,11 +351,14 @@ def test_client_without_server_fails_cleanly(server, build_dir):
     env['VK_DRIVER_FILES'] = icd
     env['VK_REMOTING_PORT'] = '24699'  # nothing listens here
 
-    try:
-        result = subprocess.run(['vulkaninfo', '--summary'], env=env, capture_output=True,
-                                text=True, timeout=60)
-    except FileNotFoundError:
-        return 'skipped: vulkaninfo not installed'
+    # Use the repository's minimal compute client: unlike vulkaninfo it requests
+    # no optional instance extensions, so this test reaches the connection path
+    # even when the ICD truthfully stops advertising properties2.
+    client = os.path.join(build_dir, 'vulkan_remoting_compute')
+    if not os.path.exists(client):
+        return 'skipped: compute client not built'
+    result = subprocess.run([client, '--no-validate'], env=env, capture_output=True,
+                            text=True, timeout=60)
 
     if result.returncode < 0:
         raise Failure('ICD crashed with signal {} when no server was present'.format(

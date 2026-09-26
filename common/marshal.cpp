@@ -265,6 +265,8 @@ bool read_DeviceQueueCreateInfo(Reader& r, Arena& arena, const HandleResolver&,
 
 void write_DeviceCreateInfo(Writer& w, const VkDeviceCreateInfo& s) {
     VkDeviceCreateInfo tmp = s;
+    // Phase-0 supports only the base Vulkan 1.0 feature struct. Callers reject
+    // any pNext chain before invoking this marshaller.
     tmp.pNext = nullptr;
     tmp.pQueueCreateInfos = nullptr;
     tmp.ppEnabledLayerNames = nullptr;

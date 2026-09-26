@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <vulkan/vk_icd.h>
+#include <vulkan/vk_layer.h>
 #include <vulkan/vulkan.h>
 
 #include "entry_table.hpp"
@@ -22,6 +23,15 @@
 
 namespace remoting {
 namespace {
+
+bool valid_device_pnext(const void* pnext) {
+    const VkBaseInStructure* current = static_cast<const VkBaseInStructure*>(pnext);
+    while (current) {
+        if (current->sType != VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO) return false;
+        current = current->pNext;
+    }
+    return true;
+}
 
 RemoteDevice* to_device(VkDevice handle) { return reinterpret_cast<RemoteDevice*>(handle); }
 RemoteQueue* to_queue(VkQueue handle) { return reinterpret_cast<RemoteQueue*>(handle); }
@@ -52,7 +62,26 @@ void report_oneway_errors(uint32_t count) {
 
 VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice handle,
                                             const VkDeviceCreateInfo* pCreateInfo,
-                                            const VkAllocationCallbacks*, VkDevice* pDevice) {
+                                            const VkAllocationCallbacks* pAllocator,
+                                            VkDevice* pDevice) {
+    if (handle == VK_NULL_HANDLE || pCreateInfo == nullptr || pDevice == nullptr) {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    // Host callbacks cannot cross the process boundary; remote objects use the
+    // server allocator and local dispatch wrappers use the ICD allocator.
+    (void)pAllocator;
+    // The Vulkan loader can prepend private device-link data before calling an
+    // ICD. Public feature chains are outside the current 1.0 wire contract and
+    // must be rejected rather than silently erased.
+    if (!valid_device_pnext(pCreateInfo->pNext)) return VK_ERROR_FEATURE_NOT_PRESENT;
+    if (pCreateInfo->enabledLayerCount != 0) return VK_ERROR_LAYER_NOT_PRESENT;
+    for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; ++i) {
+        const char* requested = pCreateInfo->ppEnabledExtensionNames
+            ? pCreateInfo->ppEnabledExtensionNames[i] : nullptr;
+        if (requested == nullptr || strcmp(requested, VK_KHR_SWAPCHAIN_EXTENSION_NAME) != 0) {
+            return VK_ERROR_EXTENSION_NOT_PRESENT;
+        }
+    }
     auto* pd = reinterpret_cast<struct RemotePhysicalDevice*>(handle);
     Writer request;
     request.handle(pd->remote_id);
@@ -74,6 +103,9 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice handle,
     set_loader_magic_value(device);
     device->instance = pd->instance;
     device->remote_id = id;
+    for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; ++i) {
+        device->enabled_extensions.insert(pCreateInfo->ppEnabledExtensionNames[i]);
+    }
     *pDevice = reinterpret_cast<VkDevice>(device);
     return VK_SUCCESS;
 }

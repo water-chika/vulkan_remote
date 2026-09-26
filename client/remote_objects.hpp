@@ -13,6 +13,7 @@
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <vulkan/vk_icd.h>
@@ -71,6 +72,7 @@ struct RemoteInstance {
     VK_LOADER_DATA loader_data;
     Connection connection;
     std::vector<struct RemotePhysicalDevice*> physical_devices;
+    std::unordered_set<std::string> enabled_extensions;
 #if defined(_WIN32)
     std::mutex surface_input_mutex;
     std::unordered_map<uint64_t, uintptr_t> surface_windows;
@@ -90,6 +92,7 @@ struct RemoteDevice {
     VK_LOADER_DATA loader_data;
     RemoteInstance* instance = nullptr;
     uint64_t remote_id = 0;
+    std::unordered_set<std::string> enabled_extensions;
     std::vector<struct RemoteQueue*> queues;
     std::vector<struct RemoteCommandBuffer*> command_buffers;
     std::vector<MappedRange> mapped;

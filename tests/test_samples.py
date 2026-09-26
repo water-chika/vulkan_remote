@@ -15,8 +15,11 @@ GRAPHICS_SAMPLES = (
     "vulkan_remoting_offscreen",
     "vulkan_remoting_texture_upload",
 )
-COMPUTE_SAMPLE = "vulkan_remoting_compute"
-SAMPLES = GRAPHICS_SAMPLES + (COMPUTE_SAMPLE,)
+TEXT_SAMPLES = {
+    "vulkan_remoting_compute": "PASS: compute checksum=ead71172 elements=64",
+    "vulkan_remoting_buffer_ops": "PASS: buffer-ops checksum=3b5a6394 words=64",
+}
+SAMPLES = GRAPHICS_SAMPLES + tuple(TEXT_SAMPLES)
 REMOTING_ENV = (
     "VK_DRIVER_FILES",
     "VK_ICD_FILENAMES",
@@ -114,14 +117,12 @@ def run_graphics_sample(binary, output, env, label):
         return handle.read()
 
 
-def run_compute_sample(binary, env, label):
+def run_text_sample(binary, env, label, expected):
     output = run_process([binary, "--no-validate"], env, label)
-    expected = "PASS: compute checksum=ead71172 elements=64"
-    checksums = [line.strip() for line in output.splitlines()
-                 if line.startswith("PASS: compute checksum=")]
-    if checksums != [expected]:
-        raise Failure("{} produced unexpected checksum output\n{}".format(label, output))
-    return checksums[0]
+    matches = [line.strip() for line in output.splitlines() if line.strip() == expected]
+    if matches != [expected]:
+        raise Failure("{} produced unexpected output\n{}".format(label, output))
+    return matches[0]
 
 
 def test_sample(build_dir, sample_name, temporary_dir, loader_data_root):
@@ -133,8 +134,9 @@ def test_sample(build_dir, sample_name, temporary_dir, loader_data_root):
             raise Failure("required build output not found: " + path)
 
     direct_env = clean_driver_env(loader_data_root)
-    if sample_name == COMPUTE_SAMPLE:
-        direct = run_compute_sample(binary, direct_env, sample_name + " direct")
+    if sample_name in TEXT_SAMPLES:
+        direct = run_text_sample(binary, direct_env, sample_name + " direct",
+                                 TEXT_SAMPLES[sample_name])
     else:
         direct_path = os.path.join(temporary_dir, sample_name + "-direct.ppm")
         direct = run_graphics_sample(
@@ -150,8 +152,9 @@ def test_sample(build_dir, sample_name, temporary_dir, loader_data_root):
         remote_env["VK_ICD_FILENAMES"] = manifest
         remote_env["VK_REMOTING_HOST"] = "127.0.0.1"
         remote_env["VK_REMOTING_PORT"] = str(port)
-        if sample_name == COMPUTE_SAMPLE:
-            remote = run_compute_sample(binary, remote_env, sample_name + " remoted")
+        if sample_name in TEXT_SAMPLES:
+            remote = run_text_sample(binary, remote_env, sample_name + " remoted",
+                                     TEXT_SAMPLES[sample_name])
             if direct != remote:
                 raise Failure("{} checksum output differs: direct {!r}, remoted {!r}".format(
                     sample_name, direct, remote))
@@ -177,7 +180,7 @@ def test_sample(build_dir, sample_name, temporary_dir, loader_data_root):
             message += "\nSERVER OUTPUT:\n" + server_output.strip()
         raise Failure(message) from error
 
-    if sample_name == COMPUTE_SAMPLE:
+    if sample_name in TEXT_SAMPLES:
         print("  ok   {} ({})".format(sample_name, direct))
     else:
         print("  ok   {} ({} byte-identical bytes)".format(sample_name, len(direct)))

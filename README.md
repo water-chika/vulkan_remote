@@ -28,6 +28,8 @@ compositor.
 | `tools/offscreen.cpp` | ordinary Vulkan triangle used as an offscreen regression test |
 | `tools/texture_upload.cpp` | staging-uploaded checkerboard sampled and read back offscreen |
 | `tools/compute.cpp` | deterministic storage-buffer compute regression |
+| `tools/buffer_ops.cpp` | deterministic fill/update/copy buffer regression |
+| `docs/compatibility-roadmap.md` | tested applications and ordered sample/API milestones |
 | `tools/remoting_trace.py` | record, inspect, and exactly replay one headless wire session |
 | `tests/run_matrix.py` | inventory-driven four-mode acceptance runner |
 | `tools/probe.cpp` | links no Vulkan; times round trips |
@@ -242,7 +244,13 @@ kept outside the repository.
 - `tools/offscreen` renders a triangle and `tools/texture_upload` uploads and
   samples a single-mip checkerboard; both read back deterministic images whose
   PPM output is **byte-identical** on the system driver and through this one.
-  `tests/test_samples.py` verifies both paths with a fresh ephemeral server port.
+- `tools/compute` verifies compute dispatch with an exact storage-buffer checksum.
+  `tools/buffer_ops` verifies `vkCmdFillBuffer`, `vkCmdUpdateBuffer`,
+  `vkCmdCopyBuffer`, a transfer barrier, and mapped readback with another exact
+  checksum. `tests/test_samples.py` runs all four workloads directly and remoted
+  through a fresh server.
+- [`docs/compatibility-roadmap.md`](docs/compatibility-roadmap.md) distinguishes
+  tested support from planned Vulkan command families and sample applications.
 - `vkcube` and `vkcubepp` each complete 20 frames through the server-owned
   Wayland-window path. On 2026-09-23 they completed in 0.5 s and exited cleanly.
 - The Windows client works against the Linux server: a matched static DLL
@@ -314,8 +322,15 @@ a way to measure that conclusion rather than assume it.
   pair.
 - Add client-side diagnostics that name a rejected or unsupported opcode; today
   the useful diagnostic is primarily in the server log.
-- Add further command families only when a concrete sample or application requires them;
-  transfer and compute have deterministic regression coverage.
+- Follow [`docs/compatibility-roadmap.md`](docs/compatibility-roadmap.md): add a
+  deterministic sample before each command family. Next are mipmap generation
+  and mapped-memory cases, then query pools, indirect execution, and secondary
+  command buffers; a bounded properties2/Vulkan 1.1 bridge comes only afterward.
+- `VK_KHR_get_physical_device_properties2` is deliberately not advertised until
+  its complete entry-point family and bounded chain marshalling are implemented.
+- `tests/test_core_coverage.py` derives the Vulkan 1.0 inventory from pinned
+  `vk.xml`; the current client exposes 96/137 core commands, with the exact gap
+  maintained in the compatibility roadmap.
 - `pNext` chains are dropped by the marshaller.
 - Shadow mappings are per-range; two mappings of overlapping memory are not
   reconciled.
