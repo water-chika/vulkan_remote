@@ -489,49 +489,32 @@ def mapped_byte_totals(records: Iterable[Record]) -> dict:
     for record in records:
         try:
             if record.direction == CLIENT_TO_SERVER and record.opcode == 2:
-                _, offset = _take_u64(record.payload, 0)
-                count, offset = _take_u32(record.payload, offset)
-                if count > (len(record.payload) - offset) // 28:
-                    raise ValueError("impossible flush range count")
-                transferred = 0
-                for _ in range(count):
-                    _, offset = _take_u64(record.payload, offset)  # memory
-                    _, offset = _take_u64(record.payload, offset)  # offset
-                    _, offset = _take_u64(record.payload, offset)  # size
-                    byte_count, offset = _take_u32(record.payload, offset)
-                    if offset + byte_count > len(record.payload):
-                        raise ValueError("short flush bytes")
-                    offset += byte_count
-                    transferred += byte_count
-                if offset == len(record.payload):
-                    totals["flush_uploaded"] += transferred
+                _, offset = _take_u64(record.payload, 0)  # device
+                _, offset = _take_u64(record.payload, offset)  # memory
+                _, offset = _take_u64(record.payload, offset)  # offset
+                size, offset = _take_u64(record.payload, offset)
+                byte_count, offset = _take_u32(record.payload, offset)
+                if byte_count != size or offset + byte_count != len(record.payload):
+                    raise ValueError("malformed flush chunk")
+                totals["flush_uploaded"] += byte_count
             elif record.direction == CLIENT_TO_SERVER and record.opcode == 3:
-                _, offset = _take_u64(record.payload, 0)
-                count, offset = _take_u32(record.payload, offset)
-                if count > (len(record.payload) - offset) // 24:
-                    raise ValueError("impossible download range count")
-                requested = 0
-                for _ in range(count):
-                    _, offset = _take_u64(record.payload, offset)  # memory
-                    _, offset = _take_u64(record.payload, offset)  # offset
-                    size, offset = _take_u64(record.payload, offset)
-                    requested += size
-                if offset == len(record.payload):
-                    totals["download_requested"] += requested
-                    pending_download_counts.append(count)
+                _, offset = _take_u64(record.payload, 0)  # device
+                _, offset = _take_u64(record.payload, offset)  # memory
+                _, offset = _take_u64(record.payload, offset)  # offset
+                size, offset = _take_u64(record.payload, offset)
+                if offset != len(record.payload):
+                    raise ValueError("malformed download chunk")
+                totals["download_requested"] += size
+                pending_download_counts.append(size)
             elif record.direction == SERVER_TO_CLIENT and record.opcode == 3:
-                count = pending_download_counts.pop(0) if pending_download_counts else 0
+                expected = pending_download_counts.pop(0) if pending_download_counts else None
                 status, offset = _take_u32(record.payload, 0)
-                transferred = 0
+                _, offset = _take_u32(record.payload, offset)  # VkResult
                 if status == 0:
-                    for _ in range(count):
-                        byte_count, offset = _take_u32(record.payload, offset)
-                        if offset + byte_count > len(record.payload):
-                            raise ValueError("short download bytes")
-                        offset += byte_count
-                        transferred += byte_count
-                    if offset == len(record.payload):
-                        totals["download_returned"] += transferred
+                    byte_count, offset = _take_u32(record.payload, offset)
+                    if expected is None or byte_count != expected or offset + byte_count != len(record.payload):
+                        raise ValueError("malformed download reply")
+                    totals["download_returned"] += byte_count
         except (ValueError, struct.error):
             continue
     return totals

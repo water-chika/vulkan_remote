@@ -178,6 +178,12 @@ target_link_libraries(vulkan_remoting_compute PRIVATE Vulkan::Vulkan)
 add_executable(vulkan_remoting_buffer_ops tools/buffer_ops.cpp)
 target_link_libraries(vulkan_remoting_buffer_ops PRIVATE Vulkan::Vulkan)
 
+add_executable(vulkan_remoting_mipmap tools/mipmap.cpp)
+target_link_libraries(vulkan_remoting_mipmap PRIVATE Vulkan::Vulkan)
+
+add_executable(vulkan_remoting_noncoherent_memory tools/noncoherent_memory.cpp)
+target_link_libraries(vulkan_remoting_noncoherent_memory PRIVATE Vulkan::Vulkan)
+
 # wayland/: a waypipe-style protocol proxy, split so the replay half lives
 # inside whichever process on machine B also owns the Vulkan driver (see
 # wayland/proxy_server.hpp for why that placement is load-bearing, not
@@ -382,7 +388,7 @@ add_test(NAME samples
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_samples.py
             --build-dir ${CMAKE_CURRENT_BINARY_DIR}
 )
-set_tests_properties(samples PROPERTIES TIMEOUT 240)
+set_tests_properties(samples PROPERTIES TIMEOUT 420)
 
 add_test(NAME trace
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_trace.py

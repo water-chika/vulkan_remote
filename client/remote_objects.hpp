@@ -1,13 +1,7 @@
 #pragma once
 
-// Client-side object model.
-//
-// Two kinds of Vulkan handle need opposite treatment here. Non-dispatchable
-// handles (buffers, images, fences...) carry no local state, so the client
-// simply uses the server's id as the handle and never allocates anything.
-// Dispatchable handles (VkDevice, VkQueue, VkCommandBuffer) cannot do that:
-// the loader requires their first word to be VK_LOADER_DATA, so each one has
-// to be a real local object that happens to remember an id.
+// Client-side object model. Dispatchable handles are local loader-compatible
+// wrappers; non-dispatchable handles are server object ids.
 
 #include <cstdint>
 #include <cstring>
@@ -38,32 +32,28 @@ struct Connection {
     socket_t fd = kInvalidSocket;
     std::mutex mutex;
 
-    // Recording commands are void and nobody waits on them, so they are sent
-    // without a reply. That is the only reason this driver is not ruinously
-    // slow at recording time: a command buffer of 40 calls costs one round
-    // trip instead of 40. The price is that an error inside a fire-and-forget
-    // command is not seen until the next call that does wait, which is why the
-    // server counts them and reports the count back.
     bool send_oneway(Opcode opcode, const Writer& request);
     bool round_trip(Opcode opcode, const Writer& request, std::vector<char>* reply);
-    // Background input polling must never queue behind a frame-critical Vulkan
-    // RPC. If another call owns the connection, skip this poll and try later.
     bool try_round_trip(Opcode opcode, const Writer& request, std::vector<char>* reply);
 };
 
-// One shadow allocation for a range the application has mapped.
-//
-// vkMapMemory promises a pointer the caller can dereference, and no socket can
-// deliver one, so the client hands back ordinary memory and the contents are
-// pushed to the server before anything can observe them there. Writes are the
-// only direction that works: a program that maps memory to READ what the GPU
-// wrote would see stale bytes. vkcube only ever writes through its mappings,
-// and that limitation is recorded rather than hidden.
+struct MemoryAllocation {
+    VkDeviceSize size = 0;
+    uint32_t memory_type_index = 0;
+    VkMemoryPropertyFlags property_flags = 0;
+    VkDeviceSize non_coherent_atom_size = 1;
+    bool coherent = false;
+};
+
+// Vulkan permits only one active mapping per allocation. The allocation_base
+// owns the over-allocation used to return an aligned shadow pointer.
 struct MappedRange {
     uint64_t memory_id = 0;
     VkDeviceSize offset = 0;
     VkDeviceSize size = 0;
+    void* allocation_base = nullptr;
     void* shadow = nullptr;
+    bool coherent = false;
 };
 
 struct RemoteInstance {
@@ -86,6 +76,8 @@ struct RemotePhysicalDevice {
     VK_LOADER_DATA loader_data;
     RemoteInstance* instance = nullptr;
     uint64_t remote_id = 0;
+    VkDeviceSize map_alignment = 1;
+    std::vector<VkMemoryPropertyFlags> memory_type_flags;
 };
 
 struct RemoteDevice {
@@ -97,20 +89,16 @@ struct RemoteDevice {
     std::vector<struct RemoteCommandBuffer*> command_buffers;
     std::vector<MappedRange> mapped;
     std::mutex mapped_mutex;
-    // Allocation size requested at vkAllocateMemory, keyed by memory id. Needed
-    // to resolve VK_WHOLE_SIZE at vkMapMemory time, since the wire format
-    // never carries the allocation's own size back to the client otherwise.
-    std::unordered_map<uint64_t, VkDeviceSize> memory_sizes;
+    std::unordered_map<uint64_t, MemoryAllocation> memories;
+    VkDeviceSize map_alignment = 1;
+    std::vector<VkMemoryPropertyFlags> memory_type_flags;
 
-    // Called before any submission, because the server must see whatever the
-    // application wrote through its mappings since the last one.
-    bool flush_mapped();
-
-    // Called at vkMapMemory (for the newly mapped range) and at
-    // vkInvalidateMappedMemoryRanges (for the ranges the caller named), so a
-    // shadow buffer that has just been created, or one the caller is asking
-    // to be refreshed, gets what the server-side memory actually holds.
-    bool download_mapped(const VkMappedMemoryRange* ranges, uint32_t count);
+    // Upload all coherent mappings at implicit visibility points.
+    bool flush_coherent_mapped();
+    // Upload or download exactly the named ranges. Both operations are
+    // synchronous and split transfers into bounded wire messages.
+    VkResult flush_mapped(const VkMappedMemoryRange* ranges, uint32_t count);
+    VkResult download_mapped(const VkMappedMemoryRange* ranges, uint32_t count);
 };
 
 struct RemoteQueue {
@@ -125,10 +113,6 @@ struct RemoteCommandBuffer {
     uint64_t remote_id = 0;
 };
 
-// Device-level function table, defined in icd_device.cpp. vkGetDeviceProcAddr
-// must serve these: the loader builds its device dispatch table from
-// whatever that returns, so anything implemented but missing here is simply
-// never called.
 struct DeviceEntry {
     const char* name;
     PFN_vkVoidFunction function;

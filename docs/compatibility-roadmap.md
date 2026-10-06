@@ -12,6 +12,8 @@ pinned Vulkan registry or the real server driver implements it.
 | `vulkan_remoting_texture_upload` | Staging upload, image barriers, descriptors, sampler, textured draw | Direct/remoted PPM bytes match |
 | `vulkan_remoting_compute` | Storage buffer, compute pipeline, dispatch, mapped readback | Exact checksum |
 | `vulkan_remoting_buffer_ops` | Buffer fill, update, copy, transfer barrier, mapped readback | Exact checksum |
+| `vulkan_remoting_mipmap` | Four mip levels, per-level barriers, same-image blits, multi-region readback | Exact 340-byte chain and checksum |
+| `vulkan_remoting_noncoherent_memory` | Two disjoint nonzero atom-aligned ranges, explicit flush/invalidate, GPU copies | Exact 128 synchronized bytes and checksum, or matching capability skip |
 | `vkcube`, `vkcubepp` | Acquire, submit, present, fences, server-owned native window | Bounded frame completion |
 | `vulkaninfo --summary` | Instance/device enumeration and basic properties | Selected normalized fields |
 | CTS `api.smoke.*`, `api.info.*` | Known passing cases in `tests/cts_baseline.txt` | Baseline regression delta |
@@ -41,8 +43,6 @@ will shrink slice by slice until it becomes the 137/137 completion gate.
 These samples mostly use commands already remoted and should land before broader
 API claims:
 
-- Mipmap generation with per-level barriers and `vkCmdBlitImage`.
-- Non-coherent mapped-memory flush/invalidate behavior.
 - Indexed drawing and multiple vertex bindings.
 - Push constants and multiple descriptor bindings/array elements.
 - Multiple command buffers/submits, fence reset/reuse, and queue ordering.
@@ -100,9 +100,10 @@ indexing, and shader objects—remain later milestones driven by concrete tests.
 - Little-endian x86-64 peers only.
 - Client and server must use matching registry, schema, ABI, and command digest.
 - Arbitrary `pNext` chains are dropped.
-- Overlapping mapped shadows are not reconciled.
+- Only one active shadow mapping is supported per memory allocation.
 - Coherent mapped writes become visible at remoting synchronization points rather
-  than continuously.
+  than continuously, and GPU writes do not automatically refresh an existing
+  coherent shadow after host waits.
 - No X11, `VK_KHR_display`, dmabuf/data-device/subsurface Wayland proxy support.
 - The Windows local-display input bridge posts ordinary HWND messages; Raw Input,
   DirectInput, global keyboard-state APIs, true focus transfer, IME, and complete

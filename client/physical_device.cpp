@@ -96,6 +96,7 @@ VKAPI_ATTR void VKAPI_CALL GetPhysicalDeviceProperties(VkPhysicalDevice handle,
     // this driver does not implement, and it would then index results that
     // were never filled in. A driver must not claim a version it cannot serve.
     pProperties->apiVersion = VK_API_VERSION_1_0;
+    device->map_alignment = pProperties->limits.minMemoryMapAlignment;
 }
 
 VKAPI_ATTR void VKAPI_CALL GetPhysicalDeviceFeatures(VkPhysicalDevice handle,
@@ -136,12 +137,14 @@ VKAPI_ATTR void VKAPI_CALL GetPhysicalDeviceMemoryProperties(
 
     const uint32_t type_count = reader.u32();
     pProperties->memoryTypeCount = type_count > VK_MAX_MEMORY_TYPES ? VK_MAX_MEMORY_TYPES : type_count;
+    device->memory_type_flags.assign(pProperties->memoryTypeCount, 0);
     for (uint32_t i = 0; i < type_count; ++i) {
         const uint32_t flags = reader.u32();
         const uint32_t heap = reader.u32();
         if (i < pProperties->memoryTypeCount) {
             pProperties->memoryTypes[i].propertyFlags = flags;
             pProperties->memoryTypes[i].heapIndex = heap;
+            device->memory_type_flags[i] = flags;
         }
     }
 

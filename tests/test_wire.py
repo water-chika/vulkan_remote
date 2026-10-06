@@ -172,7 +172,7 @@ class Server:
 
 def handshake(sock, digest, build_dir=None):
     values = read_protocol_constants(build_dir) if build_dir else {
-        'kWireSchemaRevision': 'wire-v6-mvp-abi-handshake',
+        'kWireSchemaRevision': 'wire-v10-mapped-memory-alignment',
         'kRegistrySha256': '0' * 64,
         'kWireAbi': 'x86_64-little-endian-v1',
     }
@@ -323,6 +323,29 @@ def test_transfer_command_payloads_are_bounded(server, build_dir):
             raise Failure('server stopped serving after malformed transfer commands')
 
 
+def test_mapped_transfer_chunks_are_bounded(server, build_dir):
+    """Mapped-memory RPCs reject malformed and over-limit chunks synchronously."""
+    digest = read_digest(build_dir)
+    with connect(server.port) as sock:
+        if handshake(sock, digest, build_dir) != STATUS_OK:
+            raise Failure('handshake failed')
+
+        flush_opcode = read_opcode(build_dir, 'FlushMappedMemory')
+        # device, memory, offset, size, then a blob length larger than the wire cap.
+        payload = struct.pack('<QQQQI', 0, 0, 0, 64 * 1024 * 1024, 0xFFFFFFFF)
+        send_message(sock, flush_opcode, payload)
+        opcode, response = recv_message(sock)
+        if opcode != flush_opcode or decode_u32(response) != STATUS_DECODE_ERROR:
+            raise Failure('oversized mapped flush was not rejected')
+
+        download_opcode = read_opcode(build_dir, 'DownloadMappedMemory')
+        payload = struct.pack('<QQQQ', 0, 0, 0, 64 * 1024 * 1024)
+        send_message(sock, download_opcode, payload)
+        opcode, response = recv_message(sock)
+        if opcode != download_opcode or decode_u32(response) != STATUS_DECODE_ERROR:
+            raise Failure('oversized mapped download was not rejected')
+
+
 def test_abrupt_disconnect_is_survivable(server, build_dir):
     """Half a message, then vanish: the common case when a machine sleeps."""
     sock = connect(server.port)
@@ -441,6 +464,7 @@ TESTS = [
     test_short_payload_for_known_command,
     test_compute_pipeline_count_is_bounded,
     test_transfer_command_payloads_are_bounded,
+    test_mapped_transfer_chunks_are_bounded,
     test_abrupt_disconnect_is_survivable,
     test_client_without_server_fails_cleanly,
     test_wsi_decode_errors_reply,

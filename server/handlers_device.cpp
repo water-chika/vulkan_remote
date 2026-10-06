@@ -36,7 +36,12 @@ void handle_CreateDevice(Session& c) {
     const VkResult result = vkCreateDevice(physdev, &info, nullptr, &device);
     c.writer.u32(static_cast<uint32_t>(Status::Ok));
     c.writer.i32(result);
-    c.writer.handle(result == VK_SUCCESS ? c.tables.devices.add(device) : 0);
+    uint64_t device_id = 0;
+    if (result == VK_SUCCESS) {
+        device_id = c.tables.devices.add(device);
+        c.tables.device_physical_devices[device] = physdev;
+    }
+    c.writer.handle(device_id);
     c.reply();
 }
 
@@ -64,6 +69,11 @@ void handle_DestroyDevice(Session& c) {
         c.tables.swapchain_devices.erase(owner);
         c.tables.swapchain_surfaces.erase(swapchain);
         c.tables.swapchain_image_ids.erase(i + 1);
+    }
+    c.tables.device_physical_devices.erase(device);
+    for (auto it = c.tables.memory_metadata.begin(); it != c.tables.memory_metadata.end();) {
+        if (it->second.owner == device) it = c.tables.memory_metadata.erase(it);
+        else ++it;
     }
     vkDestroyDevice(device, nullptr);
 }

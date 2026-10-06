@@ -16,8 +16,13 @@ GRAPHICS_SAMPLES = (
     "vulkan_remoting_texture_upload",
 )
 TEXT_SAMPLES = {
-    "vulkan_remoting_compute": "PASS: compute checksum=ead71172 elements=64",
-    "vulkan_remoting_buffer_ops": "PASS: buffer-ops checksum=3b5a6394 words=64",
+    "vulkan_remoting_compute": ("PASS: compute checksum=ead71172 elements=64",),
+    "vulkan_remoting_buffer_ops": ("PASS: buffer-ops checksum=3b5a6394 words=64",),
+    "vulkan_remoting_mipmap": ("PASS: mipmap checksum=82f68ebe bytes=340 levels=4",),
+    "vulkan_remoting_noncoherent_memory": (
+        "PASS: noncoherent-memory checksum=c7c92645 bytes=128 ranges=2",
+        "SKIP: non-coherent host-visible memory unavailable",
+    ),
 }
 SAMPLES = GRAPHICS_SAMPLES + tuple(TEXT_SAMPLES)
 REMOTING_ENV = (
@@ -119,8 +124,8 @@ def run_graphics_sample(binary, output, env, label):
 
 def run_text_sample(binary, env, label, expected):
     output = run_process([binary, "--no-validate"], env, label)
-    matches = [line.strip() for line in output.splitlines() if line.strip() == expected]
-    if matches != [expected]:
+    matches = [line.strip() for line in output.splitlines() if line.strip() in expected]
+    if len(matches) != 1:
         raise Failure("{} produced unexpected output\n{}".format(label, output))
     return matches[0]
 

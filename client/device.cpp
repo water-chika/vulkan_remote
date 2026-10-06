@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <cstdlib>
 #include <mutex>
 #include <vector>
 
@@ -103,6 +104,8 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice handle,
     set_loader_magic_value(device);
     device->instance = pd->instance;
     device->remote_id = id;
+    device->map_alignment = pd->map_alignment;
+    device->memory_type_flags = pd->memory_type_flags;
     for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; ++i) {
         device->enabled_extensions.insert(pCreateInfo->ppEnabledExtensionNames[i]);
     }
@@ -116,6 +119,11 @@ VKAPI_ATTR void VKAPI_CALL DestroyDevice(VkDevice handle, const VkAllocationCall
     Writer request;
     request.handle(device->remote_id);
     device->instance->connection.send_oneway(Opcode::vkDestroyDevice, request);
+    {
+        std::lock_guard<std::mutex> lock(device->mapped_mutex);
+        for (const MappedRange& mapping : device->mapped) std::free(mapping.allocation_base);
+        device->mapped.clear();
+    }
     for (auto* q : device->queues) delete q;
     for (auto* cb : device->command_buffers) delete cb;
     delete device;
@@ -153,9 +161,9 @@ VKAPI_ATTR VkResult VKAPI_CALL QueueSubmit(VkQueue handle, uint32_t submitCount,
     RemoteQueue* queue = to_queue(handle);
     RemoteDevice* device = queue->device;
 
-    // The server must see whatever the application wrote through its
-    // mappings before it can be part of what this submission renders with.
-    device->flush_mapped();
+    // Host-coherent mappings become visible without an explicit Vulkan flush.
+    // Non-coherent mappings move only through vkFlushMappedMemoryRanges.
+    if (!device->flush_coherent_mapped()) return VK_ERROR_DEVICE_LOST;
 
     Writer request;
     request.handle(queue->remote_id);
@@ -188,6 +196,7 @@ VKAPI_ATTR VkResult VKAPI_CALL QueueSubmit(VkQueue handle, uint32_t submitCount,
     Reader r = payload_reader(reply);
     const VkResult result = static_cast<VkResult>(r.i32());
     const uint32_t oneway_errors = r.u32();
+    if (!r.ok()) return VK_ERROR_DEVICE_LOST;
     report_oneway_errors(oneway_errors);
     return result;
 }
@@ -201,7 +210,9 @@ VKAPI_ATTR VkResult VKAPI_CALL QueueWaitIdle(VkQueue handle) {
         return VK_ERROR_DEVICE_LOST;
     }
     Reader r = payload_reader(reply);
-    return static_cast<VkResult>(r.i32());
+    const VkResult result = static_cast<VkResult>(r.i32());
+    if (!r.ok()) return VK_ERROR_DEVICE_LOST;
+    return result;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL DeviceWaitIdle(VkDevice handle) {
@@ -216,6 +227,7 @@ VKAPI_ATTR VkResult VKAPI_CALL DeviceWaitIdle(VkDevice handle) {
     const VkResult result = static_cast<VkResult>(r.i32());
     const uint32_t oneway_errors = r.u32();
     report_oneway_errors(oneway_errors);
+    if (!r.ok()) return VK_ERROR_DEVICE_LOST;
     return result;
 }
 
@@ -273,7 +285,9 @@ VKAPI_ATTR VkResult VKAPI_CALL GetFenceStatus(VkDevice handle, VkFence fence) {
         return VK_ERROR_DEVICE_LOST;
     }
     Reader r = payload_reader(reply);
-    return static_cast<VkResult>(r.i32());
+    const VkResult result = static_cast<VkResult>(r.i32());
+    if (!r.ok()) return VK_ERROR_DEVICE_LOST;
+    return result;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL WaitForFences(VkDevice handle, uint32_t count,
@@ -291,7 +305,9 @@ VKAPI_ATTR VkResult VKAPI_CALL WaitForFences(VkDevice handle, uint32_t count,
         return VK_ERROR_DEVICE_LOST;
     }
     Reader r = payload_reader(reply);
-    return static_cast<VkResult>(r.i32());
+    const VkResult result = static_cast<VkResult>(r.i32());
+    if (!r.ok()) return VK_ERROR_DEVICE_LOST;
+    return result;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL CreateSemaphore(VkDevice handle,

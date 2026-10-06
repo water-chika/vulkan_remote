@@ -59,6 +59,15 @@ class Table {
 
 // Everything the server knows about one connected client. A second client
 // would get its own, which is why this is not global state.
+struct ServerMemory {
+    VkDeviceMemory handle = VK_NULL_HANDLE;
+    VkDevice owner = VK_NULL_HANDLE;
+    VkDeviceSize size = 0;
+    VkMemoryPropertyFlags property_flags = 0;
+    VkDeviceSize map_alignment = 1;
+    VkDeviceSize non_coherent_atom_size = 1;
+};
+
 struct ObjectTables final : public HandleResolver {
     Table<VkDevice> devices;
     Table<VkQueue> queues;
@@ -68,6 +77,8 @@ struct ObjectTables final : public HandleResolver {
     Table<VkImage> images;
     Table<VkImageView> image_views;
     Table<VkDeviceMemory> memories;
+    std::unordered_map<uint64_t, ServerMemory> memory_metadata;
+    std::unordered_map<VkDevice, VkPhysicalDevice> device_physical_devices;
     Table<VkRenderPass> render_passes;
     Table<VkFramebuffer> framebuffers;
     Table<VkShaderModule> shader_modules;

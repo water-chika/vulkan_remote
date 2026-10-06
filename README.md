@@ -29,6 +29,8 @@ compositor.
 | `tools/texture_upload.cpp` | staging-uploaded checkerboard sampled and read back offscreen |
 | `tools/compute.cpp` | deterministic storage-buffer compute regression |
 | `tools/buffer_ops.cpp` | deterministic fill/update/copy buffer regression |
+| `tools/mipmap.cpp` | deterministic per-level barrier, blit, and mip-chain readback regression |
+| `tools/noncoherent_memory.cpp` | explicit non-coherent mapped-memory flush/invalidate regression |
 | `docs/compatibility-roadmap.md` | tested applications and ordered sample/API milestones |
 | `tools/remoting_trace.py` | record, inspect, and exactly replay one headless wire session |
 | `tests/run_matrix.py` | inventory-driven four-mode acceptance runner |
@@ -247,8 +249,13 @@ kept outside the repository.
 - `tools/compute` verifies compute dispatch with an exact storage-buffer checksum.
   `tools/buffer_ops` verifies `vkCmdFillBuffer`, `vkCmdUpdateBuffer`,
   `vkCmdCopyBuffer`, a transfer barrier, and mapped readback with another exact
-  checksum. `tests/test_samples.py` runs all four workloads directly and remoted
-  through a fresh server.
+  checksum. `tools/mipmap` generates four levels with per-level barriers and
+  `vkCmdBlitImage`, then verifies the exact 340-byte chain and checksum.
+  `tools/noncoherent_memory` explicitly flushes and invalidates two disjoint,
+  nonzero atom-aligned ranges and verifies 128 synchronized bytes; it reports a
+  stable skip when no compatible non-coherent host-visible memory type exists.
+  `tests/test_samples.py` runs all six workloads directly and remoted through a
+  fresh server, requiring matching pass or skip results.
 - [`docs/compatibility-roadmap.md`](docs/compatibility-roadmap.md) distinguishes
   tested support from planned Vulkan command families and sample applications.
 - `vkcube` and `vkcubepp` each complete 20 frames through the server-owned
@@ -275,12 +282,14 @@ kept outside the repository.
 ## How the hard parts are solved
 
 **Mapped memory.** `vkMapMemory` must return a pointer the caller can
-dereference, which a socket cannot deliver. The client hands back a shadow
-allocation and moves the bytes at the points where Vulkan says they become
-visible: uploaded before a submit, downloaded at map and invalidate. Two
-opcodes outside the Vulkan command set exist for that, and they are in the
-handshake digest because both peers must agree on them. Coherent memory is
-therefore not coherent in the strict sense — writes land at submit.
+dereference, which a socket cannot deliver. The client hands back an aligned
+shadow allocation. Explicit non-coherent flush/invalidate calls transfer only
+the requested ranges; coherent writes are conservatively uploaded before
+submit and present and on unmap. Two opcodes outside the Vulkan command set
+exist for those transfers, and they are in the handshake digest because both
+peers must agree on them. Coherent memory is therefore not coherent in the
+strict sense: writes land at remoting synchronization points, and GPU writes do
+not refresh an already-mapped coherent shadow automatically.
 
 **Recording.** Every `vkCmd*` is sent without waiting for a reply, so a
 40-call command buffer costs one round trip instead of forty. The server
@@ -323,17 +332,18 @@ a way to measure that conclusion rather than assume it.
 - Add client-side diagnostics that name a rejected or unsupported opcode; today
   the useful diagnostic is primarily in the server log.
 - Follow [`docs/compatibility-roadmap.md`](docs/compatibility-roadmap.md): add a
-  deterministic sample before each command family. Next are mipmap generation
-  and mapped-memory cases, then query pools, indirect execution, and secondary
-  command buffers; a bounded properties2/Vulkan 1.1 bridge comes only afterward.
+  deterministic sample before each command family. Next are query pools,
+  indirect execution, and secondary command buffers; a bounded
+  properties2/Vulkan 1.1 bridge comes only afterward.
 - `VK_KHR_get_physical_device_properties2` is deliberately not advertised until
   its complete entry-point family and bounded chain marshalling are implemented.
 - `tests/test_core_coverage.py` derives the Vulkan 1.0 inventory from pinned
   `vk.xml`; the current client exposes 96/137 core commands, with the exact gap
   maintained in the compatibility roadmap.
 - `pNext` chains are dropped by the marshaller.
-- Shadow mappings are per-range; two mappings of overlapping memory are not
-  reconciled.
+- A memory allocation can have only one active shadow mapping. GPU writes do not
+  automatically refresh an already-mapped coherent shadow after host waits;
+  explicit invalidate remains the reliable remoting readback point.
 - Roughly a third of cross-machine `vkcube` runs drop with
   `event on unknown object N` during registry binding in the proxy. Not
   isolated.

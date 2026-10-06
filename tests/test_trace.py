@@ -44,7 +44,7 @@ class ThreadResult:
 
 
 PROTOCOL = {
-    "wire_schema": "wire-v6-mvp-abi-handshake",
+    "wire_schema": "wire-v10-mapped-memory-alignment",
     "registry_sha256": "a" * 64,
     "wire_abi": "x86_64-little-endian-v1",
     "command_digest": "0123456789abcdef",
@@ -173,9 +173,9 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(decoded["summary"]["mapped_bytes"]["flush_uploaded"], 0)
 
     def test_mapped_byte_summary(self):
-        flush = struct.pack("<QIQQQI", 9, 1, 10, 20, 3, 3) + b"abc"
-        download = struct.pack("<QIQQQ", 9, 1, 10, 20, 5)
-        reply = struct.pack("<II", 0, 5) + b"12345"
+        flush = struct.pack("<QQQQI", 9, 10, 20, 3, 3) + b"abc"
+        download = struct.pack("<QQQQ", 9, 10, 20, 5)
+        reply = struct.pack("<IiI", 0, 0, 5) + b"12345"
         records = [
             trace.Record(0, trace.CLIENT_TO_SERVER, 2, flush),
             trace.Record(1, trace.CLIENT_TO_SERVER, 3, download),

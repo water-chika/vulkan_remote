@@ -677,11 +677,9 @@ VKAPI_ATTR VkResult VKAPI_CALL QueuePresentKHR(VkQueue handle,
     RemoteQueue* queue = to_queue(handle);
     RemoteDevice* device = queue->device;
 
-    // Same reason as vkQueueSubmit: the server must see whatever the
-    // application wrote through its mappings before this present can show
-    // it, and a present is exactly the kind of call an application waits on
-    // the timing of - it must not be turned into a fire-and-forget one.
-    device->flush_mapped();
+    // Host-coherent mappings become visible without an explicit Vulkan flush.
+    // Non-coherent mappings move only through vkFlushMappedMemoryRanges.
+    if (!device->flush_coherent_mapped()) return VK_ERROR_DEVICE_LOST;
 
     Writer request;
     request.handle(queue->remote_id);
