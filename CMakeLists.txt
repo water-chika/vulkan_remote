@@ -160,7 +160,7 @@ file(GENERATE
     \"file_format_version\": \"1.0.0\",
     \"ICD\": {
         \"library_path\": \"${icd_library}\",
-        \"api_version\": \"1.0.0\"
+        \"api_version\": \"1.2.0\"
     }
 }
 "
@@ -175,6 +175,9 @@ target_link_libraries(vulkan_remoting_texture_upload PRIVATE Vulkan::Vulkan)
 add_executable(vulkan_remoting_compute tools/compute.cpp)
 target_link_libraries(vulkan_remoting_compute PRIVATE Vulkan::Vulkan)
 
+add_executable(vulkan_remoting_spirv15_compute tools/spirv15_compute.cpp)
+target_link_libraries(vulkan_remoting_spirv15_compute PRIVATE Vulkan::Vulkan)
+
 add_executable(vulkan_remoting_buffer_ops tools/buffer_ops.cpp)
 target_link_libraries(vulkan_remoting_buffer_ops PRIVATE Vulkan::Vulkan)
 
@@ -183,6 +186,9 @@ target_link_libraries(vulkan_remoting_mipmap PRIVATE Vulkan::Vulkan)
 
 add_executable(vulkan_remoting_noncoherent_memory tools/noncoherent_memory.cpp)
 target_link_libraries(vulkan_remoting_noncoherent_memory PRIVATE Vulkan::Vulkan)
+
+add_executable(vulkan_remoting_renderpass2_fsr tools/renderpass2_fragment_shading_rate.cpp)
+target_link_libraries(vulkan_remoting_renderpass2_fsr PRIVATE Vulkan::Vulkan)
 
 # wayland/: a waypipe-style protocol proxy, split so the replay half lives
 # inside whichever process on machine B also owns the Vulkan driver (see
@@ -378,6 +384,10 @@ endif()  # NOT WIN32
 
 # These exercise only the common TCP protocol and ordinary Vulkan samples, so
 # register them on every platform where the server and ICD build.
+add_executable(vulkan_remoting_test_pnext tests/test_pnext.cpp)
+target_link_libraries(vulkan_remoting_test_pnext PRIVATE vulkan_remoting_wire Vulkan::Headers)
+add_test(NAME pnext COMMAND vulkan_remoting_test_pnext)
+
 add_test(NAME wire
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wire.py
             --build-dir ${CMAKE_CURRENT_BINARY_DIR}
@@ -415,5 +425,6 @@ set_tests_properties(core_coverage PROPERTIES TIMEOUT 30)
 add_test(NAME capabilities
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_capabilities.py
             --icd $<TARGET_FILE:vulkan_remoting_icd>
+            --source-dir ${CMAKE_CURRENT_SOURCE_DIR}
 )
 set_tests_properties(capabilities PROPERTIES TIMEOUT 30)

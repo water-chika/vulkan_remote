@@ -3,18 +3,10 @@
 // Struct marshalling for Vulkan CreateInfo-shaped structs, built on top of
 // wire.hpp's Writer/Reader.
 //
-// Both peers are the same compiler/ABI on the same architecture (a handshake
-// already checks they were generated from the same vk.xml), so instead of
-// hand-copying every field we take a local copy of the struct with pNext
-// nulled, raw-copy that, and separately serialise whatever it points to.
-// Reading does the mirror image: read the raw struct, then allocate each
-// pointed-to array from an Arena and patch the pointer to it.
-//
-// pNext chains are never sent. write_* silently drops pNext; this module
-// only understands the base struct for each type, so any extension chain a
-// caller attached is lost. There is no encoding for arbitrary pNext chains
-// here, and none is planned - callers relying on an extension struct need a
-// dedicated wire message, not this one.
+// Base Vulkan 1.0 structs retain their established ABI-local encoding. The
+// extension closure uses the bounded, context-specific and field-wise pNext
+// codecs below: native pointers and arbitrary native struct bytes never enter
+// that encoding.
 //
 // Non-dispatchable handles inside a struct travel as the raw bits already in
 // that field: on the client, a "handle" IS the id the server needs, so the
@@ -59,6 +51,12 @@ class Arena {
 // legitimate CreateInfo never approaches it, so it only ever rejects a
 // hostile or desynchronised peer.
 constexpr uint32_t kMaxArrayElements = 1u << 20;
+constexpr uint32_t kMaxPNextNodes = 16;
+constexpr uint32_t kMaxPNextDepth = 4;
+// Keep shader requests comfortably below the common 64 MiB message cap after
+// their device handle and field-wise CreateInfo envelope are added.
+constexpr uint64_t kMaxShaderCodeBytes = 16u * 1024u * 1024u;
+
 
 // Implemented on the server, where handles are real driver objects. Resolves
 // an id that travelled over the wire back to the handle it names. Passing 0
@@ -69,6 +67,7 @@ struct HandleResolver {
     virtual VkBuffer buffer(uint64_t id) const = 0;
     virtual VkImage image(uint64_t id) const = 0;
     virtual VkImageView image_view(uint64_t id) const = 0;
+    virtual VkBufferView buffer_view(uint64_t id) const = 0;
     virtual VkDeviceMemory memory(uint64_t id) const = 0;
     virtual VkRenderPass render_pass(uint64_t id) const = 0;
     virtual VkFramebuffer framebuffer(uint64_t id) const = 0;
@@ -80,20 +79,68 @@ struct HandleResolver {
     virtual VkDescriptorPool descriptor_pool(uint64_t id) const = 0;
     virtual VkDescriptorSet descriptor_set(uint64_t id) const = 0;
     virtual VkSampler sampler(uint64_t id) const = 0;
+    virtual VkSamplerYcbcrConversion sampler_ycbcr_conversion(uint64_t id) const = 0;
     virtual VkSemaphore semaphore(uint64_t id) const = 0;
     virtual VkFence fence(uint64_t id) const = 0;
+    virtual VkEvent event(uint64_t id) const = 0;
+    virtual VkQueryPool query_pool(uint64_t id) const = 0;
     virtual VkSurfaceKHR surface(uint64_t id) const = 0;
     virtual VkSwapchainKHR swapchain(uint64_t id) const = 0;
     virtual VkCommandPool command_pool(uint64_t id) const = 0;
     virtual VkCommandBuffer command_buffer(uint64_t id) const = 0;
 };
 
+// pNext is deliberately not a universal codec. Each call-site selects one
+// semantic context, and every context has a closed allowlist in marshal.cpp.
+enum class PNextContext : uint32_t {
+    QueryFeaturesOutput,
+    QueryPropertiesOutput,
+    ImageFormatPropertiesOutput,
+    DeviceCreate,
+    RenderPass,
+    RenderPass2,
+    GraphicsPipeline,
+    TessellationState,
+    ImageCreate,
+    ImageViewCreate,
+    SamplerCreate,
+    MemoryRequirements2,
+    BindBufferMemory2,
+    BindImageMemory2,
+    DescriptorSetLayoutSupport,
+    FramebufferCreate,
+    RenderPassBegin,
+    SemaphoreCreate,
+    Submit,
+    BufferCreate,
+    MemoryAllocate,
+    // VkShaderModuleCreateInfo currently permits no transported extension
+    // structures. A non-null chain is rejected rather than silently dropped.
+    ShaderModule,
+};
+
+// Input-chain codec. Returns false for an unknown node, a duplicate singleton,
+// an invalid sType, excessive node/depth/count bounds, or malformed wire data.
+bool write_pnext_chain(Writer& w, PNextContext context, const void* head,
+                       uint32_t depth = 0);
+bool read_pnext_chain(Reader& r, Arena& arena, const HandleResolver& hr,
+                      PNextContext context, const void** out_head, uint32_t depth = 0);
+
+// Output chains remain caller-owned. The request carries only their topology;
+// the reply carries field values. Applying a reply fills matching nodes in
+// place and never rewires the caller's pNext pointers.
+bool write_pnext_output_topology(Writer& w, PNextContext context, const void* head);
+bool read_pnext_output_topology(Reader& r, Arena& arena, PNextContext context,
+                                void** out_head);
+bool write_pnext_output_values(Writer& w, PNextContext context, const void* head);
+bool apply_pnext_output_values(Reader& r, PNextContext context, void* caller_head);
+
 // Group A: structs with arrays and/or handles beyond sType/pNext.
 void write_DeviceQueueCreateInfo(Writer& w, const VkDeviceQueueCreateInfo& s);
 bool read_DeviceQueueCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                                  VkDeviceQueueCreateInfo* out);
 
-void write_DeviceCreateInfo(Writer& w, const VkDeviceCreateInfo& s);
+bool write_DeviceCreateInfo(Writer& w, const VkDeviceCreateInfo& s);
 bool read_DeviceCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                             VkDeviceCreateInfo* out);
 
@@ -101,23 +148,36 @@ void write_SwapchainCreateInfoKHR(Writer& w, const VkSwapchainCreateInfoKHR& s);
 bool read_SwapchainCreateInfoKHR(Reader& r, Arena& arena, const HandleResolver& hr,
                                   VkSwapchainCreateInfoKHR* out);
 
-void write_ImageViewCreateInfo(Writer& w, const VkImageViewCreateInfo& s);
+bool write_ImageViewCreateInfo(Writer& w, const VkImageViewCreateInfo& s);
 bool read_ImageViewCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                                VkImageViewCreateInfo* out);
 
-void write_RenderPassCreateInfo(Writer& w, const VkRenderPassCreateInfo& s);
+bool write_RenderPassCreateInfo(Writer& w, const VkRenderPassCreateInfo& s);
 bool read_RenderPassCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                                 VkRenderPassCreateInfo* out);
+bool write_RenderPassCreateInfo2(Writer& w, const VkRenderPassCreateInfo2& s);
+bool read_RenderPassCreateInfo2(Reader& r, Arena& arena, const HandleResolver& hr,
+                                 VkRenderPassCreateInfo2* out);
 
-void write_ShaderModuleCreateInfo(Writer& w, const VkShaderModuleCreateInfo& s);
+bool write_ShaderModuleCreateInfo(Writer& w, const VkShaderModuleCreateInfo& s);
 bool read_ShaderModuleCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
-                                  VkShaderModuleCreateInfo* out);
+                                 VkShaderModuleCreateInfo* out);
+
+bool write_BufferViewCreateInfo(Writer& w, const VkBufferViewCreateInfo& s);
+bool read_BufferViewCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
+                               VkBufferViewCreateInfo* out);
+void write_QueryPoolCreateInfo(Writer& w, const VkQueryPoolCreateInfo& s);
+bool read_QueryPoolCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
+                              VkQueryPoolCreateInfo* out);
+void write_EventCreateInfo(Writer& w, const VkEventCreateInfo& s);
+bool read_EventCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
+                          VkEventCreateInfo* out);
 
 void write_PipelineLayoutCreateInfo(Writer& w, const VkPipelineLayoutCreateInfo& s);
 bool read_PipelineLayoutCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                                     VkPipelineLayoutCreateInfo* out);
 
-void write_GraphicsPipelineCreateInfo(Writer& w, const VkGraphicsPipelineCreateInfo& s);
+bool write_GraphicsPipelineCreateInfo(Writer& w, const VkGraphicsPipelineCreateInfo& s);
 bool read_GraphicsPipelineCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                                       VkGraphicsPipelineCreateInfo* out);
 
@@ -125,7 +185,7 @@ void write_ComputePipelineCreateInfo(Writer& w, const VkComputePipelineCreateInf
 bool read_ComputePipelineCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                                      VkComputePipelineCreateInfo* out);
 
-void write_FramebufferCreateInfo(Writer& w, const VkFramebufferCreateInfo& s);
+bool write_FramebufferCreateInfo(Writer& w, const VkFramebufferCreateInfo& s);
 bool read_FramebufferCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                                  VkFramebufferCreateInfo* out);
 
@@ -137,9 +197,16 @@ void write_CommandBufferBeginInfo(Writer& w, const VkCommandBufferBeginInfo& s);
 bool read_CommandBufferBeginInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                                   VkCommandBufferBeginInfo* out);
 
-void write_RenderPassBeginInfo(Writer& w, const VkRenderPassBeginInfo& s);
+bool write_RenderPassBeginInfo(Writer& w, const VkRenderPassBeginInfo& s);
 bool read_RenderPassBeginInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                                VkRenderPassBeginInfo* out);
+
+bool write_SubpassBeginInfo(Writer& w, const VkSubpassBeginInfo& s);
+bool read_SubpassBeginInfo(Reader& r, Arena& arena, const HandleResolver& hr,
+                           VkSubpassBeginInfo* out);
+bool write_SubpassEndInfo(Writer& w, const VkSubpassEndInfo& s);
+bool read_SubpassEndInfo(Reader& r, Arena& arena, const HandleResolver& hr,
+                         VkSubpassEndInfo* out);
 
 void write_DescriptorSetLayoutCreateInfo(Writer& w, const VkDescriptorSetLayoutCreateInfo& s);
 bool read_DescriptorSetLayoutCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
@@ -153,8 +220,6 @@ void write_DescriptorSetAllocateInfo(Writer& w, const VkDescriptorSetAllocateInf
 bool read_DescriptorSetAllocateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                                      VkDescriptorSetAllocateInfo* out);
 
-// pTexelBufferView (VkBufferView arrays) is rejected: this project never
-// creates buffer views, so there is no resolver entry for them.
 void write_WriteDescriptorSet(Writer& w, const VkWriteDescriptorSet& s);
 bool read_WriteDescriptorSet(Reader& r, Arena& arena, const HandleResolver& hr,
                               VkWriteDescriptorSet* out);
@@ -162,6 +227,15 @@ bool read_WriteDescriptorSet(Reader& r, Arena& arena, const HandleResolver& hr,
 void write_CopyDescriptorSet(Writer& w, const VkCopyDescriptorSet& s);
 bool read_CopyDescriptorSet(Reader& r, Arena& arena, const HandleResolver& hr,
                              VkCopyDescriptorSet* out);
+
+bool write_DescriptorUpdateTemplateCreateInfo(Writer& w,
+    const VkDescriptorUpdateTemplateCreateInfo& s);
+bool read_DescriptorUpdateTemplateCreateInfo(Reader& r, Arena& arena,
+    const HandleResolver& hr, VkDescriptorUpdateTemplateCreateInfo* out);
+void write_SamplerYcbcrConversionCreateInfo(Writer& w,
+    const VkSamplerYcbcrConversionCreateInfo& s);
+bool read_SamplerYcbcrConversionCreateInfo(Reader& r, Arena& arena,
+    const HandleResolver& hr, VkSamplerYcbcrConversionCreateInfo* out);
 
 void write_ImageMemoryBarrier(Writer& w, const VkImageMemoryBarrier& s);
 bool read_ImageMemoryBarrier(Reader& r, Arena& arena, const HandleResolver& hr,
@@ -181,7 +255,7 @@ void write_BufferCreateInfo(Writer& w, const VkBufferCreateInfo& s);
 bool read_BufferCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                             VkBufferCreateInfo* out);
 
-void write_ImageCreateInfo(Writer& w, const VkImageCreateInfo& s);
+bool write_ImageCreateInfo(Writer& w, const VkImageCreateInfo& s);
 bool read_ImageCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                            VkImageCreateInfo* out);
 
@@ -247,16 +321,19 @@ void write_PhysicalDeviceProperties(Writer& w, const VkPhysicalDeviceProperties&
 bool read_PhysicalDeviceProperties(Reader& r, VkPhysicalDeviceProperties* out);
 
 void write_PhysicalDeviceMemoryProperties(Writer& w, const VkPhysicalDeviceMemoryProperties& s);
-bool read_PhysicalDeviceMemoryProperties(Reader& r, Arena& arena, const HandleResolver& hr,
-                                          VkPhysicalDeviceMemoryProperties* out);
+bool read_PhysicalDeviceMemoryProperties(Reader& r, VkPhysicalDeviceMemoryProperties* out);
 
 void write_PhysicalDeviceFeatures(Writer& w, const VkPhysicalDeviceFeatures& s);
-bool read_PhysicalDeviceFeatures(Reader& r, Arena& arena, const HandleResolver& hr,
-                                  VkPhysicalDeviceFeatures* out);
+bool read_PhysicalDeviceFeatures(Reader& r, VkPhysicalDeviceFeatures* out);
 
 void write_FormatProperties(Writer& w, const VkFormatProperties& s);
-bool read_FormatProperties(Reader& r, Arena& arena, const HandleResolver& hr,
-                            VkFormatProperties* out);
+bool read_FormatProperties(Reader& r, VkFormatProperties* out);
+void write_ImageFormatProperties(Writer& w, const VkImageFormatProperties& s);
+bool read_ImageFormatProperties(Reader& r, VkImageFormatProperties* out);
+void write_QueueFamilyProperties(Writer& w, const VkQueueFamilyProperties& s);
+bool read_QueueFamilyProperties(Reader& r, VkQueueFamilyProperties* out);
+void write_SparseImageFormatProperties(Writer& w, const VkSparseImageFormatProperties& s);
+bool read_SparseImageFormatProperties(Reader& r, VkSparseImageFormatProperties* out);
 
 void write_ExtensionProperties(Writer& w, const VkExtensionProperties& s);
 bool read_ExtensionProperties(Reader& r, Arena& arena, const HandleResolver& hr,

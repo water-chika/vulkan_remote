@@ -77,7 +77,7 @@ def write_manifest(library: str, destination: str) -> str:
     # common way this setup fails on Windows, and the manifest is generated
     # precisely so nobody has to remember it.
     manifest = {"file_format_version": "1.0.0",
-                "ICD": {"library_path": os.path.abspath(library), "api_version": "1.0.0"}}
+                "ICD": {"library_path": os.path.abspath(library), "api_version": "1.2.0"}}
     with open(destination, "w") as handle:
         json.dump(manifest, handle, indent=4)
     return destination

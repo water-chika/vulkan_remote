@@ -343,7 +343,7 @@ def stage_commands(config: Config, paths: dict[str, str], wrapper: str) -> list[
     manifest = json.dumps(
         {
             "file_format_version": "1.0.0",
-            "ICD": {"library_path": config.windows_icd, "api_version": "1.3.0"},
+            "ICD": {"library_path": config.windows_icd, "api_version": "1.2.0"},
         },
         indent=4,
     )

@@ -212,6 +212,49 @@ void handle_GetImageMemoryRequirements(Session& c) {
     c.writer.u32(static_cast<uint32_t>(Status::Ok)); write_memory_requirements(c.writer, reqs); c.reply();
 }
 
+void handle_GetDeviceMemoryCommitment(Session& c) {
+    VkDevice device = c.tables.devices.get(c.reader.handle());
+    VkDeviceMemory memory = c.tables.memory(c.reader.handle());
+    if (!c.reader.ok() || device == VK_NULL_HANDLE || memory == VK_NULL_HANDLE) {
+        c.reply_status(Status::DecodeError); return;
+    }
+    VkDeviceSize committed = 0; vkGetDeviceMemoryCommitment(device, memory, &committed);
+    c.writer.u32(static_cast<uint32_t>(Status::Ok)); c.writer.u64(committed); c.reply();
+}
+
+void handle_GetImageSparseMemoryRequirements(Session& c) {
+    VkDevice device = c.tables.devices.get(c.reader.handle());
+    VkImage image = c.tables.image(c.reader.handle());
+    if (!c.reader.ok() || device == VK_NULL_HANDLE || image == VK_NULL_HANDLE) {
+        c.reply_status(Status::DecodeError); return;
+    }
+    uint32_t count = 0; vkGetImageSparseMemoryRequirements(device, image, &count, nullptr);
+    if (count > remoting::kMaxArrayElements) { c.reply_status(Status::DecodeError); return; }
+    std::vector<VkSparseImageMemoryRequirements> values(count);
+    if (count) vkGetImageSparseMemoryRequirements(device, image, &count, values.data());
+    c.writer.u32(static_cast<uint32_t>(Status::Ok)); c.writer.u32(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto& v = values[i]; c.writer.u32(v.formatProperties.aspectMask);
+        c.writer.u32(v.formatProperties.imageGranularity.width);
+        c.writer.u32(v.formatProperties.imageGranularity.height);
+        c.writer.u32(v.formatProperties.imageGranularity.depth);
+        c.writer.u32(v.formatProperties.flags); c.writer.u32(v.imageMipTailFirstLod);
+        c.writer.u64(v.imageMipTailSize); c.writer.u64(v.imageMipTailOffset);
+        c.writer.u64(v.imageMipTailStride);
+    }
+    c.reply();
+}
+
+void handle_BindBufferMemory2(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());uint32_t n=c.reader.u32();if(n>remoting::kMaxArrayElements||!count_fits(c.reader,n,24)){c.reply_status(Status::DecodeError);return;}std::vector<VkBindBufferMemoryInfo> v(n);for(auto&x:v){x={VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO};x.buffer=c.tables.buffer(c.reader.handle());x.memory=c.tables.memory(c.reader.handle());x.memoryOffset=c.reader.u64();}if(!c.reader.ok()||!d){c.reply_status(Status::DecodeError);return;}auto fn=reinterpret_cast<PFN_vkBindBufferMemory2>(vkGetDeviceProcAddr(d,"vkBindBufferMemory2"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.i32(fn(d,n,v.data()));c.reply();}
+void handle_BindImageMemory2(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());uint32_t n=c.reader.u32();if(n>remoting::kMaxArrayElements||!count_fits(c.reader,n,28)){c.reply_status(Status::DecodeError);return;}Arena arena;std::vector<VkBindImageMemoryInfo>v(n);bool ok=d!=VK_NULL_HANDLE;for(auto&x:v){x={VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO};x.image=c.tables.image(c.reader.handle());x.memory=c.tables.memory(c.reader.handle());x.memoryOffset=c.reader.u64();ok=ok&&remoting::read_pnext_chain(c.reader,arena,c.tables,remoting::PNextContext::BindImageMemory2,&x.pNext);}if(!ok||!c.reader.ok()){c.reply_status(Status::DecodeError);return;}auto fn=reinterpret_cast<PFN_vkBindImageMemory2>(vkGetDeviceProcAddr(d,"vkBindImageMemory2"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.i32(fn(d,n,v.data()));c.reply();}
+void handle_GetBufferMemoryRequirements2(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());VkBufferMemoryRequirementsInfo2 info{VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2};info.buffer=c.tables.buffer(c.reader.handle());Arena arena;void*chain=nullptr;if(!d||!remoting::read_pnext_output_topology(c.reader,arena,remoting::PNextContext::MemoryRequirements2,&chain)){c.reply_status(Status::DecodeError);return;}VkMemoryRequirements2 out{VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,chain};auto fn=reinterpret_cast<PFN_vkGetBufferMemoryRequirements2>(vkGetDeviceProcAddr(d,"vkGetBufferMemoryRequirements2"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}fn(d,&info,&out);c.writer.u32(static_cast<uint32_t>(Status::Ok));write_memory_requirements(c.writer,out.memoryRequirements);remoting::write_pnext_output_values(c.writer,remoting::PNextContext::MemoryRequirements2,chain);c.reply();}
+void handle_GetImageMemoryRequirements2(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());VkImageMemoryRequirementsInfo2 info{VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2};info.image=c.tables.image(c.reader.handle());Arena arena;const void*input=nullptr;void*output=nullptr;if(!d||!remoting::read_pnext_chain(c.reader,arena,c.tables,remoting::PNextContext::MemoryRequirements2,&input)||!remoting::read_pnext_output_topology(c.reader,arena,remoting::PNextContext::MemoryRequirements2,&output)){c.reply_status(Status::DecodeError);return;}info.pNext=input;VkMemoryRequirements2 out{VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,output};auto fn=reinterpret_cast<PFN_vkGetImageMemoryRequirements2>(vkGetDeviceProcAddr(d,"vkGetImageMemoryRequirements2"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}fn(d,&info,&out);c.writer.u32(static_cast<uint32_t>(Status::Ok));write_memory_requirements(c.writer,out.memoryRequirements);remoting::write_pnext_output_values(c.writer,remoting::PNextContext::MemoryRequirements2,output);c.reply();}
+void handle_GetImageSparseMemoryRequirements2(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());VkImageSparseMemoryRequirementsInfo2 info{VK_STRUCTURE_TYPE_IMAGE_SPARSE_MEMORY_REQUIREMENTS_INFO_2};info.image=c.tables.image(c.reader.handle());if(!c.reader.ok()||!d||!info.image){c.reply_status(Status::DecodeError);return;}auto fn=reinterpret_cast<PFN_vkGetImageSparseMemoryRequirements2>(vkGetDeviceProcAddr(d,"vkGetImageSparseMemoryRequirements2"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}uint32_t n=0;fn(d,&info,&n,nullptr);if(n>remoting::kMaxArrayElements){c.reply_status(Status::DecodeError);return;}std::vector<VkSparseImageMemoryRequirements2>v(n,VkSparseImageMemoryRequirements2{VK_STRUCTURE_TYPE_SPARSE_IMAGE_MEMORY_REQUIREMENTS_2});if(n)fn(d,&info,&n,v.data());c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.u32(n);for(auto&x:v){auto&q=x.memoryRequirements;c.writer.u32(q.formatProperties.aspectMask);c.writer.u32(q.formatProperties.imageGranularity.width);c.writer.u32(q.formatProperties.imageGranularity.height);c.writer.u32(q.formatProperties.imageGranularity.depth);c.writer.u32(q.formatProperties.flags);c.writer.u32(q.imageMipTailFirstLod);c.writer.u64(q.imageMipTailSize);c.writer.u64(q.imageMipTailOffset);c.writer.u64(q.imageMipTailStride);}c.reply();}
+
+void handle_GetBufferDeviceAddress(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());VkBuffer b=c.tables.buffer(c.reader.handle());if(!c.reader.ok()||!d||!b){c.reply_status(Status::DecodeError);return;}c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.u64(0);c.reply();}
+void handle_GetBufferOpaqueCaptureAddress(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());VkBuffer b=c.tables.buffer(c.reader.handle());if(!c.reader.ok()||!d||!b){c.reply_status(Status::DecodeError);return;}c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.u64(0);c.reply();}
+void handle_GetDeviceMemoryOpaqueCaptureAddress(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());VkDeviceMemory m=c.tables.memory(c.reader.handle());if(!c.reader.ok()||!d||!m){c.reply_status(Status::DecodeError);return;}c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.u64(0);c.reply();}
+
 }  // namespace
 
 REGISTER_HANDLER(vkAllocateMemory, handle_AllocateMemory);
@@ -222,3 +265,14 @@ REGISTER_HANDLER(vkBindBufferMemory, handle_BindBufferMemory);
 REGISTER_HANDLER(vkBindImageMemory, handle_BindImageMemory);
 REGISTER_HANDLER(vkGetBufferMemoryRequirements, handle_GetBufferMemoryRequirements);
 REGISTER_HANDLER(vkGetImageMemoryRequirements, handle_GetImageMemoryRequirements);
+REGISTER_HANDLER(vkGetDeviceMemoryCommitment, handle_GetDeviceMemoryCommitment);
+REGISTER_HANDLER(vkGetImageSparseMemoryRequirements, handle_GetImageSparseMemoryRequirements);
+REGISTER_HANDLER(vkBindBufferMemory2, handle_BindBufferMemory2);
+REGISTER_HANDLER(vkBindImageMemory2, handle_BindImageMemory2);
+REGISTER_HANDLER(vkGetBufferMemoryRequirements2, handle_GetBufferMemoryRequirements2);
+REGISTER_HANDLER(vkGetImageMemoryRequirements2, handle_GetImageMemoryRequirements2);
+REGISTER_HANDLER(vkGetImageSparseMemoryRequirements2, handle_GetImageSparseMemoryRequirements2);
+
+REGISTER_HANDLER(vkGetBufferDeviceAddress, handle_GetBufferDeviceAddress);
+REGISTER_HANDLER(vkGetBufferOpaqueCaptureAddress, handle_GetBufferOpaqueCaptureAddress);
+REGISTER_HANDLER(vkGetDeviceMemoryOpaqueCaptureAddress, handle_GetDeviceMemoryOpaqueCaptureAddress);

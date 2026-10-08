@@ -3,11 +3,13 @@
 // handlers they read directly off the Server (via Session::server) rather
 // than an ObjectTables entry.
 
+#include <algorithm>
 #include <cstring>
 #include <vector>
 
 #include <vulkan/vulkan.h>
 
+#include "extension_contract.hpp"
 #include "marshal.hpp"
 #include "session.hpp"
 
@@ -41,6 +43,7 @@ void handle_Handshake(Session& s) {
                        : static_cast<uint32_t>(Status::DecodeError));
     s.writer.string(remoting::kCommandSetDigest);
     s.writer.u32(static_cast<uint32_t>(s.server.physical_device_count()));
+    s.writer.u32(s.server.loader_api_version());
     s.reply();
     if (!match) s.close_connection = true;
 }
@@ -171,6 +174,221 @@ void handle_vkGetPhysicalDeviceImageFormatProperties(Session& s) {
     s.reply();
 }
 
+void handle_vkGetPhysicalDeviceSparseImageFormatProperties(Session& s) {
+    VkPhysicalDevice device = s.server.physical_device_from_id(s.reader.handle());
+    const VkFormat format = static_cast<VkFormat>(s.reader.i32());
+    const VkImageType type = static_cast<VkImageType>(s.reader.i32());
+    const VkSampleCountFlagBits samples = static_cast<VkSampleCountFlagBits>(s.reader.i32());
+    const VkImageUsageFlags usage = s.reader.u32();
+    const VkImageTiling tiling = static_cast<VkImageTiling>(s.reader.i32());
+    if (!s.reader.ok() || device == VK_NULL_HANDLE) { s.reply_status(Status::DecodeError); return; }
+    uint32_t count = 0;
+    vkGetPhysicalDeviceSparseImageFormatProperties(device, format, type, samples, usage, tiling,
+                                                    &count, nullptr);
+    if (count > remoting::kMaxArrayElements) { s.reply_status(Status::DecodeError); return; }
+    std::vector<VkSparseImageFormatProperties> values(count);
+    if (count) vkGetPhysicalDeviceSparseImageFormatProperties(device, format, type, samples, usage,
+                                                               tiling, &count, values.data());
+    s.writer.u32(static_cast<uint32_t>(Status::Ok)); s.writer.u32(count);
+    for (uint32_t i = 0; i < count; ++i)
+        remoting::write_SparseImageFormatProperties(s.writer, values[i]);
+    s.reply();
+}
+
+void handle_vkGetPhysicalDeviceFeatures2(Session& s) {
+    const uint64_t id = s.reader.handle();
+    VkPhysicalDevice device = s.server.physical_device_from_id(id);
+    if (!s.reader.ok() || device == VK_NULL_HANDLE) {
+        s.reply_status(Status::DecodeError);
+        return;
+    }
+    remoting::Arena arena;
+    void* chain = nullptr;
+    if (!remoting::read_pnext_output_topology(s.reader, arena,
+                                               remoting::PNextContext::QueryFeaturesOutput,
+                                               &chain)) {
+        s.reply_status(Status::DecodeError);
+        return;
+    }
+    VkPhysicalDeviceFeatures2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, chain};
+    vkGetPhysicalDeviceFeatures2(device, &properties);
+    s.writer.u32(static_cast<uint32_t>(Status::Ok));
+    remoting::write_PhysicalDeviceFeatures(s.writer, properties.features);
+    remoting::write_pnext_output_values(s.writer,
+                                        remoting::PNextContext::QueryFeaturesOutput, chain);
+    s.reply();
+}
+
+void handle_vkGetPhysicalDeviceProperties2(Session& s) {
+    const uint64_t id = s.reader.handle();
+    VkPhysicalDevice device = s.server.physical_device_from_id(id);
+    if (!s.reader.ok() || device == VK_NULL_HANDLE) {
+        s.reply_status(Status::DecodeError);
+        return;
+    }
+    remoting::Arena arena;
+    void* chain = nullptr;
+    if (!remoting::read_pnext_output_topology(s.reader, arena,
+                                               remoting::PNextContext::QueryPropertiesOutput,
+                                               &chain)) {
+        s.reply_status(Status::DecodeError);
+        return;
+    }
+    VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, chain};
+    vkGetPhysicalDeviceProperties2(device, &properties);
+    s.writer.u32(static_cast<uint32_t>(Status::Ok));
+    remoting::write_PhysicalDeviceProperties(s.writer, properties.properties);
+    remoting::write_pnext_output_values(s.writer,
+                                        remoting::PNextContext::QueryPropertiesOutput, chain);
+    s.reply();
+}
+
+void handle_vkGetPhysicalDeviceFormatProperties2(Session& s) {
+    const uint64_t id = s.reader.handle();
+    VkPhysicalDevice device = s.server.physical_device_from_id(id);
+    const VkFormat format = static_cast<VkFormat>(s.reader.i32());
+    if (!s.reader.ok() || device == VK_NULL_HANDLE) {
+        s.reply_status(Status::DecodeError);
+        return;
+    }
+    VkFormatProperties2 properties{VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2};
+    vkGetPhysicalDeviceFormatProperties2(device, format, &properties);
+    s.writer.u32(static_cast<uint32_t>(Status::Ok));
+    remoting::write_FormatProperties(s.writer, properties.formatProperties);
+    s.reply();
+}
+
+void handle_vkGetPhysicalDeviceImageFormatProperties2(Session& s) {
+    const uint64_t id = s.reader.handle();
+    VkPhysicalDevice device = s.server.physical_device_from_id(id);
+    VkPhysicalDeviceImageFormatInfo2 info{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2};
+    info.format = static_cast<VkFormat>(s.reader.i32());
+    info.type = static_cast<VkImageType>(s.reader.i32());
+    info.tiling = static_cast<VkImageTiling>(s.reader.i32());
+    info.usage = static_cast<VkImageUsageFlags>(s.reader.u32());
+    info.flags = static_cast<VkImageCreateFlags>(s.reader.u32());
+    remoting::Arena arena;
+    const void* input_chain = nullptr;
+    if (!s.reader.ok() || device == VK_NULL_HANDLE ||
+        !remoting::read_pnext_chain(s.reader, arena, s.tables,
+                                    remoting::PNextContext::ImageCreate,
+                                    &input_chain)) {
+        s.reply_status(Status::DecodeError);
+        return;
+    }
+    info.pNext = input_chain;
+    void* output_chain=nullptr;
+    if(!remoting::read_pnext_output_topology(s.reader,arena,
+          remoting::PNextContext::ImageFormatPropertiesOutput,&output_chain)){
+        s.reply_status(Status::DecodeError);return;
+    }
+    VkImageFormatProperties2 properties{VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2,output_chain};
+    const VkResult result = vkGetPhysicalDeviceImageFormatProperties2(device, &info, &properties);
+    s.writer.u32(static_cast<uint32_t>(Status::Ok));
+    s.writer.i32(static_cast<int32_t>(result));
+    remoting::write_ImageFormatProperties(s.writer, properties.imageFormatProperties);
+    remoting::write_pnext_output_values(s.writer,
+        remoting::PNextContext::ImageFormatPropertiesOutput,output_chain);
+    s.reply();
+}
+
+void handle_vkGetPhysicalDeviceQueueFamilyProperties2(Session& s) {
+    const uint64_t id = s.reader.handle();
+    VkPhysicalDevice device = s.server.physical_device_from_id(id);
+    if (!s.reader.ok() || device == VK_NULL_HANDLE) {
+        s.reply_status(Status::DecodeError);
+        return;
+    }
+    uint32_t count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties2(device, &count, nullptr);
+    std::vector<VkQueueFamilyProperties2> properties(
+        count, VkQueueFamilyProperties2{VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2});
+    if (count) vkGetPhysicalDeviceQueueFamilyProperties2(device, &count, properties.data());
+    s.writer.u32(static_cast<uint32_t>(Status::Ok));
+    s.writer.u32(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        remoting::write_QueueFamilyProperties(s.writer,
+                                                properties[i].queueFamilyProperties);
+    }
+    s.reply();
+}
+
+void handle_vkGetPhysicalDeviceMemoryProperties2(Session& s) {
+    const uint64_t id = s.reader.handle();
+    VkPhysicalDevice device = s.server.physical_device_from_id(id);
+    if (!s.reader.ok() || device == VK_NULL_HANDLE) {
+        s.reply_status(Status::DecodeError);
+        return;
+    }
+    VkPhysicalDeviceMemoryProperties2 properties{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
+    vkGetPhysicalDeviceMemoryProperties2(device, &properties);
+    s.writer.u32(static_cast<uint32_t>(Status::Ok));
+    remoting::write_PhysicalDeviceMemoryProperties(s.writer, properties.memoryProperties);
+    s.reply();
+}
+
+void handle_vkGetPhysicalDeviceSparseImageFormatProperties2(Session& s) {
+    const uint64_t id = s.reader.handle();
+    VkPhysicalDevice device = s.server.physical_device_from_id(id);
+    VkPhysicalDeviceSparseImageFormatInfo2 info{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SPARSE_IMAGE_FORMAT_INFO_2};
+    info.format = static_cast<VkFormat>(s.reader.i32());
+    info.type = static_cast<VkImageType>(s.reader.i32());
+    info.samples = static_cast<VkSampleCountFlagBits>(s.reader.i32());
+    info.usage = static_cast<VkImageUsageFlags>(s.reader.u32());
+    info.tiling = static_cast<VkImageTiling>(s.reader.i32());
+    if (!s.reader.ok() || device == VK_NULL_HANDLE) {
+        s.reply_status(Status::DecodeError);
+        return;
+    }
+    uint32_t count = 0;
+    vkGetPhysicalDeviceSparseImageFormatProperties2(device, &info, &count, nullptr);
+    std::vector<VkSparseImageFormatProperties2> properties(
+        count, VkSparseImageFormatProperties2{VK_STRUCTURE_TYPE_SPARSE_IMAGE_FORMAT_PROPERTIES_2});
+    if (count) vkGetPhysicalDeviceSparseImageFormatProperties2(device, &info, &count, properties.data());
+    s.writer.u32(static_cast<uint32_t>(Status::Ok));
+    s.writer.u32(count);
+    for (uint32_t i = 0; i < count; ++i)
+        remoting::write_SparseImageFormatProperties(s.writer, properties[i].properties);
+    s.reply();
+}
+
+void handle_vkGetPhysicalDeviceFragmentShadingRatesKHR(Session& s) {
+    const uint64_t id = s.reader.handle();
+    VkPhysicalDevice device = s.server.physical_device_from_id(id);
+    if (!s.reader.ok() || device == VK_NULL_HANDLE) {
+        s.reply_status(Status::DecodeError);
+        return;
+    }
+    auto get_rates = reinterpret_cast<PFN_vkGetPhysicalDeviceFragmentShadingRatesKHR>(
+        vkGetInstanceProcAddr(s.server.instance(), "vkGetPhysicalDeviceFragmentShadingRatesKHR"));
+    if (get_rates == nullptr) {
+        s.reply_status(Status::UnsupportedCommand);
+        return;
+    }
+    uint32_t count = 0;
+    VkResult result = get_rates(device, &count, nullptr);
+    if (count > remoting::kMaxArrayElements) {
+        s.reply_status(Status::DecodeError);
+        return;
+    }
+    std::vector<VkPhysicalDeviceFragmentShadingRateKHR> rates(
+        count, VkPhysicalDeviceFragmentShadingRateKHR{
+                   VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_KHR});
+    if (result == VK_SUCCESS && count)
+        result = get_rates(device, &count, rates.data());
+    s.writer.u32(static_cast<uint32_t>(Status::Ok));
+    s.writer.i32(static_cast<int32_t>(result));
+    s.writer.u32(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        s.writer.u32(rates[i].sampleCounts);
+        s.writer.u32(rates[i].fragmentSize.width);
+        s.writer.u32(rates[i].fragmentSize.height);
+    }
+    s.reply();
+}
+
 void handle_vkEnumerateDeviceExtensionProperties(Session& s) {
     const uint64_t physdev_id = s.reader.handle();
     VkPhysicalDevice physdev = s.server.physical_device_from_id(physdev_id);
@@ -184,22 +402,39 @@ void handle_vkEnumerateDeviceExtensionProperties(Session& s) {
     std::vector<VkExtensionProperties> exts(count);
     if (count) vkEnumerateDeviceExtensionProperties(physdev, nullptr, &count, exts.data());
 
-    // Only advertise what this project actually remotes. WSI is separate
-    // work landing in wayland/; report VK_KHR_swapchain only if the real
-    // device supports it, so that other agent's code has something truthful
-    // to build on, and report nothing else.
-    const VkExtensionProperties* swapchain = nullptr;
-    for (const auto& e : exts) {
-        if (strcmp(e.extensionName, "VK_KHR_swapchain") == 0) {
-            swapchain = &e;
-            break;
+    std::vector<VkExtensionProperties> supported;
+    const auto find_extension = [&](const char* name) -> const VkExtensionProperties* {
+        for (const auto& extension : exts)
+            if (strcmp(extension.extensionName, name) == 0) return &extension;
+        return nullptr;
+    };
+    if (const auto* swapchain = find_extension(VK_KHR_SWAPCHAIN_EXTENSION_NAME))
+        supported.push_back(*swapchain);
+
+    // The reviewed device contract is a dependency-closed unit. Advertising a
+    // subset would let applications request an unusable FSR/renderpass2 graph,
+    // so expose all six only when the real device reports every member.
+    bool complete_contract = true;
+    for (const auto& required : remoting::kRequiredDeviceExtensions)
+        complete_contract &= find_extension(required.name) != nullptr;
+    if (complete_contract) {
+        for (const auto& required : remoting::kRequiredDeviceExtensions) {
+            VkExtensionProperties property{};
+            strncpy(property.extensionName, required.name, VK_MAX_EXTENSION_NAME_SIZE - 1);
+            // This implementation may support no more than its reviewed contract,
+            // while the real device may advertise no more than its own revision.
+            // Advertising either larger value would not be a true intersection.
+            property.specVersion = std::min(find_extension(required.name)->specVersion,
+                                            required.spec_version);
+            supported.push_back(property);
         }
     }
 
     s.writer.u32(static_cast<uint32_t>(Status::Ok));
     s.writer.i32(VK_SUCCESS);
-    s.writer.u32(swapchain ? 1 : 0);
-    if (swapchain) remoting::write_ExtensionProperties(s.writer, *swapchain);
+    s.writer.u32(static_cast<uint32_t>(supported.size()));
+    for (const auto& extension : supported)
+        remoting::write_ExtensionProperties(s.writer, extension);
     s.reply();
 }
 
@@ -215,5 +450,20 @@ REGISTER_HANDLER(vkGetPhysicalDeviceFeatures, handle_vkGetPhysicalDeviceFeatures
 REGISTER_HANDLER(vkGetPhysicalDeviceFormatProperties, handle_vkGetPhysicalDeviceFormatProperties);
 REGISTER_HANDLER(vkGetPhysicalDeviceImageFormatProperties,
                   handle_vkGetPhysicalDeviceImageFormatProperties);
+REGISTER_HANDLER(vkGetPhysicalDeviceSparseImageFormatProperties,
+                  handle_vkGetPhysicalDeviceSparseImageFormatProperties);
+REGISTER_HANDLER(vkGetPhysicalDeviceFeatures2, handle_vkGetPhysicalDeviceFeatures2);
+REGISTER_HANDLER(vkGetPhysicalDeviceProperties2, handle_vkGetPhysicalDeviceProperties2);
+REGISTER_HANDLER(vkGetPhysicalDeviceFormatProperties2, handle_vkGetPhysicalDeviceFormatProperties2);
+REGISTER_HANDLER(vkGetPhysicalDeviceImageFormatProperties2,
+                  handle_vkGetPhysicalDeviceImageFormatProperties2);
+REGISTER_HANDLER(vkGetPhysicalDeviceQueueFamilyProperties2,
+                  handle_vkGetPhysicalDeviceQueueFamilyProperties2);
+REGISTER_HANDLER(vkGetPhysicalDeviceMemoryProperties2,
+                  handle_vkGetPhysicalDeviceMemoryProperties2);
+REGISTER_HANDLER(vkGetPhysicalDeviceSparseImageFormatProperties2,
+                  handle_vkGetPhysicalDeviceSparseImageFormatProperties2);
+REGISTER_HANDLER(vkGetPhysicalDeviceFragmentShadingRatesKHR,
+                  handle_vkGetPhysicalDeviceFragmentShadingRatesKHR);
 REGISTER_HANDLER(vkEnumerateDeviceExtensionProperties,
                   handle_vkEnumerateDeviceExtensionProperties);

@@ -67,7 +67,7 @@ def main() -> int:
     manifest = os.path.join(build, "test_presentation_icd.json")
     with open(manifest, "w", encoding="utf-8") as handle:
         handle.write('{"file_format_version":"1.0.0","ICD":{"library_path":"%s",'
-                     '"api_version":"1.3.0"}}\n' % icd)
+                     '"api_version":"1.0.0"}}\n' % icd)
 
     port, wayland_port = free_port(), free_port()
     loader_data = tempfile.TemporaryDirectory(prefix="vulkan-remoting-loader-")

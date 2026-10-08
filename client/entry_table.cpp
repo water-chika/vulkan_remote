@@ -22,6 +22,7 @@
 #include <vulkan/vulkan.h>
 
 #include "entry_table.hpp"
+#include "extension_contract.hpp"
 #include "remote_objects.hpp"
 
 namespace remoting {
@@ -41,11 +42,35 @@ bool is_swapchain_command(const char* name) {
            strcmp(name, "vkQueuePresentKHR") == 0;
 }
 
+uint32_t core_version_for_command(const char* name) {
+    static const char* const v12[] = {
+        "vkCmdBeginRenderPass2","vkCmdDrawIndexedIndirectCount","vkCmdDrawIndirectCount",
+        "vkCmdEndRenderPass2","vkCmdNextSubpass2","vkCreateRenderPass2",
+        "vkGetBufferDeviceAddress","vkGetBufferOpaqueCaptureAddress",
+        "vkGetDeviceMemoryOpaqueCaptureAddress","vkGetSemaphoreCounterValue",
+        "vkResetQueryPool","vkSignalSemaphore","vkWaitSemaphores"};
+    static const char* const v11[] = {
+        "vkBindBufferMemory2","vkBindImageMemory2","vkCmdDispatchBase","vkCmdSetDeviceMask",
+        "vkCreateDescriptorUpdateTemplate","vkCreateSamplerYcbcrConversion",
+        "vkDestroyDescriptorUpdateTemplate","vkDestroySamplerYcbcrConversion",
+        "vkGetBufferMemoryRequirements2","vkGetDescriptorSetLayoutSupport",
+        "vkGetDeviceGroupPeerMemoryFeatures","vkGetDeviceQueue2","vkGetImageMemoryRequirements2",
+        "vkGetImageSparseMemoryRequirements2","vkTrimCommandPool","vkUpdateDescriptorSetWithTemplate"};
+    for (const char* command : v12) if (strcmp(name, command) == 0) return VK_API_VERSION_1_2;
+    for (const char* command : v11) if (strcmp(name, command) == 0) return VK_API_VERSION_1_1;
+    return VK_API_VERSION_1_0;
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL GetDeviceProcAddr(VkDevice handle, const char* pName) {
     if (pName == nullptr || handle == VK_NULL_HANDLE) return nullptr;
     auto* device = reinterpret_cast<RemoteDevice*>(handle);
+    if (core_version_for_command(pName) > device->api_version) return nullptr;
     if (is_swapchain_command(pName) &&
         device->enabled_extensions.count(VK_KHR_SWAPCHAIN_EXTENSION_NAME) == 0) {
+        return nullptr;
+    }
+    if (const char* extension = device_extension_for_command(pName);
+        extension != nullptr && device->enabled_extensions.count(extension) == 0) {
         return nullptr;
     }
     size_t count = 0;
@@ -105,6 +130,11 @@ PFN_vkVoidFunction lookup_instance(VkInstance handle, const char* name) {
     PFN_vkVoidFunction function = lookup(name);
     if (!function || handle == VK_NULL_HANDLE) return function;
     auto* instance = reinterpret_cast<RemoteInstance*>(handle);
+    if (core_version_for_command(name) > instance->negotiated_api_version &&
+        std::strstr(name, "KHR") == nullptr && std::strstr(name, "EXT") == nullptr) return nullptr;
+    if (is_properties2_command(name) && std::strstr(name, "KHR") != nullptr &&
+        instance->enabled_extensions.count(
+            VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME) == 0) return nullptr;
 #if defined(_WIN32)
     if (strcmp(name, "vkCreateWin32SurfaceKHR") == 0 &&
         instance->enabled_extensions.count(VK_KHR_WIN32_SURFACE_EXTENSION_NAME) == 0) return nullptr;

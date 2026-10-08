@@ -80,7 +80,12 @@ bool Server::init_vulkan(bool validate, bool want_wayland) {
     VkApplicationInfo app_info{};
     app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     app_info.pApplicationName = "vulkan-remoting-server";
-    app_info.apiVersion = VK_API_VERSION_1_1;
+    if (auto enumerate_version = reinterpret_cast<PFN_vkEnumerateInstanceVersion>(
+            vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceVersion"))) {
+        if (enumerate_version(&m_loader_api_version) != VK_SUCCESS)
+            m_loader_api_version = VK_API_VERSION_1_0;
+    }
+    app_info.apiVersion = (std::min)(m_loader_api_version, VK_API_VERSION_1_2);
 
     std::vector<const char*> layers;
     std::vector<const char*> extensions;
@@ -192,7 +197,9 @@ bool Server::init_vulkan(bool validate, bool want_wayland) {
     for (uint32_t i = 0; i < count; ++i) {
         VkPhysicalDeviceProperties props{};
         vkGetPhysicalDeviceProperties(m_physical_devices[i], &props);
-        fprintf(stderr, "server:   [%u] %s\n", i, props.deviceName);
+        fprintf(stderr, "server:   [%u] %s (API %u.%u.%u)\n", i, props.deviceName,
+                VK_API_VERSION_MAJOR(props.apiVersion), VK_API_VERSION_MINOR(props.apiVersion),
+                VK_API_VERSION_PATCH(props.apiVersion));
     }
     return true;
 }
@@ -319,6 +326,16 @@ namespace {
 // with fourteen objects still on it.
 void destroy_session_objects(remoting::ObjectTables& tables, Server& server) {
     const VkInstance instance = server.instance();
+    for (size_t i=0;i<tables.descriptor_update_templates.all().size();++i) {
+        auto object=tables.descriptor_update_templates.all()[i];if(!object)continue;
+        auto owner=tables.descriptor_update_template_owners.find(i+1);if(owner==tables.descriptor_update_template_owners.end())continue;
+        auto fn=reinterpret_cast<PFN_vkDestroyDescriptorUpdateTemplate>(vkGetDeviceProcAddr(owner->second,"vkDestroyDescriptorUpdateTemplate"));if(fn)fn(owner->second,object,nullptr);
+    }
+    for (size_t i=0;i<tables.sampler_ycbcr_conversions.all().size();++i) {
+        auto object=tables.sampler_ycbcr_conversions.all()[i];if(!object)continue;
+        auto owner=tables.sampler_ycbcr_conversion_owners.find(i+1);if(owner==tables.sampler_ycbcr_conversion_owners.end())continue;
+        auto fn=reinterpret_cast<PFN_vkDestroySamplerYcbcrConversion>(vkGetDeviceProcAddr(owner->second,"vkDestroySamplerYcbcrConversion"));if(fn)fn(owner->second,object,nullptr);
+    }
     for (VkSwapchainKHR swapchain : tables.swapchains.all()) {
         if (swapchain == VK_NULL_HANDLE) continue;
         const auto it = tables.swapchain_devices.find(swapchain);

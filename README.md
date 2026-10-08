@@ -20,7 +20,7 @@ compositor.
 | path | what it is |
 |---|---|
 | `common/wire.*` | framing, bounds-checked reader/writer |
-| `common/marshal.*` | struct serialisation; arrays and handles, `pNext` not carried |
+| `common/marshal.*` | field-wise struct serialization plus bounded, call-site-specific `pNext` allowlists |
 | `common/generate_remoting.py` | opcodes derived from `vk.xml`, plus a command-set digest |
 | `client/` | the ICD: `icd.cpp` entry points, then one file per area |
 | `server/` | `main.cpp`, `session.*` dispatch, `handlers_*.cpp` |
@@ -331,16 +331,21 @@ a way to measure that conclusion rather than assume it.
   pair.
 - Add client-side diagnostics that name a rejected or unsupported opcode; today
   the useful diagnostic is primarily in the server log.
-- Follow [`docs/compatibility-roadmap.md`](docs/compatibility-roadmap.md): add a
-  deterministic sample before each command family. Next are query pools,
-  indirect execution, and secondary command buffers; a bounded
-  properties2/Vulkan 1.1 bridge comes only afterward.
-- `VK_KHR_get_physical_device_properties2` is deliberately not advertised until
-  its complete entry-point family and bounded chain marshalling are implemented.
-- `tests/test_core_coverage.py` derives the Vulkan 1.0 inventory from pinned
-  `vk.xml`; the current client exposes 96/137 core commands, with the exact gap
-  maintained in the compatibility roadmap.
-- `pNext` chains are dropped by the marshaller.
+- Follow [`docs/compatibility-roadmap.md`](docs/compatibility-roadmap.md) for the
+  deterministic family regressions and the next Vulkan 1.2 milestone.
+- The ICD reports Vulkan 1.2 and advertises the complete
+  `VK_KHR_get_physical_device_properties2` query family. The dependency-closed
+  device contract is limited to multiview, maintenance2, image-format-list,
+  create-renderpass2, fragment-shading-rate, and imageless-framebuffer, and is
+  exposed only when the real device supports the whole set. Dynamic rendering
+  remains absent.
+- `tests/test_core_coverage.py` derives Vulkan 1.0, 1.1, and 1.2 inventories from
+  pinned `vk.xml`; client/server gates cover 137/137, 28/28, and 13/13 commands.
+  The manifest and instance version are 1.2; physical devices report
+  `min(real device API, Vulkan 1.2)`.
+- Arbitrary `pNext` chains remain unsupported. Reviewed bounded allowlists cover
+  properties2 feature/property queries, device creation, renderpass2, graphics
+  pipelines, images/views, imageless framebuffers, and render-pass begin.
 - A memory allocation can have only one active shadow mapping. GPU writes do not
   automatically refresh an already-mapped coherent shadow after host waits;
   explicit invalidate remains the reliable remoting readback point.

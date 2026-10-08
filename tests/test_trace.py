@@ -44,7 +44,7 @@ class ThreadResult:
 
 
 PROTOCOL = {
-    "wire_schema": "wire-v10-mapped-memory-alignment",
+    "wire_schema": "wire-v16-vulkan12-public-spirv15",
     "registry_sha256": "a" * 64,
     "wire_abi": "x86_64-little-endian-v1",
     "command_digest": "0123456789abcdef",
@@ -171,6 +171,29 @@ class FormatTests(unittest.TestCase):
             decoded["summary"]["opcodes"]["1"],
             {"records": 2, "payload_bytes": 15})
         self.assertEqual(decoded["summary"]["mapped_bytes"]["flush_uploaded"], 0)
+
+    def test_spirv15_shader_words_are_preserved_exactly(self):
+        source = (ROOT / "tools" / "spirv15_compute.cpp").read_text(encoding="utf-8")
+        match = __import__("re").search(
+            r"kComputeSpirv\[\] = \{(.*?)\n\};", source, __import__("re").S)
+        self.assertIsNotNone(match)
+        words = [int(word, 16) for word in __import__("re").findall(
+            r"0x[0-9a-fA-F]+", match.group(1))]
+        self.assertEqual(words[0], 0x07230203)
+        self.assertEqual(words[1], 0x00010500)
+        # OpCapability VulkanMemoryModel (word count 2, opcode 17, operand 5345)
+        self.assertIn((0x00020011, 5345), list(zip(words, words[1:])))
+        # OpMemoryModel Logical Vulkan (word count 3, opcode 14, operands 0, 3)
+        self.assertIn((0x0003000E, 0, 3), list(zip(words, words[1:], words[2:])))
+        payload = struct.pack("<IIQ", 18, 0, len(words) * 4) + struct.pack(
+            "<{}I".format(len(words)), *words)
+        trace.write_trace(self.path, self.metadata, [
+            trace.Record(0, trace.CLIENT_TO_SERVER, 99, payload),
+        ])
+        _, records = trace.read_trace(self.path)
+        preserved = list(struct.unpack_from(
+            "<{}I".format(len(words)), records[0].payload, 16))
+        self.assertEqual(preserved, words)
 
     def test_mapped_byte_summary(self):
         flush = struct.pack("<QQQQI", 9, 10, 20, 3, 3) + b"abc"

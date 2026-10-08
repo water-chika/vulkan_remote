@@ -72,6 +72,9 @@ class Writer {
     }
 
     const std::vector<char>& data() const { return m_data; }
+    void append(const Writer& other) {
+        m_data.insert(m_data.end(), other.m_data.begin(), other.m_data.end());
+    }
     void clear() { m_data.clear(); }
 
    private:

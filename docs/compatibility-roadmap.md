@@ -11,6 +11,7 @@ pinned Vulkan registry or the real server driver implements it.
 | `vulkan_remoting_offscreen` | Classic render pass, graphics pipeline, direct draw, image readback | Direct/remoted PPM bytes match |
 | `vulkan_remoting_texture_upload` | Staging upload, image barriers, descriptors, sampler, textured draw | Direct/remoted PPM bytes match |
 | `vulkan_remoting_compute` | Storage buffer, compute pipeline, dispatch, mapped readback | Exact checksum |
+| `vulkan_remoting_spirv15_compute` | SPIR-V 1.5 Vulkan memory model, storage buffer compute | Exact words and checksum direct/remoted |
 | `vulkan_remoting_buffer_ops` | Buffer fill, update, copy, transfer barrier, mapped readback | Exact checksum |
 | `vulkan_remoting_mipmap` | Four mip levels, per-level barriers, same-image blits, multi-region readback | Exact 340-byte chain and checksum |
 | `vulkan_remoting_noncoherent_memory` | Two disjoint nonzero atom-aligned ranges, explicit flush/invalidate, GPU copies | Exact 128 synchronized bytes and checksum, or matching capability skip |
@@ -18,15 +19,23 @@ pinned Vulkan registry or the real server driver implements it.
 | `vulkaninfo --summary` | Instance/device enumeration and basic properties | Selected normalized fields |
 | CTS `api.smoke.*`, `api.info.*` | Known passing cases in `tests/cts_baseline.txt` | Baseline regression delta |
 
-The ICD intentionally reports Vulkan 1.0. It no longer advertises
-`VK_KHR_get_physical_device_properties2`; that extension returns only after its
-full required entry-point family and bounded chain marshalling land.
+The ICD reports Vulkan 1.2 after completing the registry-derived cumulative
+command gates: 137/137 Vulkan 1.0, 28/28 Vulkan 1.1, and 13/13 Vulkan 1.2.
+`VK_KHR_get_physical_device_properties2` remains available through KHR aliases.
+Bounded feature/property `pNext` chains are supported. The dependency-closed
+FSR device contract comprises `VK_KHR_multiview`, `VK_KHR_maintenance2`,
+`VK_KHR_image_format_list`, `VK_KHR_create_renderpass2`,
+`VK_KHR_fragment_shading_rate`, and `VK_KHR_imageless_framebuffer`; it is
+advertised only when every member is supported by the real device. Device proc
+addresses for create-renderpass2 and FSR are gated by enabled extensions.
+`VK_KHR_dynamic_rendering` remains absent.
 
-A registry-derived gate currently reports **96 of 137** Vulkan 1.0 core commands
-exposed by the client, leaving 41 command entry points. Every exposed RPC must
-also have a server handler; the test fails if an implementation is added on only
-one side. The exact missing list is printed by `tests/test_core_coverage.py` and
-will shrink slice by slice until it becomes the 137/137 completion gate.
+A registry-derived gate reports **137 of 137** Vulkan 1.0 core commands exposed
+by the client, with matching server handlers or intentional local implementations.
+The completed families include query pools, indirect and secondary execution,
+resolve/clear/events/dynamic state, buffer views and texel descriptors, descriptor
+pool operations, pipeline cache data/merge, render granularity, memory commitment,
+and bounded sparse queries/binds.
 
 ## Acceptance rule for every milestone
 
@@ -49,33 +58,50 @@ API claims:
 - Multi-frame offscreen resource reuse and device recreation.
 - Sequential sessions on one server and two simultaneous clients.
 
-## Milestone 2 — missing Vulkan 1.0 command families
+## Milestone 2 — Vulkan 1.0 command families (implemented)
 
-Implement each family as one reviewed unit with a dedicated sample:
+All core command families are callable. Variable-size wire payloads are bounded,
+non-dispatchable objects use per-session tables, and sparse feature bits remain
+masked by the real-device feature intersection rather than being fabricated.
 
-1. Query pools: create/destroy/reset, begin/end, timestamps, get/copy results.
-2. Indirect execution: draw, indexed draw, and dispatch indirect.
-3. Secondary command buffers: `vkCmdExecuteCommands`.
-4. Resolve and clear operations: multisample resolve, depth/stencil clear,
-   clear attachments, and multi-subpass rendering.
-5. Dynamic state setters.
-6. Buffer views and texel-buffer access.
-7. Descriptor-set free/pool reset, pipeline-cache data/merge, and render-area
-   granularity.
-8. Sparse APIs only after a concrete sample requires them.
+## Milestone 3 — bounded extension bridge (implemented capability contract)
 
-## Milestone 3 — truthful Vulkan 1.1/properties2 bridge
+The properties2 query family now has field-wise request/reply handling and a
+bounded whitelist of supported input/output `pNext` structures. Renderpass2,
+fragment-shading-rate, image/view, imageless-framebuffer, and device-feature
+chains likewise use closed call-site allowlists. Unknown, duplicate, truncated,
+or over-limit nodes are rejected rather than copied or silently dropped.
 
-Before reporting Vulkan 1.1 or running the current Khronos Vulkan-Samples
-framework, add field-wise request/reply handling for the query families it uses:
+This extension bridge was retained through the Vulkan 1.2 promotion; promoted
+core names are version-gated while extension aliases remain extension-gated.
 
-- instance-version enumeration;
-- features2, properties2, memory-properties2, queue-family-properties2;
-- format/image-format properties2 as required;
-- a bounded whitelist of supported input/output `pNext` structures.
+## Milestone 3.5 — Vulkan 1.1 command surface (implemented and promoted)
 
-Do not copy arbitrary native `pNext` memory across the wire. Keep reporting
-Vulkan 1.0 until every entry point needed for the advertised version is callable.
+The registry-derived gate covers all 28 Vulkan 1.1 commands. Core and promoted
+KHR names share implementations. Physical-device groups are conservatively
+represented as one-device groups, external handle properties expose no
+transportable handle types, protected-memory behavior remains disabled, and
+`vkEnumerateInstanceVersion` and the ICD manifest report Vulkan 1.2; both
+physical-device property paths report `min(real device API, Vulkan 1.2)`. Bind-memory2,
+memory-requirements2, device-group recording, queue2, command-pool trim,
+descriptor update templates/layout support, and sampler YCbCr conversion have
+bounded codecs and owned server object tables.
+
+## Milestone 3.6 — Vulkan 1.2 public command surface
+
+The registry-derived gate covers all 13 Vulkan 1.2 commands and the public
+client contract is promoted atomically to Vulkan 1.2. Host query reset, timeline semaphore counter/wait/signal (including
+semaphore-create and submit value chains), indirect-count recording, and the
+existing renderpass2 family have bounded transports. Buffer/device-memory
+address entry points are callable but return zero because remote addresses and
+capture/replay tokens are not meaningful in the client process; their feature
+bits remain false. Vulkan 1.2 aggregate and promoted individual query chains
+share one policy that also masks unsupported descriptor-indexing semantics.
+The server independently queries its loader version, requests at most Vulkan
+1.2, and reports that version in the compatibility handshake; client objects
+retain the negotiated internal version for core-versus-extension dispatch.
+A checked-in SPIR-V 1.5 compute module uses `VulkanMemoryModel`, produces an
+exact deterministic checksum directly and remotely, and has a trace word-preservation gate.
 
 ## Milestone 4 — Khronos Vulkan-Samples
 
@@ -99,7 +125,8 @@ indexing, and shader objects—remain later milestones driven by concrete tests.
 
 - Little-endian x86-64 peers only.
 - Client and server must use matching registry, schema, ABI, and command digest.
-- Arbitrary `pNext` chains are dropped.
+- Arbitrary `pNext` chains are unsupported; only the reviewed bounded
+  call-site-specific allowlists are encoded.
 - Only one active shadow mapping is supported per memory allocation.
 - Coherent mapped writes become visible at remoting synchronization points rather
   than continuously, and GPU writes do not automatically refresh an existing

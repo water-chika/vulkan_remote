@@ -73,6 +73,7 @@ class Server {
 #endif
     VkInstance instance() const { return m_instance; }
     size_t physical_device_count() const { return m_physical_devices.size(); }
+    uint32_t loader_api_version() const { return m_loader_api_version; }
 
     // Creates a new server-owned Wayland window (see server/own_window.hpp)
     // for handle_CreateWin32SurfaceKHR to present through. One per surface
@@ -112,6 +113,7 @@ class Server {
 
    private:
     VkInstance m_instance = VK_NULL_HANDLE;
+    uint32_t m_loader_api_version = VK_API_VERSION_1_0;
     VkDebugUtilsMessengerEXT m_messenger = VK_NULL_HANDLE;
     std::vector<VkPhysicalDevice> m_physical_devices;
 #if !defined(_WIN32)

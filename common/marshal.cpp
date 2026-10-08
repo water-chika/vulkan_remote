@@ -1,4 +1,5 @@
 #include "marshal.hpp"
+#include "extension_contract.hpp"
 
 #include <cstring>
 #include <limits>
@@ -245,6 +246,644 @@ bool read_SubpassDescription(Reader& r, Arena& arena, VkSubpassDescription* out)
 
 }  // namespace
 
+namespace {
+
+bool pnext_allowed(PNextContext context, VkStructureType type) {
+    switch (context) {
+        case PNextContext::QueryFeaturesOutput:
+            return type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGELESS_FRAMEBUFFER_FEATURES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SEPARATE_DEPTH_STENCIL_LAYOUTS_FEATURES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_FEATURES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES;
+        case PNextContext::ImageFormatPropertiesOutput:
+            return type == VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES;
+        case PNextContext::QueryPropertiesOutput:
+            return type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_PROPERTIES_KHR ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_PROPERTIES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_POINT_CLIPPING_PROPERTIES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_PROPERTIES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_PROPERTIES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES;
+        case PNextContext::DeviceCreate:
+            return type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGELESS_FRAMEBUFFER_FEATURES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SEPARATE_DEPTH_STENCIL_LAYOUTS_FEATURES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_FEATURES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES;
+        case PNextContext::RenderPass:
+            return type == VK_STRUCTURE_TYPE_RENDER_PASS_INPUT_ATTACHMENT_ASPECT_CREATE_INFO ||
+                   type == VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO;
+        case PNextContext::RenderPass2:
+            return type == VK_STRUCTURE_TYPE_FRAGMENT_SHADING_RATE_ATTACHMENT_INFO_KHR;
+        case PNextContext::GraphicsPipeline:
+            return type == VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR;
+        case PNextContext::TessellationState:
+            return type == VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO;
+        case PNextContext::ImageCreate:
+            return type == VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO;
+        case PNextContext::ImageViewCreate:
+            return type == VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO ||
+                   type == VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO;
+        case PNextContext::SamplerCreate:
+            return type == VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO;
+        case PNextContext::MemoryRequirements2:
+            return type == VK_STRUCTURE_TYPE_IMAGE_PLANE_MEMORY_REQUIREMENTS_INFO ||
+                   type == VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS;
+        case PNextContext::BindBufferMemory2:
+            return false;
+        case PNextContext::BindImageMemory2:
+            return type == VK_STRUCTURE_TYPE_BIND_IMAGE_PLANE_MEMORY_INFO;
+        case PNextContext::DescriptorSetLayoutSupport:
+            return false;
+        case PNextContext::FramebufferCreate:
+            return type == VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENTS_CREATE_INFO;
+        case PNextContext::RenderPassBegin:
+            return type == VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO;
+        case PNextContext::SemaphoreCreate:
+            return type == VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+        case PNextContext::Submit:
+            return type == VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        case PNextContext::BufferCreate:
+            return type == VK_STRUCTURE_TYPE_BUFFER_OPAQUE_CAPTURE_ADDRESS_CREATE_INFO;
+        case PNextContext::MemoryAllocate:
+            return type == VK_STRUCTURE_TYPE_MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO;
+        case PNextContext::ShaderModule:
+            return false;
+    }
+    return false;
+}
+
+size_t pnext_node_size(VkStructureType type) {
+    switch (type) {
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2:
+            return sizeof(VkPhysicalDeviceFeatures2);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES:
+            return sizeof(VkPhysicalDeviceVulkan11Features);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES:
+            return sizeof(VkPhysicalDeviceVulkan11Properties);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES:
+            return sizeof(VkPhysicalDeviceVulkan12Features);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES:
+            return sizeof(VkPhysicalDeviceVulkan12Properties);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES:
+            return sizeof(VkPhysicalDeviceHostQueryResetFeatures);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES:
+            return sizeof(VkPhysicalDeviceTimelineSemaphoreFeatures);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_PROPERTIES:
+            return sizeof(VkPhysicalDeviceTimelineSemaphoreProperties);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES:
+            return sizeof(VkPhysicalDeviceBufferDeviceAddressFeatures);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES:
+            return sizeof(VkPhysicalDeviceDescriptorIndexingFeatures);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES:
+            return sizeof(VkPhysicalDeviceDescriptorIndexingProperties);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SEPARATE_DEPTH_STENCIL_LAYOUTS_FEATURES:
+            return sizeof(VkPhysicalDeviceSeparateDepthStencilLayoutsFeatures);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES:
+            return sizeof(VkPhysicalDeviceDepthStencilResolveProperties);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_FEATURES:
+            return sizeof(VkPhysicalDeviceProtectedMemoryFeatures);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES:
+            return sizeof(VkPhysicalDeviceSamplerYcbcrConversionFeatures);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES:
+            return sizeof(VkPhysicalDeviceSubgroupProperties);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES:
+            return sizeof(VkPhysicalDeviceIDProperties);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_PROPERTIES:
+            return sizeof(VkPhysicalDeviceProtectedMemoryProperties);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES:
+            return sizeof(VkPhysicalDeviceMaintenance3Properties);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR:
+            return sizeof(VkPhysicalDeviceFragmentShadingRateFeaturesKHR);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_PROPERTIES_KHR:
+            return sizeof(VkPhysicalDeviceFragmentShadingRatePropertiesKHR);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGELESS_FRAMEBUFFER_FEATURES:
+            return sizeof(VkPhysicalDeviceImagelessFramebufferFeatures);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES:
+            return sizeof(VkPhysicalDeviceMultiviewFeatures);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_PROPERTIES:
+            return sizeof(VkPhysicalDeviceMultiviewProperties);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_POINT_CLIPPING_PROPERTIES:
+            return sizeof(VkPhysicalDevicePointClippingProperties);
+        case VK_STRUCTURE_TYPE_RENDER_PASS_INPUT_ATTACHMENT_ASPECT_CREATE_INFO:
+            return sizeof(VkRenderPassInputAttachmentAspectCreateInfo);
+        case VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO:
+            return sizeof(VkRenderPassMultiviewCreateInfo);
+        case VK_STRUCTURE_TYPE_FRAGMENT_SHADING_RATE_ATTACHMENT_INFO_KHR:
+            return sizeof(VkFragmentShadingRateAttachmentInfoKHR);
+        case VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR:
+            return sizeof(VkPipelineFragmentShadingRateStateCreateInfoKHR);
+        case VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO:
+            return sizeof(VkPipelineTessellationDomainOriginStateCreateInfo);
+        case VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO:
+            return sizeof(VkImageFormatListCreateInfo);
+        case VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO:
+            return sizeof(VkImageViewUsageCreateInfo);
+        case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO:
+            return sizeof(VkSamplerYcbcrConversionInfo);
+        case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES:
+            return sizeof(VkSamplerYcbcrConversionImageFormatProperties);
+        case VK_STRUCTURE_TYPE_IMAGE_PLANE_MEMORY_REQUIREMENTS_INFO:
+            return sizeof(VkImagePlaneMemoryRequirementsInfo);
+        case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS:
+            return sizeof(VkMemoryDedicatedRequirements);
+        case VK_STRUCTURE_TYPE_BIND_IMAGE_PLANE_MEMORY_INFO:
+            return sizeof(VkBindImagePlaneMemoryInfo);
+        case VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENTS_CREATE_INFO:
+            return sizeof(VkFramebufferAttachmentsCreateInfo);
+        case VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO:
+            return sizeof(VkRenderPassAttachmentBeginInfo);
+        case VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO:
+            return sizeof(VkSemaphoreTypeCreateInfo);
+        case VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO:
+            return sizeof(VkTimelineSemaphoreSubmitInfo);
+        case VK_STRUCTURE_TYPE_BUFFER_OPAQUE_CAPTURE_ADDRESS_CREATE_INFO:
+            return sizeof(VkBufferOpaqueCaptureAddressCreateInfo);
+        case VK_STRUCTURE_TYPE_MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO:
+            return sizeof(VkMemoryOpaqueCaptureAddressAllocateInfo);
+        default:
+            return 0;
+    }
+}
+
+bool valid_count(uint32_t count, size_t element_size) {
+    return count <= kMaxArrayElements &&
+           (element_size == 0
+                ? count == 0
+                : static_cast<size_t>(count) <=
+                      (std::numeric_limits<size_t>::max)() / element_size);
+}
+
+bool collect_chain(PNextContext context, const void* head,
+                   std::vector<const VkBaseInStructure*>* nodes) {
+    for (auto* node = static_cast<const VkBaseInStructure*>(head); node; node = node->pNext) {
+        if (context == PNextContext::DeviceCreate &&
+            node->sType == VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO)
+            continue;
+        if (nodes->size() == kMaxPNextNodes || !pnext_allowed(context, node->sType)) return false;
+        for (const auto* previous : *nodes)
+            if (previous->sType == node->sType) return false;
+        nodes->push_back(node);
+    }
+    return true;
+}
+
+void write_extent(Writer& w, const VkExtent2D& e) {
+    w.u32(e.width);
+    w.u32(e.height);
+}
+
+bool read_extent(Reader& r, VkExtent2D* e) {
+    e->width = r.u32();
+    e->height = r.u32();
+    return r.ok();
+}
+
+void write_attachment_reference2(Writer& w, const VkAttachmentReference2& s) {
+    w.i32(static_cast<int32_t>(s.sType));
+    w.u32(s.attachment);
+    w.i32(static_cast<int32_t>(s.layout));
+    w.u32(s.aspectMask);
+}
+
+bool read_attachment_reference2(Reader& r, VkAttachmentReference2* s) {
+    *s = {};
+    s->sType = static_cast<VkStructureType>(r.i32());
+    s->attachment = r.u32();
+    s->layout = static_cast<VkImageLayout>(r.i32());
+    s->aspectMask = r.u32();
+    return r.ok() && s->sType == VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
+}
+
+bool write_node_fields(Writer& w, PNextContext context, const VkBaseInStructure* base,
+                       uint32_t depth) {
+    (void)context;
+    switch (base->sType) {
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2:
+            write_PhysicalDeviceFeatures(w,
+                reinterpret_cast<const VkPhysicalDeviceFeatures2*>(base)->features);
+            return true;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES: {
+            const auto&s=*reinterpret_cast<const VkPhysicalDeviceVulkan11Features*>(base);
+            w.u32(VK_FALSE);w.u32(VK_FALSE);w.u32(VK_FALSE);w.u32(VK_FALSE);
+            w.u32(s.multiview);w.u32(s.multiviewGeometryShader);w.u32(s.multiviewTessellationShader);
+            w.u32(VK_FALSE);w.u32(VK_FALSE);w.u32(VK_FALSE);w.u32(s.samplerYcbcrConversion);w.u32(VK_FALSE);return true;
+        }
+
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES:{auto f=*reinterpret_cast<const VkPhysicalDeviceVulkan12Features*>(base);remoting::apply_vulkan12_feature_policy(&f);const auto*v=reinterpret_cast<const VkBool32*>(&f.samplerMirrorClampToEdge);constexpr size_t n=(sizeof(f)-offsetof(VkPhysicalDeviceVulkan12Features,samplerMirrorClampToEdge))/sizeof(VkBool32);for(size_t i=0;i<n;++i)w.u32(v[i]);return true;}
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES:w.u32(reinterpret_cast<const VkPhysicalDeviceHostQueryResetFeatures*>(base)->hostQueryReset);return true;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES:w.u32(reinterpret_cast<const VkPhysicalDeviceTimelineSemaphoreFeatures*>(base)->timelineSemaphore);return true;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES:{auto f=*reinterpret_cast<const VkPhysicalDeviceBufferDeviceAddressFeatures*>(base);remoting::apply_buffer_address_feature_policy(&f);w.u32(f.bufferDeviceAddress);w.u32(f.bufferDeviceAddressCaptureReplay);w.u32(f.bufferDeviceAddressMultiDevice);return true;}
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES:{auto f=*reinterpret_cast<const VkPhysicalDeviceDescriptorIndexingFeatures*>(base);remoting::apply_descriptor_indexing_feature_policy(&f);const auto*v=reinterpret_cast<const VkBool32*>(&f.shaderInputAttachmentArrayDynamicIndexing);constexpr size_t n=(sizeof(f)-offsetof(VkPhysicalDeviceDescriptorIndexingFeatures,shaderInputAttachmentArrayDynamicIndexing))/sizeof(VkBool32);for(size_t i=0;i<n;++i)w.u32(v[i]);return true;}
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SEPARATE_DEPTH_STENCIL_LAYOUTS_FEATURES:w.u32(reinterpret_cast<const VkPhysicalDeviceSeparateDepthStencilLayoutsFeatures*>(base)->separateDepthStencilLayouts);return true;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES:w.bytes(reinterpret_cast<const char*>(base)+offsetof(VkPhysicalDeviceVulkan12Properties,driverID),sizeof(VkPhysicalDeviceVulkan12Properties)-offsetof(VkPhysicalDeviceVulkan12Properties,driverID));return true;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_PROPERTIES:w.u64(reinterpret_cast<const VkPhysicalDeviceTimelineSemaphoreProperties*>(base)->maxTimelineSemaphoreValueDifference);return true;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES:{const auto&x=*reinterpret_cast<const VkPhysicalDeviceDepthStencilResolveProperties*>(base);w.u32(x.supportedDepthResolveModes);w.u32(x.supportedStencilResolveModes);w.u32(x.independentResolveNone);w.u32(x.independentResolve);return true;}
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES:{auto x=*reinterpret_cast<const VkPhysicalDeviceDescriptorIndexingProperties*>(base);std::memset(reinterpret_cast<char*>(&x)+offsetof(VkPhysicalDeviceDescriptorIndexingProperties,maxUpdateAfterBindDescriptorsInAllPools),0,sizeof(x)-offsetof(VkPhysicalDeviceDescriptorIndexingProperties,maxUpdateAfterBindDescriptorsInAllPools));w.bytes(reinterpret_cast<const char*>(&x)+offsetof(VkPhysicalDeviceDescriptorIndexingProperties,maxUpdateAfterBindDescriptorsInAllPools),sizeof(x)-offsetof(VkPhysicalDeviceDescriptorIndexingProperties,maxUpdateAfterBindDescriptorsInAllPools));return true;}
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_FEATURES:
+            w.u32(VK_FALSE);return true;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES:
+            w.u32(reinterpret_cast<const VkPhysicalDeviceSamplerYcbcrConversionFeatures*>(base)->samplerYcbcrConversion);return true;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES: {
+            const auto&s=*reinterpret_cast<const VkPhysicalDeviceVulkan11Properties*>(base);
+            w.bytes(s.deviceUUID,VK_UUID_SIZE);w.bytes(s.driverUUID,VK_UUID_SIZE);w.bytes(s.deviceLUID,VK_LUID_SIZE);w.u32(s.deviceNodeMask);w.u32(s.deviceLUIDValid);
+            w.u32(s.subgroupSize);w.u32(s.subgroupSupportedStages);w.u32(s.subgroupSupportedOperations);w.u32(s.subgroupQuadOperationsInAllStages);
+            w.i32(s.pointClippingBehavior);w.u32(s.maxMultiviewViewCount);w.u32(s.maxMultiviewInstanceIndex);w.u32(VK_FALSE);w.u32(s.maxPerSetDescriptors);w.u64(s.maxMemoryAllocationSize);return true;
+        }
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES:{const auto&s=*reinterpret_cast<const VkPhysicalDeviceSubgroupProperties*>(base);w.u32(s.subgroupSize);w.u32(s.supportedStages);w.u32(s.supportedOperations);w.u32(s.quadOperationsInAllStages);return true;}
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES:{const auto&s=*reinterpret_cast<const VkPhysicalDeviceIDProperties*>(base);w.bytes(s.deviceUUID,VK_UUID_SIZE);w.bytes(s.driverUUID,VK_UUID_SIZE);w.bytes(s.deviceLUID,VK_LUID_SIZE);w.u32(s.deviceNodeMask);w.u32(s.deviceLUIDValid);return true;}
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_PROPERTIES:w.u32(VK_FALSE);return true;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES:{const auto&s=*reinterpret_cast<const VkPhysicalDeviceMaintenance3Properties*>(base);w.u32(s.maxPerSetDescriptors);w.u64(s.maxMemoryAllocationSize);return true;}
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR: {
+            const auto& s = *reinterpret_cast<const VkPhysicalDeviceFragmentShadingRateFeaturesKHR*>(base);
+            w.u32(s.pipelineFragmentShadingRate); w.u32(s.primitiveFragmentShadingRate);
+            w.u32(s.attachmentFragmentShadingRate); return true;
+        }
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_PROPERTIES_KHR: {
+            const auto& s = *reinterpret_cast<const VkPhysicalDeviceFragmentShadingRatePropertiesKHR*>(base);
+            write_extent(w, s.minFragmentShadingRateAttachmentTexelSize);
+            write_extent(w, s.maxFragmentShadingRateAttachmentTexelSize);
+            w.u32(s.maxFragmentShadingRateAttachmentTexelSizeAspectRatio);
+            w.u32(s.primitiveFragmentShadingRateWithMultipleViewports);
+            w.u32(s.layeredShadingRateAttachments); w.u32(s.fragmentShadingRateNonTrivialCombinerOps);
+            write_extent(w, s.maxFragmentSize); w.u32(s.maxFragmentSizeAspectRatio);
+            w.u32(s.maxFragmentShadingRateCoverageSamples);
+            w.u32(static_cast<uint32_t>(s.maxFragmentShadingRateRasterizationSamples));
+            w.u32(s.fragmentShadingRateWithShaderDepthStencilWrites);
+            w.u32(s.fragmentShadingRateWithSampleMask); w.u32(s.fragmentShadingRateWithShaderSampleMask);
+            w.u32(s.fragmentShadingRateWithConservativeRasterization);
+            w.u32(s.fragmentShadingRateWithFragmentShaderInterlock);
+            w.u32(s.fragmentShadingRateWithCustomSampleLocations);
+            w.u32(s.fragmentShadingRateStrictMultiplyCombiner); return true;
+        }
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGELESS_FRAMEBUFFER_FEATURES:
+            w.u32(reinterpret_cast<const VkPhysicalDeviceImagelessFramebufferFeatures*>(base)->imagelessFramebuffer); return true;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES: {
+            const auto& s = *reinterpret_cast<const VkPhysicalDeviceMultiviewFeatures*>(base);
+            w.u32(s.multiview); w.u32(s.multiviewGeometryShader); w.u32(s.multiviewTessellationShader); return true;
+        }
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_PROPERTIES: {
+            const auto& s = *reinterpret_cast<const VkPhysicalDeviceMultiviewProperties*>(base);
+            w.u32(s.maxMultiviewViewCount); w.u32(s.maxMultiviewInstanceIndex); return true;
+        }
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_POINT_CLIPPING_PROPERTIES:
+            w.i32(static_cast<int32_t>(reinterpret_cast<const VkPhysicalDevicePointClippingProperties*>(base)->pointClippingBehavior)); return true;
+        case VK_STRUCTURE_TYPE_RENDER_PASS_INPUT_ATTACHMENT_ASPECT_CREATE_INFO: {
+            const auto& s = *reinterpret_cast<const VkRenderPassInputAttachmentAspectCreateInfo*>(base);
+            if (!valid_count(s.aspectReferenceCount, sizeof(VkInputAttachmentAspectReference)) ||
+                (s.aspectReferenceCount && !s.pAspectReferences)) return false;
+            w.u32(s.aspectReferenceCount);
+            for (uint32_t i = 0; i < s.aspectReferenceCount; ++i) {
+                w.u32(s.pAspectReferences[i].subpass); w.u32(s.pAspectReferences[i].inputAttachmentIndex);
+                w.u32(s.pAspectReferences[i].aspectMask);
+            }
+            return true;
+        }
+        case VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO: {
+            const auto& s = *reinterpret_cast<const VkRenderPassMultiviewCreateInfo*>(base);
+            if (!valid_count(s.subpassCount, sizeof(uint32_t)) ||
+                !valid_count(s.dependencyCount, sizeof(int32_t)) ||
+                !valid_count(s.correlationMaskCount, sizeof(uint32_t)) ||
+                (s.subpassCount && !s.pViewMasks) || (s.dependencyCount && !s.pViewOffsets) ||
+                (s.correlationMaskCount && !s.pCorrelationMasks)) return false;
+            w.u32(s.subpassCount); for (uint32_t i=0;i<s.subpassCount;++i) w.u32(s.pViewMasks[i]);
+            w.u32(s.dependencyCount); for (uint32_t i=0;i<s.dependencyCount;++i) w.i32(s.pViewOffsets[i]);
+            w.u32(s.correlationMaskCount); for (uint32_t i=0;i<s.correlationMaskCount;++i) w.u32(s.pCorrelationMasks[i]);
+            return true;
+        }
+        case VK_STRUCTURE_TYPE_FRAGMENT_SHADING_RATE_ATTACHMENT_INFO_KHR: {
+            if (depth >= kMaxPNextDepth) return false;
+            const auto& s = *reinterpret_cast<const VkFragmentShadingRateAttachmentInfoKHR*>(base);
+            w.u32(s.pFragmentShadingRateAttachment ? 1u : 0u);
+            if (s.pFragmentShadingRateAttachment) {
+                if (s.pFragmentShadingRateAttachment->pNext) return false;
+                write_attachment_reference2(w, *s.pFragmentShadingRateAttachment);
+            }
+            write_extent(w, s.shadingRateAttachmentTexelSize); return true;
+        }
+        case VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR: {
+            const auto& s = *reinterpret_cast<const VkPipelineFragmentShadingRateStateCreateInfoKHR*>(base);
+            write_extent(w, s.fragmentSize); w.i32(static_cast<int32_t>(s.combinerOps[0]));
+            w.i32(static_cast<int32_t>(s.combinerOps[1])); return true;
+        }
+        case VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO:
+            w.i32(static_cast<int32_t>(reinterpret_cast<const VkPipelineTessellationDomainOriginStateCreateInfo*>(base)->domainOrigin)); return true;
+        case VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO: {
+            const auto& s = *reinterpret_cast<const VkImageFormatListCreateInfo*>(base);
+            if (!valid_count(s.viewFormatCount, sizeof(VkFormat)) || (s.viewFormatCount && !s.pViewFormats)) return false;
+            w.u32(s.viewFormatCount); for (uint32_t i=0;i<s.viewFormatCount;++i) w.i32(static_cast<int32_t>(s.pViewFormats[i])); return true;
+        }
+        case VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO:
+            w.u32(reinterpret_cast<const VkImageViewUsageCreateInfo*>(base)->usage); return true;
+        case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO:
+            w.handle(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(reinterpret_cast<const VkSamplerYcbcrConversionInfo*>(base)->conversion))); return true;
+        case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES:
+            w.u32(reinterpret_cast<const VkSamplerYcbcrConversionImageFormatProperties*>(base)->combinedImageSamplerDescriptorCount);return true;
+        case VK_STRUCTURE_TYPE_IMAGE_PLANE_MEMORY_REQUIREMENTS_INFO:
+            w.u32(reinterpret_cast<const VkImagePlaneMemoryRequirementsInfo*>(base)->planeAspect); return true;
+        case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
+            const auto& s=*reinterpret_cast<const VkMemoryDedicatedRequirements*>(base);
+            w.u32(s.prefersDedicatedAllocation);w.u32(s.requiresDedicatedAllocation);return true;
+        }
+        case VK_STRUCTURE_TYPE_BIND_IMAGE_PLANE_MEMORY_INFO:
+            w.u32(reinterpret_cast<const VkBindImagePlaneMemoryInfo*>(base)->planeAspect); return true;
+        case VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENTS_CREATE_INFO: {
+            if (depth >= kMaxPNextDepth) return false;
+            const auto& s = *reinterpret_cast<const VkFramebufferAttachmentsCreateInfo*>(base);
+            if (!valid_count(s.attachmentImageInfoCount, sizeof(VkFramebufferAttachmentImageInfo)) ||
+                (s.attachmentImageInfoCount && !s.pAttachmentImageInfos)) return false;
+            w.u32(s.attachmentImageInfoCount);
+            for (uint32_t i=0;i<s.attachmentImageInfoCount;++i) {
+                const auto& a=s.pAttachmentImageInfos[i];
+                if (a.sType != VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENT_IMAGE_INFO || a.pNext ||
+                    !valid_count(a.viewFormatCount,sizeof(VkFormat)) || (a.viewFormatCount && !a.pViewFormats)) return false;
+                w.u32(a.flags); w.u32(a.usage); w.u32(a.width); w.u32(a.height); w.u32(a.layerCount);
+                w.u32(a.viewFormatCount); for(uint32_t j=0;j<a.viewFormatCount;++j) w.i32(static_cast<int32_t>(a.pViewFormats[j]));
+            }
+            return true;
+        }
+
+        case VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO:{const auto&x=*reinterpret_cast<const VkSemaphoreTypeCreateInfo*>(base);w.i32(x.semaphoreType);w.u64(x.initialValue);return true;}
+        case VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO:{const auto&x=*reinterpret_cast<const VkTimelineSemaphoreSubmitInfo*>(base);if(!valid_count(x.waitSemaphoreValueCount,sizeof(uint64_t))||!valid_count(x.signalSemaphoreValueCount,sizeof(uint64_t))||(x.waitSemaphoreValueCount&&!x.pWaitSemaphoreValues)||(x.signalSemaphoreValueCount&&!x.pSignalSemaphoreValues))return false;w.u32(x.waitSemaphoreValueCount);for(uint32_t i=0;i<x.waitSemaphoreValueCount;++i)w.u64(x.pWaitSemaphoreValues[i]);w.u32(x.signalSemaphoreValueCount);for(uint32_t i=0;i<x.signalSemaphoreValueCount;++i)w.u64(x.pSignalSemaphoreValues[i]);return true;}
+        case VK_STRUCTURE_TYPE_BUFFER_OPAQUE_CAPTURE_ADDRESS_CREATE_INFO:w.u64(reinterpret_cast<const VkBufferOpaqueCaptureAddressCreateInfo*>(base)->opaqueCaptureAddress);return true;
+        case VK_STRUCTURE_TYPE_MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO:w.u64(reinterpret_cast<const VkMemoryOpaqueCaptureAddressAllocateInfo*>(base)->opaqueCaptureAddress);return true;
+        case VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO: {
+            const auto& s = *reinterpret_cast<const VkRenderPassAttachmentBeginInfo*>(base);
+            if (!valid_count(s.attachmentCount,sizeof(VkImageView)) || (s.attachmentCount && !s.pAttachments)) return false;
+            w.u32(s.attachmentCount); write_handle_array(w,s.pAttachments,s.attachmentCount); return true;
+        }
+        default: return false;
+    }
+}
+
+bool read_node_fields(Reader& r, Arena& arena, const HandleResolver& hr,
+                      VkStructureType type, void* storage, uint32_t depth) {
+    switch (type) {
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2:
+            if (!read_PhysicalDeviceFeatures(
+                    r, &static_cast<VkPhysicalDeviceFeatures2*>(storage)->features))
+                return false;
+            break;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES:{auto&s=*static_cast<VkPhysicalDeviceVulkan11Features*>(storage);s.storageBuffer16BitAccess=r.u32();s.uniformAndStorageBuffer16BitAccess=r.u32();s.storagePushConstant16=r.u32();s.storageInputOutput16=r.u32();s.multiview=r.u32();s.multiviewGeometryShader=r.u32();s.multiviewTessellationShader=r.u32();s.variablePointersStorageBuffer=r.u32();s.variablePointers=r.u32();s.protectedMemory=r.u32();s.samplerYcbcrConversion=r.u32();s.shaderDrawParameters=r.u32();break;}
+
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES:{auto&f=*static_cast<VkPhysicalDeviceVulkan12Features*>(storage);auto*v=reinterpret_cast<VkBool32*>(&f.samplerMirrorClampToEdge);constexpr size_t n=(sizeof(f)-offsetof(VkPhysicalDeviceVulkan12Features,samplerMirrorClampToEdge))/sizeof(VkBool32);for(size_t i=0;i<n;++i)v[i]=r.u32();break;}
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES:static_cast<VkPhysicalDeviceHostQueryResetFeatures*>(storage)->hostQueryReset=r.u32();break;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES:static_cast<VkPhysicalDeviceTimelineSemaphoreFeatures*>(storage)->timelineSemaphore=r.u32();break;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES:{auto&f=*static_cast<VkPhysicalDeviceBufferDeviceAddressFeatures*>(storage);f.bufferDeviceAddress=r.u32();f.bufferDeviceAddressCaptureReplay=r.u32();f.bufferDeviceAddressMultiDevice=r.u32();break;}
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES:{auto&f=*static_cast<VkPhysicalDeviceDescriptorIndexingFeatures*>(storage);auto*v=reinterpret_cast<VkBool32*>(&f.shaderInputAttachmentArrayDynamicIndexing);constexpr size_t n=(sizeof(f)-offsetof(VkPhysicalDeviceDescriptorIndexingFeatures,shaderInputAttachmentArrayDynamicIndexing))/sizeof(VkBool32);for(size_t i=0;i<n;++i)v[i]=r.u32();break;}
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SEPARATE_DEPTH_STENCIL_LAYOUTS_FEATURES:static_cast<VkPhysicalDeviceSeparateDepthStencilLayoutsFeatures*>(storage)->separateDepthStencilLayouts=r.u32();break;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES:{std::vector<char>b;constexpr size_t n=sizeof(VkPhysicalDeviceVulkan12Properties)-offsetof(VkPhysicalDeviceVulkan12Properties,driverID);if(!r.bytes(&b,n)||b.size()!=n)return false;memcpy(reinterpret_cast<char*>(storage)+offsetof(VkPhysicalDeviceVulkan12Properties,driverID),b.data(),n);break;}
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_PROPERTIES:static_cast<VkPhysicalDeviceTimelineSemaphoreProperties*>(storage)->maxTimelineSemaphoreValueDifference=r.u64();break;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES:{auto&x=*static_cast<VkPhysicalDeviceDepthStencilResolveProperties*>(storage);x.supportedDepthResolveModes=r.u32();x.supportedStencilResolveModes=r.u32();x.independentResolveNone=r.u32();x.independentResolve=r.u32();break;}
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES:{std::vector<char>b;constexpr size_t n=sizeof(VkPhysicalDeviceDescriptorIndexingProperties)-offsetof(VkPhysicalDeviceDescriptorIndexingProperties,maxUpdateAfterBindDescriptorsInAllPools);if(!r.bytes(&b,n)||b.size()!=n)return false;memcpy(reinterpret_cast<char*>(storage)+offsetof(VkPhysicalDeviceDescriptorIndexingProperties,maxUpdateAfterBindDescriptorsInAllPools),b.data(),n);break;}
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_FEATURES:static_cast<VkPhysicalDeviceProtectedMemoryFeatures*>(storage)->protectedMemory=r.u32();break;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES:static_cast<VkPhysicalDeviceSamplerYcbcrConversionFeatures*>(storage)->samplerYcbcrConversion=r.u32();break;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES:{auto&s=*static_cast<VkPhysicalDeviceVulkan11Properties*>(storage);std::vector<char>b;if(!r.bytes(&b,VK_UUID_SIZE)||b.size()!=VK_UUID_SIZE)return false;memcpy(s.deviceUUID,b.data(),VK_UUID_SIZE);if(!r.bytes(&b,VK_UUID_SIZE)||b.size()!=VK_UUID_SIZE)return false;memcpy(s.driverUUID,b.data(),VK_UUID_SIZE);if(!r.bytes(&b,VK_LUID_SIZE)||b.size()!=VK_LUID_SIZE)return false;memcpy(s.deviceLUID,b.data(),VK_LUID_SIZE);s.deviceNodeMask=r.u32();s.deviceLUIDValid=r.u32();s.subgroupSize=r.u32();s.subgroupSupportedStages=r.u32();s.subgroupSupportedOperations=r.u32();s.subgroupQuadOperationsInAllStages=r.u32();s.pointClippingBehavior=static_cast<VkPointClippingBehavior>(r.i32());s.maxMultiviewViewCount=r.u32();s.maxMultiviewInstanceIndex=r.u32();s.protectedNoFault=r.u32();s.maxPerSetDescriptors=r.u32();s.maxMemoryAllocationSize=r.u64();break;}
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES:{auto&s=*static_cast<VkPhysicalDeviceSubgroupProperties*>(storage);s.subgroupSize=r.u32();s.supportedStages=r.u32();s.supportedOperations=r.u32();s.quadOperationsInAllStages=r.u32();break;}
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES:{auto&s=*static_cast<VkPhysicalDeviceIDProperties*>(storage);std::vector<char>b;if(!r.bytes(&b,VK_UUID_SIZE)||b.size()!=VK_UUID_SIZE)return false;memcpy(s.deviceUUID,b.data(),VK_UUID_SIZE);if(!r.bytes(&b,VK_UUID_SIZE)||b.size()!=VK_UUID_SIZE)return false;memcpy(s.driverUUID,b.data(),VK_UUID_SIZE);if(!r.bytes(&b,VK_LUID_SIZE)||b.size()!=VK_LUID_SIZE)return false;memcpy(s.deviceLUID,b.data(),VK_LUID_SIZE);s.deviceNodeMask=r.u32();s.deviceLUIDValid=r.u32();break;}
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_PROPERTIES:static_cast<VkPhysicalDeviceProtectedMemoryProperties*>(storage)->protectedNoFault=r.u32();break;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES:{auto&s=*static_cast<VkPhysicalDeviceMaintenance3Properties*>(storage);s.maxPerSetDescriptors=r.u32();s.maxMemoryAllocationSize=r.u64();break;}
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR: {
+            auto& s=*static_cast<VkPhysicalDeviceFragmentShadingRateFeaturesKHR*>(storage);
+            s.pipelineFragmentShadingRate=r.u32(); s.primitiveFragmentShadingRate=r.u32(); s.attachmentFragmentShadingRate=r.u32(); break;
+        }
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_PROPERTIES_KHR: {
+            auto& s=*static_cast<VkPhysicalDeviceFragmentShadingRatePropertiesKHR*>(storage);
+            if(!read_extent(r,&s.minFragmentShadingRateAttachmentTexelSize)||!read_extent(r,&s.maxFragmentShadingRateAttachmentTexelSize)) return false;
+            s.maxFragmentShadingRateAttachmentTexelSizeAspectRatio=r.u32(); s.primitiveFragmentShadingRateWithMultipleViewports=r.u32();
+            s.layeredShadingRateAttachments=r.u32(); s.fragmentShadingRateNonTrivialCombinerOps=r.u32();
+            if(!read_extent(r,&s.maxFragmentSize)) return false; s.maxFragmentSizeAspectRatio=r.u32(); s.maxFragmentShadingRateCoverageSamples=r.u32();
+            s.maxFragmentShadingRateRasterizationSamples=static_cast<VkSampleCountFlagBits>(r.u32());
+            s.fragmentShadingRateWithShaderDepthStencilWrites=r.u32(); s.fragmentShadingRateWithSampleMask=r.u32(); s.fragmentShadingRateWithShaderSampleMask=r.u32();
+            s.fragmentShadingRateWithConservativeRasterization=r.u32(); s.fragmentShadingRateWithFragmentShaderInterlock=r.u32();
+            s.fragmentShadingRateWithCustomSampleLocations=r.u32(); s.fragmentShadingRateStrictMultiplyCombiner=r.u32(); break;
+        }
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGELESS_FRAMEBUFFER_FEATURES:
+            static_cast<VkPhysicalDeviceImagelessFramebufferFeatures*>(storage)->imagelessFramebuffer=r.u32(); break;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES: {
+            auto& s=*static_cast<VkPhysicalDeviceMultiviewFeatures*>(storage); s.multiview=r.u32(); s.multiviewGeometryShader=r.u32(); s.multiviewTessellationShader=r.u32(); break;
+        }
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_PROPERTIES: {
+            auto& s=*static_cast<VkPhysicalDeviceMultiviewProperties*>(storage); s.maxMultiviewViewCount=r.u32(); s.maxMultiviewInstanceIndex=r.u32(); break;
+        }
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_POINT_CLIPPING_PROPERTIES:
+            static_cast<VkPhysicalDevicePointClippingProperties*>(storage)->pointClippingBehavior=static_cast<VkPointClippingBehavior>(r.i32()); break;
+        case VK_STRUCTURE_TYPE_RENDER_PASS_INPUT_ATTACHMENT_ASPECT_CREATE_INFO: {
+            auto& s=*static_cast<VkRenderPassInputAttachmentAspectCreateInfo*>(storage); s.aspectReferenceCount=r.u32();
+            if(!r.ok()||!valid_count(s.aspectReferenceCount,sizeof(VkInputAttachmentAspectReference))) return false;
+            auto* p=s.aspectReferenceCount?arena.array<VkInputAttachmentAspectReference>(s.aspectReferenceCount):nullptr;
+            for(uint32_t i=0;i<s.aspectReferenceCount;++i){p[i].subpass=r.u32();p[i].inputAttachmentIndex=r.u32();p[i].aspectMask=r.u32();} s.pAspectReferences=p; break;
+        }
+        case VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO: {
+            auto& s=*static_cast<VkRenderPassMultiviewCreateInfo*>(storage); s.subpassCount=r.u32();
+            if(!r.ok()||!valid_count(s.subpassCount,sizeof(uint32_t))) return false; auto* vm=s.subpassCount?arena.array<uint32_t>(s.subpassCount):nullptr; for(uint32_t i=0;i<s.subpassCount;++i)vm[i]=r.u32();s.pViewMasks=vm;
+            s.dependencyCount=r.u32(); if(!r.ok()||!valid_count(s.dependencyCount,sizeof(int32_t)))return false;auto* vo=s.dependencyCount?arena.array<int32_t>(s.dependencyCount):nullptr;for(uint32_t i=0;i<s.dependencyCount;++i)vo[i]=r.i32();s.pViewOffsets=vo;
+            s.correlationMaskCount=r.u32();if(!r.ok()||!valid_count(s.correlationMaskCount,sizeof(uint32_t)))return false;auto* cm=s.correlationMaskCount?arena.array<uint32_t>(s.correlationMaskCount):nullptr;for(uint32_t i=0;i<s.correlationMaskCount;++i)cm[i]=r.u32();s.pCorrelationMasks=cm;break;
+        }
+        case VK_STRUCTURE_TYPE_FRAGMENT_SHADING_RATE_ATTACHMENT_INFO_KHR: {
+            if(depth>=kMaxPNextDepth)return false;auto& s=*static_cast<VkFragmentShadingRateAttachmentInfoKHR*>(storage);uint32_t present=r.u32();if(!r.ok()||present>1)return false;
+            if(present){auto* a=arena.array<VkAttachmentReference2>(1);if(!read_attachment_reference2(r,a))return false;s.pFragmentShadingRateAttachment=a;}if(!read_extent(r,&s.shadingRateAttachmentTexelSize))return false;break;
+        }
+        case VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR: {
+            auto& s=*static_cast<VkPipelineFragmentShadingRateStateCreateInfoKHR*>(storage);if(!read_extent(r,&s.fragmentSize))return false;s.combinerOps[0]=static_cast<VkFragmentShadingRateCombinerOpKHR>(r.i32());s.combinerOps[1]=static_cast<VkFragmentShadingRateCombinerOpKHR>(r.i32());break;
+        }
+        case VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO:
+            static_cast<VkPipelineTessellationDomainOriginStateCreateInfo*>(storage)->domainOrigin=static_cast<VkTessellationDomainOrigin>(r.i32());break;
+        case VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO: {
+            auto& s=*static_cast<VkImageFormatListCreateInfo*>(storage);s.viewFormatCount=r.u32();if(!r.ok()||!valid_count(s.viewFormatCount,sizeof(VkFormat)))return false;auto* p=s.viewFormatCount?arena.array<VkFormat>(s.viewFormatCount):nullptr;for(uint32_t i=0;i<s.viewFormatCount;++i)p[i]=static_cast<VkFormat>(r.i32());s.pViewFormats=p;break;
+        }
+        case VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO:
+            static_cast<VkImageViewUsageCreateInfo*>(storage)->usage=r.u32();break;
+        case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES:
+            static_cast<VkSamplerYcbcrConversionImageFormatProperties*>(storage)->combinedImageSamplerDescriptorCount=r.u32();break;
+        case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO: {
+            const uint64_t id=r.handle();
+            static_cast<VkSamplerYcbcrConversionInfo*>(storage)->conversion=
+                id ? hr.sampler_ycbcr_conversion(id) : VK_NULL_HANDLE;
+            break;
+        }
+        case VK_STRUCTURE_TYPE_IMAGE_PLANE_MEMORY_REQUIREMENTS_INFO:
+            static_cast<VkImagePlaneMemoryRequirementsInfo*>(storage)->planeAspect=static_cast<VkImageAspectFlagBits>(r.u32());break;
+        case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
+            auto& s=*static_cast<VkMemoryDedicatedRequirements*>(storage);
+            s.prefersDedicatedAllocation=r.u32();s.requiresDedicatedAllocation=r.u32();break;
+        }
+        case VK_STRUCTURE_TYPE_BIND_IMAGE_PLANE_MEMORY_INFO:
+            static_cast<VkBindImagePlaneMemoryInfo*>(storage)->planeAspect=static_cast<VkImageAspectFlagBits>(r.u32());break;
+        case VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENTS_CREATE_INFO: {
+            if(depth>=kMaxPNextDepth)return false;auto& s=*static_cast<VkFramebufferAttachmentsCreateInfo*>(storage);s.attachmentImageInfoCount=r.u32();if(!r.ok()||!valid_count(s.attachmentImageInfoCount,sizeof(VkFramebufferAttachmentImageInfo)))return false;
+            auto* p=s.attachmentImageInfoCount?arena.array<VkFramebufferAttachmentImageInfo>(s.attachmentImageInfoCount):nullptr;
+            for(uint32_t i=0;i<s.attachmentImageInfoCount;++i){auto& a=p[i];a={};a.sType=VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENT_IMAGE_INFO;a.flags=r.u32();a.usage=r.u32();a.width=r.u32();a.height=r.u32();a.layerCount=r.u32();a.viewFormatCount=r.u32();if(!r.ok()||!valid_count(a.viewFormatCount,sizeof(VkFormat)))return false;auto* f=a.viewFormatCount?arena.array<VkFormat>(a.viewFormatCount):nullptr;for(uint32_t j=0;j<a.viewFormatCount;++j)f[j]=static_cast<VkFormat>(r.i32());a.pViewFormats=f;}s.pAttachmentImageInfos=p;break;
+        }
+
+        case VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO:{auto&x=*static_cast<VkSemaphoreTypeCreateInfo*>(storage);x.semaphoreType=static_cast<VkSemaphoreType>(r.i32());x.initialValue=r.u64();break;}
+        case VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO:{auto&x=*static_cast<VkTimelineSemaphoreSubmitInfo*>(storage);x.waitSemaphoreValueCount=r.u32();if(!r.ok()||!valid_count(x.waitSemaphoreValueCount,sizeof(uint64_t)))return false;auto*w=x.waitSemaphoreValueCount?arena.array<uint64_t>(x.waitSemaphoreValueCount):nullptr;for(uint32_t i=0;i<x.waitSemaphoreValueCount;++i)w[i]=r.u64();x.pWaitSemaphoreValues=w;x.signalSemaphoreValueCount=r.u32();if(!r.ok()||!valid_count(x.signalSemaphoreValueCount,sizeof(uint64_t)))return false;auto*v=x.signalSemaphoreValueCount?arena.array<uint64_t>(x.signalSemaphoreValueCount):nullptr;for(uint32_t i=0;i<x.signalSemaphoreValueCount;++i)v[i]=r.u64();x.pSignalSemaphoreValues=v;break;}
+        case VK_STRUCTURE_TYPE_BUFFER_OPAQUE_CAPTURE_ADDRESS_CREATE_INFO:static_cast<VkBufferOpaqueCaptureAddressCreateInfo*>(storage)->opaqueCaptureAddress=r.u64();break;
+        case VK_STRUCTURE_TYPE_MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO:static_cast<VkMemoryOpaqueCaptureAddressAllocateInfo*>(storage)->opaqueCaptureAddress=r.u64();break;
+        case VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO: {
+            auto& s=*static_cast<VkRenderPassAttachmentBeginInfo*>(storage);s.attachmentCount=r.u32();if(!r.ok()||!valid_count(s.attachmentCount,sizeof(VkImageView)))return false;VkImageView* p=nullptr;if(!read_handle_array(r,arena,s.attachmentCount,[&](uint64_t id){return hr.image_view(id);},&p))return false;s.pAttachments=p;break;
+        }
+        default:return false;
+    }
+    return r.ok();
+}
+
+}  // namespace
+
+bool write_pnext_chain(Writer& w, PNextContext context, const void* head, uint32_t depth) {
+    if (depth > kMaxPNextDepth) return false;
+    std::vector<const VkBaseInStructure*> nodes;
+    if (!collect_chain(context, head, &nodes)) return false;
+
+    // Encode transactionally. A rejected nested count or node must not leave a
+    // syntactically valid prefix in the caller's request.
+    Writer encoded;
+    encoded.u32(static_cast<uint32_t>(nodes.size()));
+    for (const auto* node : nodes) {
+        encoded.i32(static_cast<int32_t>(node->sType));
+        if (!write_node_fields(encoded, context, node, depth)) return false;
+    }
+    w.append(encoded);
+    return true;
+}
+
+bool read_pnext_chain(Reader& r, Arena& arena, const HandleResolver& hr,
+                      PNextContext context, const void** out_head, uint32_t depth) {
+    if (!out_head || depth > kMaxPNextDepth) return false;
+    *out_head = nullptr;
+    const uint32_t count = r.u32();
+    if (!r.ok() || count > kMaxPNextNodes) return false;
+    VkBaseOutStructure* first = nullptr;
+    VkBaseOutStructure* previous = nullptr;
+    VkStructureType seen[kMaxPNextNodes]{};
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto type = static_cast<VkStructureType>(r.i32());
+        if (!r.ok() || !pnext_allowed(context, type)) return false;
+        for (uint32_t j = 0; j < i; ++j) if (seen[j] == type) return false;
+        seen[i] = type;
+        const size_t size = pnext_node_size(type);
+        if (!size) return false;
+        void* storage = arena.allocate(size);
+        if (!storage) return false;
+        std::memset(storage, 0, size);
+        auto* node = static_cast<VkBaseOutStructure*>(storage);
+        node->sType = type;
+        if (!read_node_fields(r, arena, hr, type, storage, depth)) return false;
+        if (previous) previous->pNext = node; else first = node;
+        previous = node;
+    }
+    *out_head = first;
+    return r.ok();
+}
+
+bool write_pnext_output_topology(Writer& w, PNextContext context, const void* head) {
+    std::vector<const VkBaseInStructure*> nodes;
+    if (!collect_chain(context, head, &nodes)) return false;
+    w.u32(static_cast<uint32_t>(nodes.size()));
+    for (const auto* node : nodes) w.i32(static_cast<int32_t>(node->sType));
+    return true;
+}
+
+bool read_pnext_output_topology(Reader& r, Arena& arena, PNextContext context, void** out_head) {
+    if (!out_head) return false;
+    *out_head = nullptr;
+    const uint32_t count = r.u32();
+    if (!r.ok() || count > kMaxPNextNodes) return false;
+    VkBaseOutStructure* first = nullptr;
+    VkBaseOutStructure* previous = nullptr;
+    VkStructureType seen[kMaxPNextNodes]{};
+    for (uint32_t i=0;i<count;++i) {
+        auto type=static_cast<VkStructureType>(r.i32());
+        if(!r.ok()||!pnext_allowed(context,type))return false;
+        for(uint32_t j=0;j<i;++j)if(seen[j]==type)return false;seen[i]=type;
+        size_t size=pnext_node_size(type);if(!size)return false;void* storage=arena.allocate(size);if(!storage)return false;std::memset(storage,0,size);
+        auto* node=static_cast<VkBaseOutStructure*>(storage);node->sType=type;if(previous)previous->pNext=node;else first=node;previous=node;
+    }
+    *out_head=first;return r.ok();
+}
+
+bool write_pnext_output_values(Writer& w, PNextContext context, const void* head) {
+    return write_pnext_chain(w, context, head);
+}
+
+bool apply_pnext_output_values(Reader& r, PNextContext context, void* caller_head) {
+    std::vector<const VkBaseInStructure*> caller_nodes;
+    if (!collect_chain(context, caller_head, &caller_nodes)) return false;
+    const uint32_t count=r.u32();if(!r.ok()||count!=caller_nodes.size()||count>kMaxPNextNodes)return false;
+    // Decode into temporary fixed-size storage, then copy only semantic fields;
+    // caller sType/pNext links are never modified.
+    struct NullResolver final : HandleResolver {
+#define NULL_HANDLE(name, type) type name(uint64_t) const override { return static_cast<type>(0); }
+        NULL_HANDLE(buffer,VkBuffer) NULL_HANDLE(image,VkImage) NULL_HANDLE(image_view,VkImageView)
+        NULL_HANDLE(buffer_view,VkBufferView) NULL_HANDLE(memory,VkDeviceMemory) NULL_HANDLE(render_pass,VkRenderPass) NULL_HANDLE(framebuffer,VkFramebuffer)
+        NULL_HANDLE(shader_module,VkShaderModule) NULL_HANDLE(pipeline,VkPipeline) NULL_HANDLE(pipeline_layout,VkPipelineLayout)
+        NULL_HANDLE(pipeline_cache,VkPipelineCache) NULL_HANDLE(descriptor_set_layout,VkDescriptorSetLayout)
+        NULL_HANDLE(descriptor_pool,VkDescriptorPool) NULL_HANDLE(descriptor_set,VkDescriptorSet) NULL_HANDLE(sampler,VkSampler)
+        NULL_HANDLE(sampler_ycbcr_conversion,VkSamplerYcbcrConversion)
+        NULL_HANDLE(semaphore,VkSemaphore) NULL_HANDLE(fence,VkFence) NULL_HANDLE(event,VkEvent) NULL_HANDLE(query_pool,VkQueryPool) NULL_HANDLE(surface,VkSurfaceKHR)
+        NULL_HANDLE(swapchain,VkSwapchainKHR) NULL_HANDLE(command_pool,VkCommandPool) NULL_HANDLE(command_buffer,VkCommandBuffer)
+#undef NULL_HANDLE
+    } null_resolver;
+    Arena arena;
+    for(uint32_t i=0;i<count;++i){auto type=static_cast<VkStructureType>(r.i32());if(!r.ok()||type!=caller_nodes[i]->sType)return false;size_t size=pnext_node_size(type);void* temp=arena.allocate(size);if(!temp)return false;std::memset(temp,0,size);static_cast<VkBaseOutStructure*>(temp)->sType=type;if(!read_node_fields(r,arena,null_resolver,type,temp,0))return false;
+        void* next=const_cast<void*>(reinterpret_cast<const void*>(caller_nodes[i]->pNext));
+        switch(type){
+#define COPY_OUTPUT(T) do { auto* dst=reinterpret_cast<T*>(const_cast<VkBaseInStructure*>(caller_nodes[i])); auto* src=static_cast<T*>(temp); void* saved=const_cast<void*>(dst->pNext); *dst=*src; dst->pNext=saved; } while(0)
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR:COPY_OUTPUT(VkPhysicalDeviceFragmentShadingRateFeaturesKHR);break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES:COPY_OUTPUT(VkPhysicalDeviceVulkan11Features);break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES:COPY_OUTPUT(VkPhysicalDeviceVulkan12Features);break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES:COPY_OUTPUT(VkPhysicalDeviceHostQueryResetFeatures);break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES:COPY_OUTPUT(VkPhysicalDeviceTimelineSemaphoreFeatures);break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES:COPY_OUTPUT(VkPhysicalDeviceBufferDeviceAddressFeatures);break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES:COPY_OUTPUT(VkPhysicalDeviceDescriptorIndexingFeatures);break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SEPARATE_DEPTH_STENCIL_LAYOUTS_FEATURES:COPY_OUTPUT(VkPhysicalDeviceSeparateDepthStencilLayoutsFeatures);break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES:COPY_OUTPUT(VkPhysicalDeviceVulkan11Properties);break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES:COPY_OUTPUT(VkPhysicalDeviceVulkan12Properties);break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_PROPERTIES:COPY_OUTPUT(VkPhysicalDeviceTimelineSemaphoreProperties);break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES:COPY_OUTPUT(VkPhysicalDeviceDepthStencilResolveProperties);break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES:COPY_OUTPUT(VkPhysicalDeviceDescriptorIndexingProperties);break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_FEATURES:COPY_OUTPUT(VkPhysicalDeviceProtectedMemoryFeatures);break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES:COPY_OUTPUT(VkPhysicalDeviceSamplerYcbcrConversionFeatures);break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES:COPY_OUTPUT(VkPhysicalDeviceSubgroupProperties);break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES:COPY_OUTPUT(VkPhysicalDeviceIDProperties);break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_PROPERTIES:COPY_OUTPUT(VkPhysicalDeviceProtectedMemoryProperties);break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES:COPY_OUTPUT(VkPhysicalDeviceMaintenance3Properties);break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_PROPERTIES_KHR:COPY_OUTPUT(VkPhysicalDeviceFragmentShadingRatePropertiesKHR);break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGELESS_FRAMEBUFFER_FEATURES:COPY_OUTPUT(VkPhysicalDeviceImagelessFramebufferFeatures);break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES:COPY_OUTPUT(VkPhysicalDeviceMultiviewFeatures);break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_PROPERTIES:COPY_OUTPUT(VkPhysicalDeviceMultiviewProperties);break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_POINT_CLIPPING_PROPERTIES:COPY_OUTPUT(VkPhysicalDevicePointClippingProperties);break;
+            case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS:COPY_OUTPUT(VkMemoryDedicatedRequirements);break;
+            case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES:COPY_OUTPUT(VkSamplerYcbcrConversionImageFormatProperties);break;
+            default:(void)next;return false;
+#undef COPY_OUTPUT
+        }
+    }
+    return r.ok();
+}
+
 // ---------------------------------------------------------------------------
 // Group A
 // ---------------------------------------------------------------------------
@@ -263,26 +902,31 @@ bool read_DeviceQueueCreateInfo(Reader& r, Arena& arena, const HandleResolver&,
     return read_pod_array(r, arena, out->queueCount, const_cast<float**>(&out->pQueuePriorities));
 }
 
-void write_DeviceCreateInfo(Writer& w, const VkDeviceCreateInfo& s) {
+bool write_DeviceCreateInfo(Writer& w, const VkDeviceCreateInfo& s) {
+    Writer encoded;
     VkDeviceCreateInfo tmp = s;
-    // Phase-0 supports only the base Vulkan 1.0 feature struct. Callers reject
-    // any pNext chain before invoking this marshaller.
+    // Device feature nodes are encoded separately through the bounded
+    // DeviceCreate pNext allowlist; never serialize caller pointers.
     tmp.pNext = nullptr;
     tmp.pQueueCreateInfos = nullptr;
     tmp.ppEnabledLayerNames = nullptr;
     tmp.ppEnabledExtensionNames = nullptr;
     tmp.pEnabledFeatures = nullptr;
-    w.bytes(&tmp, sizeof(tmp));
+    encoded.bytes(&tmp, sizeof(tmp));
+    if (!write_pnext_chain(encoded, PNextContext::DeviceCreate, s.pNext)) return false;
     for (uint32_t i = 0; i < s.queueCreateInfoCount; ++i)
-        write_DeviceQueueCreateInfo(w, s.pQueueCreateInfos[i]);
-    write_string_array(w, s.ppEnabledLayerNames, s.enabledLayerCount);
-    write_string_array(w, s.ppEnabledExtensionNames, s.enabledExtensionCount);
-    write_opt_pod(w, s.pEnabledFeatures);
+        write_DeviceQueueCreateInfo(encoded, s.pQueueCreateInfos[i]);
+    write_string_array(encoded, s.ppEnabledLayerNames, s.enabledLayerCount);
+    write_string_array(encoded, s.ppEnabledExtensionNames, s.enabledExtensionCount);
+    write_opt_pod(encoded, s.pEnabledFeatures);
+    w.append(encoded);
+    return true;
 }
 
 bool read_DeviceCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                             VkDeviceCreateInfo* out) {
     if (!read_raw(r, out)) return false;
+    if (!read_pnext_chain(r, arena, hr, PNextContext::DeviceCreate, &out->pNext)) return false;
     if (out->queueCreateInfoCount > kMaxArrayElements) return false;
     VkDeviceQueueCreateInfo* queues =
         out->queueCreateInfoCount ? arena.array<VkDeviceQueueCreateInfo>(out->queueCreateInfoCount)
@@ -319,34 +963,31 @@ bool read_SwapchainCreateInfoKHR(Reader& r, Arena& arena, const HandleResolver& 
     return true;
 }
 
-void write_ImageViewCreateInfo(Writer& w, const VkImageViewCreateInfo& s) {
-    VkImageViewCreateInfo tmp = s;
-    tmp.pNext = nullptr;
-    w.bytes(&tmp, sizeof(tmp));
+bool write_ImageViewCreateInfo(Writer& w, const VkImageViewCreateInfo& s) {
+    Writer e; VkImageViewCreateInfo tmp=s; tmp.pNext=nullptr; e.bytes(&tmp,sizeof(tmp));
+    if(!write_pnext_chain(e,PNextContext::ImageViewCreate,s.pNext))return false;w.append(e);return true;
 }
 
-bool read_ImageViewCreateInfo(Reader& r, Arena&, const HandleResolver& hr,
+bool read_ImageViewCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                                VkImageViewCreateInfo* out) {
-    if (!read_raw(r, out)) return false;
+    if (!read_raw(r, out) || !read_pnext_chain(r,arena,hr,PNextContext::ImageViewCreate,&out->pNext)) return false;
     patch_handle(&out->image, [&](uint64_t id) { return hr.image(id); });
     return true;
 }
 
-void write_RenderPassCreateInfo(Writer& w, const VkRenderPassCreateInfo& s) {
-    VkRenderPassCreateInfo tmp = s;
-    tmp.pNext = nullptr;
-    tmp.pAttachments = nullptr;
-    tmp.pSubpasses = nullptr;
-    tmp.pDependencies = nullptr;
-    w.bytes(&tmp, sizeof(tmp));
-    write_pod_array(w, s.pAttachments, s.attachmentCount);
-    for (uint32_t i = 0; i < s.subpassCount; ++i) write_SubpassDescription(w, s.pSubpasses[i]);
-    write_pod_array(w, s.pDependencies, s.dependencyCount);
+bool write_RenderPassCreateInfo(Writer& w, const VkRenderPassCreateInfo& s) {
+    Writer e; VkRenderPassCreateInfo tmp = s;
+    tmp.pNext = nullptr; tmp.pAttachments = nullptr; tmp.pSubpasses = nullptr; tmp.pDependencies = nullptr;
+    e.bytes(&tmp, sizeof(tmp));
+    if(!write_pnext_chain(e,PNextContext::RenderPass,s.pNext))return false;
+    write_pod_array(e, s.pAttachments, s.attachmentCount);
+    for (uint32_t i = 0; i < s.subpassCount; ++i) write_SubpassDescription(e, s.pSubpasses[i]);
+    write_pod_array(e, s.pDependencies, s.dependencyCount);w.append(e);return true;
 }
 
-bool read_RenderPassCreateInfo(Reader& r, Arena& arena, const HandleResolver&,
+bool read_RenderPassCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                                 VkRenderPassCreateInfo* out) {
-    if (!read_raw(r, out)) return false;
+    if (!read_raw(r, out) || !read_pnext_chain(r,arena,hr,PNextContext::RenderPass,&out->pNext)) return false;
     if (!read_pod_array(r, arena, out->attachmentCount,
                          const_cast<VkAttachmentDescription**>(&out->pAttachments)))
         return false;
@@ -362,20 +1003,136 @@ bool read_RenderPassCreateInfo(Reader& r, Arena& arena, const HandleResolver&,
                            const_cast<VkSubpassDependency**>(&out->pDependencies));
 }
 
-void write_ShaderModuleCreateInfo(Writer& w, const VkShaderModuleCreateInfo& s) {
-    VkShaderModuleCreateInfo tmp = s;
-    tmp.pNext = nullptr;
-    tmp.pCode = nullptr;
-    w.bytes(&tmp, sizeof(tmp));
-    w.bytes(s.pCode, s.codeSize);
+namespace {
+
+bool write_attachment_reference2_full(Writer& w, const VkAttachmentReference2& s) {
+    if (s.sType != VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2 || s.pNext) return false;
+    write_attachment_reference2(w, s);
+    return true;
 }
 
-bool read_ShaderModuleCreateInfo(Reader& r, Arena& arena, const HandleResolver&,
-                                  VkShaderModuleCreateInfo* out) {
-    if (!read_raw(r, out)) return false;
-    void* code = nullptr;
-    if (!read_bytes_to_arena(r, arena, out->codeSize, &code)) return false;
-    out->pCode = static_cast<uint32_t*>(code);
+bool write_subpass_description2(Writer& w, const VkSubpassDescription2& s) {
+    if (s.sType != VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2 ||
+        s.inputAttachmentCount > kMaxArrayElements ||
+        s.colorAttachmentCount > kMaxArrayElements ||
+        s.preserveAttachmentCount > kMaxArrayElements ||
+        (s.inputAttachmentCount && !s.pInputAttachments) ||
+        (s.colorAttachmentCount && !s.pColorAttachments) ||
+        (s.preserveAttachmentCount && !s.pPreserveAttachments)) return false;
+    Writer encoded;
+    encoded.i32(static_cast<int32_t>(s.sType)); encoded.u32(s.flags);
+    encoded.i32(static_cast<int32_t>(s.pipelineBindPoint)); encoded.u32(s.viewMask);
+    if (!write_pnext_chain(encoded, PNextContext::RenderPass2, s.pNext)) return false;
+    encoded.u32(s.inputAttachmentCount);
+    for (uint32_t i=0;i<s.inputAttachmentCount;++i)
+        if (!write_attachment_reference2_full(encoded,s.pInputAttachments[i])) return false;
+    encoded.u32(s.colorAttachmentCount);
+    for (uint32_t i=0;i<s.colorAttachmentCount;++i)
+        if (!write_attachment_reference2_full(encoded,s.pColorAttachments[i])) return false;
+    encoded.u32(s.pResolveAttachments ? 1u : 0u);
+    if (s.pResolveAttachments)
+        for (uint32_t i=0;i<s.colorAttachmentCount;++i)
+            if (!write_attachment_reference2_full(encoded,s.pResolveAttachments[i])) return false;
+    encoded.u32(s.pDepthStencilAttachment ? 1u : 0u);
+    if (s.pDepthStencilAttachment &&
+        !write_attachment_reference2_full(encoded,*s.pDepthStencilAttachment)) return false;
+    encoded.u32(s.preserveAttachmentCount);
+    for(uint32_t i=0;i<s.preserveAttachmentCount;++i) encoded.u32(s.pPreserveAttachments[i]);
+    w.append(encoded); return true;
+}
+
+bool read_subpass_description2(Reader& r, Arena& arena, const HandleResolver& hr,
+                               VkSubpassDescription2* s) {
+    *s={}; s->sType=static_cast<VkStructureType>(r.i32()); s->flags=r.u32();
+    s->pipelineBindPoint=static_cast<VkPipelineBindPoint>(r.i32()); s->viewMask=r.u32();
+    if(!r.ok()||s->sType!=VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2||
+       !read_pnext_chain(r,arena,hr,PNextContext::RenderPass2,&s->pNext)) return false;
+    s->inputAttachmentCount=r.u32();
+    if(!r.ok()||s->inputAttachmentCount>kMaxArrayElements||s->inputAttachmentCount>r.remaining()/16)return false;
+    auto* in=s->inputAttachmentCount?arena.array<VkAttachmentReference2>(s->inputAttachmentCount):nullptr;
+    for(uint32_t i=0;i<s->inputAttachmentCount;++i)if(!read_attachment_reference2(r,&in[i]))return false;s->pInputAttachments=in;
+    s->colorAttachmentCount=r.u32();
+    if(!r.ok()||s->colorAttachmentCount>kMaxArrayElements||s->colorAttachmentCount>r.remaining()/16)return false;
+    auto* color=s->colorAttachmentCount?arena.array<VkAttachmentReference2>(s->colorAttachmentCount):nullptr;
+    for(uint32_t i=0;i<s->colorAttachmentCount;++i)if(!read_attachment_reference2(r,&color[i]))return false;s->pColorAttachments=color;
+    uint32_t present=r.u32();if(!r.ok()||present>1)return false;
+    if(present){auto* resolve=s->colorAttachmentCount?arena.array<VkAttachmentReference2>(s->colorAttachmentCount):nullptr;for(uint32_t i=0;i<s->colorAttachmentCount;++i)if(!read_attachment_reference2(r,&resolve[i]))return false;s->pResolveAttachments=resolve;}
+    present=r.u32();if(!r.ok()||present>1)return false;
+    if(present){auto* depth=arena.array<VkAttachmentReference2>(1);if(!read_attachment_reference2(r,depth))return false;s->pDepthStencilAttachment=depth;}
+    s->preserveAttachmentCount=r.u32();if(!r.ok()||s->preserveAttachmentCount>kMaxArrayElements||s->preserveAttachmentCount>r.remaining()/4)return false;
+    auto* preserve=s->preserveAttachmentCount?arena.array<uint32_t>(s->preserveAttachmentCount):nullptr;for(uint32_t i=0;i<s->preserveAttachmentCount;++i)preserve[i]=r.u32();s->pPreserveAttachments=preserve;
+    return r.ok();
+}
+
+} // namespace
+
+bool write_RenderPassCreateInfo2(Writer& w, const VkRenderPassCreateInfo2& s) {
+    if(s.sType!=VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2||s.attachmentCount>kMaxArrayElements||
+       s.subpassCount>kMaxArrayElements||s.dependencyCount>kMaxArrayElements||
+       s.correlatedViewMaskCount>kMaxArrayElements||(s.attachmentCount&&!s.pAttachments)||
+       (s.subpassCount&&!s.pSubpasses)||(s.dependencyCount&&!s.pDependencies)||
+       (s.correlatedViewMaskCount&&!s.pCorrelatedViewMasks))return false;
+    Writer e;e.i32(static_cast<int32_t>(s.sType));e.u32(s.flags);
+    if(!write_pnext_chain(e,PNextContext::RenderPass,s.pNext))return false;
+    e.u32(s.attachmentCount);
+    for(uint32_t i=0;i<s.attachmentCount;++i){const auto&a=s.pAttachments[i];if(a.sType!=VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2||a.pNext)return false;e.i32(static_cast<int32_t>(a.sType));e.u32(a.flags);e.i32(a.format);e.i32(a.samples);e.i32(a.loadOp);e.i32(a.storeOp);e.i32(a.stencilLoadOp);e.i32(a.stencilStoreOp);e.i32(a.initialLayout);e.i32(a.finalLayout);}
+    e.u32(s.subpassCount);for(uint32_t i=0;i<s.subpassCount;++i)if(!write_subpass_description2(e,s.pSubpasses[i]))return false;
+    e.u32(s.dependencyCount);
+    for(uint32_t i=0;i<s.dependencyCount;++i){const auto&d=s.pDependencies[i];if(d.sType!=VK_STRUCTURE_TYPE_SUBPASS_DEPENDENCY_2||d.pNext)return false;e.i32(d.sType);e.u32(d.srcSubpass);e.u32(d.dstSubpass);e.u32(d.srcStageMask);e.u32(d.dstStageMask);e.u32(d.srcAccessMask);e.u32(d.dstAccessMask);e.u32(d.dependencyFlags);e.i32(d.viewOffset);}
+    e.u32(s.correlatedViewMaskCount);for(uint32_t i=0;i<s.correlatedViewMaskCount;++i)e.u32(s.pCorrelatedViewMasks[i]);w.append(e);return true;
+}
+
+bool read_RenderPassCreateInfo2(Reader& r, Arena& arena, const HandleResolver& hr,
+                                 VkRenderPassCreateInfo2* s) {
+    *s={};s->sType=static_cast<VkStructureType>(r.i32());s->flags=r.u32();if(!r.ok()||s->sType!=VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2||!read_pnext_chain(r,arena,hr,PNextContext::RenderPass,&s->pNext))return false;
+    s->attachmentCount=r.u32();if(!r.ok()||s->attachmentCount>kMaxArrayElements||s->attachmentCount>r.remaining()/40)return false;auto*a=s->attachmentCount?arena.array<VkAttachmentDescription2>(s->attachmentCount):nullptr;
+    for(uint32_t i=0;i<s->attachmentCount;++i){a[i]={};a[i].sType=static_cast<VkStructureType>(r.i32());a[i].flags=r.u32();a[i].format=static_cast<VkFormat>(r.i32());a[i].samples=static_cast<VkSampleCountFlagBits>(r.i32());a[i].loadOp=static_cast<VkAttachmentLoadOp>(r.i32());a[i].storeOp=static_cast<VkAttachmentStoreOp>(r.i32());a[i].stencilLoadOp=static_cast<VkAttachmentLoadOp>(r.i32());a[i].stencilStoreOp=static_cast<VkAttachmentStoreOp>(r.i32());a[i].initialLayout=static_cast<VkImageLayout>(r.i32());a[i].finalLayout=static_cast<VkImageLayout>(r.i32());if(!r.ok()||a[i].sType!=VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2)return false;}s->pAttachments=a;
+    s->subpassCount=r.u32();if(!r.ok()||s->subpassCount>kMaxArrayElements)return false;auto*sp=s->subpassCount?arena.array<VkSubpassDescription2>(s->subpassCount):nullptr;for(uint32_t i=0;i<s->subpassCount;++i)if(!read_subpass_description2(r,arena,hr,&sp[i]))return false;s->pSubpasses=sp;
+    s->dependencyCount=r.u32();if(!r.ok()||s->dependencyCount>kMaxArrayElements||s->dependencyCount>r.remaining()/36)return false;auto*d=s->dependencyCount?arena.array<VkSubpassDependency2>(s->dependencyCount):nullptr;
+    for(uint32_t i=0;i<s->dependencyCount;++i){d[i]={};d[i].sType=static_cast<VkStructureType>(r.i32());d[i].srcSubpass=r.u32();d[i].dstSubpass=r.u32();d[i].srcStageMask=r.u32();d[i].dstStageMask=r.u32();d[i].srcAccessMask=r.u32();d[i].dstAccessMask=r.u32();d[i].dependencyFlags=r.u32();d[i].viewOffset=r.i32();if(!r.ok()||d[i].sType!=VK_STRUCTURE_TYPE_SUBPASS_DEPENDENCY_2)return false;}s->pDependencies=d;
+    s->correlatedViewMaskCount=r.u32();if(!r.ok()||s->correlatedViewMaskCount>kMaxArrayElements||s->correlatedViewMaskCount>r.remaining()/4)return false;auto*m=s->correlatedViewMaskCount?arena.array<uint32_t>(s->correlatedViewMaskCount):nullptr;for(uint32_t i=0;i<s->correlatedViewMaskCount;++i)m[i]=r.u32();s->pCorrelatedViewMasks=m;return r.ok();
+}
+
+bool write_ShaderModuleCreateInfo(Writer& w, const VkShaderModuleCreateInfo& s) {
+    if (s.sType != VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO || s.codeSize == 0 ||
+        (s.codeSize % sizeof(uint32_t)) != 0 || s.codeSize > kMaxShaderCodeBytes ||
+        s.pCode == nullptr ||
+        (reinterpret_cast<uintptr_t>(s.pCode) % alignof(uint32_t)) != 0) {
+        return false;
+    }
+
+    Writer encoded;
+    encoded.i32(static_cast<int32_t>(s.sType));
+    encoded.u32(s.flags);
+    if (!write_pnext_chain(encoded, PNextContext::ShaderModule, s.pNext)) return false;
+    encoded.u64(static_cast<uint64_t>(s.codeSize));
+    for (size_t i = 0; i < s.codeSize / sizeof(uint32_t); ++i) encoded.u32(s.pCode[i]);
+    w.append(encoded);
+    return true;
+}
+
+bool read_ShaderModuleCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
+                                 VkShaderModuleCreateInfo* out) {
+    *out = {};
+    out->sType = static_cast<VkStructureType>(r.i32());
+    out->flags = r.u32();
+    if (!r.ok() || out->sType != VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO ||
+        !read_pnext_chain(r, arena, hr, PNextContext::ShaderModule, &out->pNext)) {
+        return false;
+    }
+
+    const uint64_t code_size = r.u64();
+    if (!r.ok() || code_size == 0 || (code_size % sizeof(uint32_t)) != 0 ||
+        code_size > kMaxShaderCodeBytes || code_size != r.remaining()) {
+        return false;
+    }
+
+    const size_t word_count = static_cast<size_t>(code_size / sizeof(uint32_t));
+    auto* code = arena.array<uint32_t>(word_count);
+    for (size_t i = 0; i < word_count; ++i) code[i] = r.u32();
+    if (!r.ok() || r.remaining() != 0) return false;
+    out->codeSize = static_cast<size_t>(code_size);
+    out->pCode = code;
     return true;
 }
 
@@ -401,7 +1158,8 @@ bool read_PipelineLayoutCreateInfo(Reader& r, Arena& arena, const HandleResolver
                            const_cast<VkPushConstantRange**>(&out->pPushConstantRanges));
 }
 
-void write_GraphicsPipelineCreateInfo(Writer& w, const VkGraphicsPipelineCreateInfo& s) {
+bool write_GraphicsPipelineCreateInfo(Writer& w, const VkGraphicsPipelineCreateInfo& s) {
+    Writer encoded;
     VkGraphicsPipelineCreateInfo tmp = s;
     tmp.pNext = nullptr;
     tmp.pStages = nullptr;
@@ -414,72 +1172,79 @@ void write_GraphicsPipelineCreateInfo(Writer& w, const VkGraphicsPipelineCreateI
     tmp.pDepthStencilState = nullptr;
     tmp.pColorBlendState = nullptr;
     tmp.pDynamicState = nullptr;
-    w.bytes(&tmp, sizeof(tmp));
+    encoded.bytes(&tmp, sizeof(tmp));
 
     for (uint32_t i = 0; i < s.stageCount; ++i)
-        write_PipelineShaderStageCreateInfo(w, s.pStages[i]);
+        write_PipelineShaderStageCreateInfo(encoded, s.pStages[i]);
 
-    w.u32(s.pVertexInputState ? 1 : 0);
+    encoded.u32(s.pVertexInputState ? 1 : 0);
     if (s.pVertexInputState) {
         const auto& vi = *s.pVertexInputState;
         VkPipelineVertexInputStateCreateInfo t = vi;
         t.pNext = nullptr;
         t.pVertexBindingDescriptions = nullptr;
         t.pVertexAttributeDescriptions = nullptr;
-        w.bytes(&t, sizeof(t));
-        write_pod_array(w, vi.pVertexBindingDescriptions, vi.vertexBindingDescriptionCount);
-        write_pod_array(w, vi.pVertexAttributeDescriptions, vi.vertexAttributeDescriptionCount);
+        encoded.bytes(&t, sizeof(t));
+        write_pod_array(encoded, vi.pVertexBindingDescriptions, vi.vertexBindingDescriptionCount);
+        write_pod_array(encoded, vi.pVertexAttributeDescriptions, vi.vertexAttributeDescriptionCount);
     }
 
-    write_opt_pod(w, s.pInputAssemblyState);
-    write_opt_pod(w, s.pTessellationState);
+    write_opt_pod(encoded, s.pInputAssemblyState);
+    write_opt_pod(encoded, s.pTessellationState);
 
-    w.u32(s.pViewportState ? 1 : 0);
+    encoded.u32(s.pViewportState ? 1 : 0);
     if (s.pViewportState) {
         const auto& vp = *s.pViewportState;
         VkPipelineViewportStateCreateInfo t = vp;
         t.pNext = nullptr;
         t.pViewports = nullptr;
         t.pScissors = nullptr;
-        w.bytes(&t, sizeof(t));
-        write_opt_pod_array(w, vp.pViewports, vp.viewportCount);
-        write_opt_pod_array(w, vp.pScissors, vp.scissorCount);
+        encoded.bytes(&t, sizeof(t));
+        write_opt_pod_array(encoded, vp.pViewports, vp.viewportCount);
+        write_opt_pod_array(encoded, vp.pScissors, vp.scissorCount);
     }
 
-    write_opt_pod(w, s.pRasterizationState);
+    write_opt_pod(encoded, s.pRasterizationState);
 
-    w.u32(s.pMultisampleState ? 1 : 0);
+    encoded.u32(s.pMultisampleState ? 1 : 0);
     if (s.pMultisampleState) {
         const auto& ms = *s.pMultisampleState;
         VkPipelineMultisampleStateCreateInfo t = ms;
         t.pNext = nullptr;
         t.pSampleMask = nullptr;
-        w.bytes(&t, sizeof(t));
+        encoded.bytes(&t, sizeof(t));
         const uint32_t mask_words = (static_cast<uint32_t>(ms.rasterizationSamples) + 31) / 32;
-        write_opt_pod_array(w, ms.pSampleMask, mask_words);
+        write_opt_pod_array(encoded, ms.pSampleMask, mask_words);
     }
 
-    write_opt_pod(w, s.pDepthStencilState);
+    write_opt_pod(encoded, s.pDepthStencilState);
 
-    w.u32(s.pColorBlendState ? 1 : 0);
+    encoded.u32(s.pColorBlendState ? 1 : 0);
     if (s.pColorBlendState) {
         const auto& cb = *s.pColorBlendState;
         VkPipelineColorBlendStateCreateInfo t = cb;
         t.pNext = nullptr;
         t.pAttachments = nullptr;
-        w.bytes(&t, sizeof(t));
-        write_pod_array(w, cb.pAttachments, cb.attachmentCount);
+        encoded.bytes(&t, sizeof(t));
+        write_pod_array(encoded, cb.pAttachments, cb.attachmentCount);
     }
 
-    w.u32(s.pDynamicState ? 1 : 0);
+    encoded.u32(s.pDynamicState ? 1 : 0);
     if (s.pDynamicState) {
         const auto& ds = *s.pDynamicState;
         VkPipelineDynamicStateCreateInfo t = ds;
         t.pNext = nullptr;
         t.pDynamicStates = nullptr;
-        w.bytes(&t, sizeof(t));
-        write_pod_array(w, ds.pDynamicStates, ds.dynamicStateCount);
+        encoded.bytes(&t, sizeof(t));
+        write_pod_array(encoded, ds.pDynamicStates, ds.dynamicStateCount);
     }
+    if (!write_pnext_chain(encoded, PNextContext::GraphicsPipeline, s.pNext)) return false;
+    // Tessellation state has its own maintenance2 subchain.
+    if (s.pTessellationState &&
+        !write_pnext_chain(encoded, PNextContext::TessellationState,
+                           s.pTessellationState->pNext)) return false;
+    w.append(encoded);
+    return true;
 }
 
 bool read_GraphicsPipelineCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
@@ -586,6 +1351,14 @@ bool read_GraphicsPipelineCreateInfo(Reader& r, Arena& arena, const HandleResolv
         out->pDynamicState = nullptr;
     }
 
+    if (!read_pnext_chain(r, arena, hr, PNextContext::GraphicsPipeline, &out->pNext)) return false;
+    if (out->pTessellationState) {
+        const void* tessellation_chain = nullptr;
+        if (!read_pnext_chain(r, arena, hr, PNextContext::TessellationState,
+                              &tessellation_chain)) return false;
+        const_cast<VkPipelineTessellationStateCreateInfo*>(out->pTessellationState)->pNext =
+            tessellation_chain;
+    }
     patch_handle(&out->layout, [&](uint64_t id) { return hr.pipeline_layout(id); });
     patch_handle(&out->renderPass, [&](uint64_t id) { return hr.render_pass(id); });
     patch_handle(&out->basePipelineHandle, [&](uint64_t id) { return hr.pipeline(id); });
@@ -615,23 +1388,86 @@ bool read_ComputePipelineCreateInfo(Reader& r, Arena& arena, const HandleResolve
            (!base_pipeline_id || out->basePipelineHandle != VK_NULL_HANDLE);
 }
 
-void write_FramebufferCreateInfo(Writer& w, const VkFramebufferCreateInfo& s) {
-    VkFramebufferCreateInfo tmp = s;
-    tmp.pNext = nullptr;
-    tmp.pAttachments = nullptr;
-    w.bytes(&tmp, sizeof(tmp));
-    write_handle_array(w, s.pAttachments, s.attachmentCount);
+bool write_FramebufferCreateInfo(Writer& w, const VkFramebufferCreateInfo& s) {
+    Writer e;VkFramebufferCreateInfo tmp=s;tmp.pNext=nullptr;tmp.pAttachments=nullptr;e.bytes(&tmp,sizeof(tmp));
+    if(!write_pnext_chain(e,PNextContext::FramebufferCreate,s.pNext))return false;
+    if(!(s.flags&VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT))write_handle_array(e,s.pAttachments,s.attachmentCount);
+    w.append(e);return true;
 }
 
 bool read_FramebufferCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                                  VkFramebufferCreateInfo* out) {
-    if (!read_raw(r, out)) return false;
-    if (!read_handle_array(
+    if (!read_raw(r, out) || !read_pnext_chain(r,arena,hr,PNextContext::FramebufferCreate,&out->pNext)) return false;
+    if (!(out->flags & VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT) && !read_handle_array(
             r, arena, out->attachmentCount, [&](uint64_t id) { return hr.image_view(id); },
             const_cast<VkImageView**>(&out->pAttachments)))
         return false;
+    if(out->flags&VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT)out->pAttachments=nullptr;
     patch_handle(&out->renderPass, [&](uint64_t id) { return hr.render_pass(id); });
     return true;
+}
+
+bool write_BufferViewCreateInfo(Writer& w, const VkBufferViewCreateInfo& s) {
+    Writer encoded;
+    encoded.i32(static_cast<int32_t>(s.sType));
+    encoded.u32(s.flags);
+    encoded.handle(id_of(s.buffer));
+    encoded.i32(static_cast<int32_t>(s.format));
+    encoded.u64(s.offset);
+    encoded.u64(s.range);
+    if (s.sType != VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO || s.pNext != nullptr) return false;
+    w.append(encoded);
+    return true;
+}
+
+bool read_BufferViewCreateInfo(Reader& r, Arena&, const HandleResolver& hr,
+                               VkBufferViewCreateInfo* out) {
+    *out = {};
+    out->sType = static_cast<VkStructureType>(r.i32());
+    out->flags = r.u32();
+    const uint64_t buffer_id = r.handle();
+    out->format = static_cast<VkFormat>(r.i32());
+    out->offset = r.u64();
+    out->range = r.u64();
+    out->buffer = buffer_id ? hr.buffer(buffer_id) : VK_NULL_HANDLE;
+    return r.ok() && out->sType == VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO &&
+           out->buffer != VK_NULL_HANDLE;
+}
+
+void write_QueryPoolCreateInfo(Writer& w, const VkQueryPoolCreateInfo& s) {
+    w.i32(static_cast<int32_t>(s.sType));
+    w.u32(s.flags);
+    w.i32(static_cast<int32_t>(s.queryType));
+    w.u32(s.queryCount);
+    w.u32(s.pipelineStatistics);
+    w.u32(s.pNext == nullptr ? 0 : 1);
+}
+
+bool read_QueryPoolCreateInfo(Reader& r, Arena&, const HandleResolver&,
+                              VkQueryPoolCreateInfo* out) {
+    *out = {};
+    out->sType = static_cast<VkStructureType>(r.i32());
+    out->flags = r.u32();
+    out->queryType = static_cast<VkQueryType>(r.i32());
+    out->queryCount = r.u32();
+    out->pipelineStatistics = r.u32();
+    const uint32_t has_pnext = r.u32();
+    return r.ok() && out->sType == VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO &&
+           !has_pnext && out->queryCount != 0 && out->queryCount <= kMaxArrayElements;
+}
+
+void write_EventCreateInfo(Writer& w, const VkEventCreateInfo& s) {
+    w.i32(static_cast<int32_t>(s.sType));
+    w.u32(s.flags);
+    w.u32(s.pNext == nullptr ? 0 : 1);
+}
+
+bool read_EventCreateInfo(Reader& r, Arena&, const HandleResolver&, VkEventCreateInfo* out) {
+    *out = {};
+    out->sType = static_cast<VkStructureType>(r.i32());
+    out->flags = r.u32();
+    const uint32_t has_pnext = r.u32();
+    return r.ok() && out->sType == VK_STRUCTURE_TYPE_EVENT_CREATE_INFO && !has_pnext;
 }
 
 void write_CommandBufferAllocateInfo(Writer& w, const VkCommandBufferAllocateInfo& s) {
@@ -652,43 +1488,114 @@ bool read_CommandBufferAllocateInfo(Reader& r, Arena&, const HandleResolver& hr,
 }
 
 void write_CommandBufferBeginInfo(Writer& w, const VkCommandBufferBeginInfo& s) {
-    VkCommandBufferBeginInfo tmp = s;
-    tmp.pNext = nullptr;
-    tmp.pInheritanceInfo = nullptr;
-    w.bytes(&tmp, sizeof(tmp));
-    write_opt_pod(w, s.pInheritanceInfo);
+    w.i32(static_cast<int32_t>(s.sType));
+    w.u32(s.flags);
+    w.u32(s.pNext == nullptr ? 0 : 1);
+    w.u32(s.pInheritanceInfo ? 1 : 0);
+    if (s.pInheritanceInfo) {
+        const auto& i = *s.pInheritanceInfo;
+        w.i32(static_cast<int32_t>(i.sType));
+        w.u32(i.pNext == nullptr ? 0 : 1);
+        w.handle(id_of(i.renderPass));
+        w.u32(i.subpass);
+        w.handle(id_of(i.framebuffer));
+        w.u32(i.occlusionQueryEnable);
+        w.u32(i.queryFlags);
+        w.u32(i.pipelineStatistics);
+    }
 }
 
 bool read_CommandBufferBeginInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                                   VkCommandBufferBeginInfo* out) {
-    if (!read_raw(r, out)) return false;
-    VkCommandBufferInheritanceInfo* inh = nullptr;
-    if (!read_opt_pod(r, arena, &inh)) return false;
-    if (inh) {
-        patch_handle(&inh->renderPass, [&](uint64_t id) { return hr.render_pass(id); });
-        patch_handle(&inh->framebuffer, [&](uint64_t id) { return hr.framebuffer(id); });
+    *out = {};
+    out->sType = static_cast<VkStructureType>(r.i32());
+    out->flags = r.u32();
+    const uint32_t has_pnext = r.u32();
+    const uint32_t has_inheritance = r.u32();
+    if (!r.ok() || out->sType != VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO || has_pnext > 0 ||
+        has_inheritance > 1) return false;
+    if (has_inheritance) {
+        auto* i = arena.array<VkCommandBufferInheritanceInfo>(1);
+        *i = {};
+        i->sType = static_cast<VkStructureType>(r.i32());
+        const uint32_t inheritance_pnext = r.u32();
+        const uint64_t render_pass = r.handle();
+        i->subpass = r.u32();
+        const uint64_t framebuffer = r.handle();
+        i->occlusionQueryEnable = r.u32();
+        i->queryFlags = r.u32();
+        i->pipelineStatistics = r.u32();
+        if (!r.ok() || i->sType != VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO ||
+            inheritance_pnext != 0) return false;
+        i->renderPass = render_pass ? hr.render_pass(render_pass) : VK_NULL_HANDLE;
+        i->framebuffer = framebuffer ? hr.framebuffer(framebuffer) : VK_NULL_HANDLE;
+        if ((render_pass && i->renderPass == VK_NULL_HANDLE) ||
+            (framebuffer && i->framebuffer == VK_NULL_HANDLE)) return false;
+        out->pInheritanceInfo = i;
     }
-    out->pInheritanceInfo = inh;
     return true;
 }
 
-void write_RenderPassBeginInfo(Writer& w, const VkRenderPassBeginInfo& s) {
+bool write_RenderPassBeginInfo(Writer& w, const VkRenderPassBeginInfo& s) {
+    Writer encoded;
     VkRenderPassBeginInfo tmp = s;
     tmp.pNext = nullptr;
     tmp.pClearValues = nullptr;
-    w.bytes(&tmp, sizeof(tmp));
-    write_pod_array(w, s.pClearValues, s.clearValueCount);
+    encoded.bytes(&tmp, sizeof(tmp));
+    if (!write_pnext_chain(encoded, PNextContext::RenderPassBegin, s.pNext)) return false;
+    write_pod_array(encoded, s.pClearValues, s.clearValueCount);
+    w.append(encoded);
+    return true;
 }
 
 bool read_RenderPassBeginInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                                VkRenderPassBeginInfo* out) {
     if (!read_raw(r, out)) return false;
+    if (!read_pnext_chain(r, arena, hr, PNextContext::RenderPassBegin, &out->pNext)) return false;
     if (!read_pod_array(r, arena, out->clearValueCount,
                          const_cast<VkClearValue**>(&out->pClearValues)))
         return false;
     patch_handle(&out->renderPass, [&](uint64_t id) { return hr.render_pass(id); });
     patch_handle(&out->framebuffer, [&](uint64_t id) { return hr.framebuffer(id); });
     return true;
+}
+
+bool write_SubpassBeginInfo(Writer& w, const VkSubpassBeginInfo& s) {
+    Writer encoded;
+    encoded.i32(static_cast<int32_t>(s.sType));
+    encoded.i32(static_cast<int32_t>(s.contents));
+    if (s.sType != VK_STRUCTURE_TYPE_SUBPASS_BEGIN_INFO ||
+        !write_pnext_chain(encoded, PNextContext::RenderPass2, s.pNext))
+        return false;
+    w.append(encoded);
+    return true;
+}
+
+bool read_SubpassBeginInfo(Reader& r, Arena& arena, const HandleResolver& hr,
+                           VkSubpassBeginInfo* out) {
+    *out = {};
+    out->sType = static_cast<VkStructureType>(r.i32());
+    out->contents = static_cast<VkSubpassContents>(r.i32());
+    if (!r.ok() || out->sType != VK_STRUCTURE_TYPE_SUBPASS_BEGIN_INFO) return false;
+    return read_pnext_chain(r, arena, hr, PNextContext::RenderPass2, &out->pNext);
+}
+
+bool write_SubpassEndInfo(Writer& w, const VkSubpassEndInfo& s) {
+    Writer encoded;
+    encoded.i32(static_cast<int32_t>(s.sType));
+    if (s.sType != VK_STRUCTURE_TYPE_SUBPASS_END_INFO ||
+        !write_pnext_chain(encoded, PNextContext::RenderPass2, s.pNext))
+        return false;
+    w.append(encoded);
+    return true;
+}
+
+bool read_SubpassEndInfo(Reader& r, Arena& arena, const HandleResolver& hr,
+                         VkSubpassEndInfo* out) {
+    *out = {};
+    out->sType = static_cast<VkStructureType>(r.i32());
+    if (!r.ok() || out->sType != VK_STRUCTURE_TYPE_SUBPASS_END_INFO) return false;
+    return read_pnext_chain(r, arena, hr, PNextContext::RenderPass2, &out->pNext);
 }
 
 void write_DescriptorSetLayoutCreateInfo(Writer& w, const VkDescriptorSetLayoutCreateInfo& s) {
@@ -729,6 +1636,54 @@ bool read_DescriptorSetLayoutCreateInfo(Reader& r, Arena& arena, const HandleRes
     }
     out->pBindings = bindings;
     return true;
+}
+
+bool write_DescriptorUpdateTemplateCreateInfo(Writer& w,
+    const VkDescriptorUpdateTemplateCreateInfo& s) {
+    if (s.sType != VK_STRUCTURE_TYPE_DESCRIPTOR_UPDATE_TEMPLATE_CREATE_INFO || s.pNext ||
+        !valid_count(s.descriptorUpdateEntryCount, sizeof(VkDescriptorUpdateTemplateEntry)) ||
+        (s.descriptorUpdateEntryCount && !s.pDescriptorUpdateEntries)) return false;
+    Writer e; e.i32(s.sType);e.u32(s.flags);e.u32(s.descriptorUpdateEntryCount);
+    for(uint32_t i=0;i<s.descriptorUpdateEntryCount;++i){const auto& x=s.pDescriptorUpdateEntries[i];
+        e.u32(x.dstBinding);e.u32(x.dstArrayElement);e.u32(x.descriptorCount);e.i32(x.descriptorType);
+        e.u64(x.offset);e.u64(x.stride);
+    }
+    e.i32(s.templateType);e.handle(reinterpret_cast<uint64_t>(s.descriptorSetLayout));
+    e.i32(s.pipelineBindPoint);e.handle(reinterpret_cast<uint64_t>(s.pipelineLayout));e.u32(s.set);
+    w.append(e);return true;
+}
+
+bool read_DescriptorUpdateTemplateCreateInfo(Reader& r, Arena& arena,
+    const HandleResolver& hr, VkDescriptorUpdateTemplateCreateInfo* out) {
+    *out={};out->sType=static_cast<VkStructureType>(r.i32());out->flags=r.u32();
+    out->descriptorUpdateEntryCount=r.u32();
+    if(!r.ok()||out->sType!=VK_STRUCTURE_TYPE_DESCRIPTOR_UPDATE_TEMPLATE_CREATE_INFO||
+       !valid_count(out->descriptorUpdateEntryCount,sizeof(VkDescriptorUpdateTemplateEntry))||
+       out->descriptorUpdateEntryCount>r.remaining()/32)return false;
+    auto* entries=out->descriptorUpdateEntryCount?arena.array<VkDescriptorUpdateTemplateEntry>(out->descriptorUpdateEntryCount):nullptr;
+    for(uint32_t i=0;i<out->descriptorUpdateEntryCount;++i){auto& x=entries[i];x.dstBinding=r.u32();x.dstArrayElement=r.u32();x.descriptorCount=r.u32();x.descriptorType=static_cast<VkDescriptorType>(r.i32());x.offset=static_cast<size_t>(r.u64());x.stride=static_cast<size_t>(r.u64());}
+    out->pDescriptorUpdateEntries=entries;out->templateType=static_cast<VkDescriptorUpdateTemplateType>(r.i32());
+    uint64_t layout=r.handle();out->descriptorSetLayout=layout?hr.descriptor_set_layout(layout):VK_NULL_HANDLE;
+    out->pipelineBindPoint=static_cast<VkPipelineBindPoint>(r.i32());uint64_t pipeline=r.handle();
+    out->pipelineLayout=pipeline?hr.pipeline_layout(pipeline):VK_NULL_HANDLE;out->set=r.u32();return r.ok();
+}
+
+void write_SamplerYcbcrConversionCreateInfo(Writer& w,
+    const VkSamplerYcbcrConversionCreateInfo& s) {
+    w.i32(s.sType);w.i32(s.format);w.i32(s.ycbcrModel);w.i32(s.ycbcrRange);
+    w.i32(s.components.r);w.i32(s.components.g);w.i32(s.components.b);w.i32(s.components.a);
+    w.i32(s.xChromaOffset);w.i32(s.yChromaOffset);w.i32(s.chromaFilter);w.u32(s.forceExplicitReconstruction);
+}
+
+bool read_SamplerYcbcrConversionCreateInfo(Reader& r, Arena&, const HandleResolver&,
+    VkSamplerYcbcrConversionCreateInfo* out) {
+    *out={};out->sType=static_cast<VkStructureType>(r.i32());out->format=static_cast<VkFormat>(r.i32());
+    out->ycbcrModel=static_cast<VkSamplerYcbcrModelConversion>(r.i32());out->ycbcrRange=static_cast<VkSamplerYcbcrRange>(r.i32());
+    out->components.r=static_cast<VkComponentSwizzle>(r.i32());out->components.g=static_cast<VkComponentSwizzle>(r.i32());
+    out->components.b=static_cast<VkComponentSwizzle>(r.i32());out->components.a=static_cast<VkComponentSwizzle>(r.i32());
+    out->xChromaOffset=static_cast<VkChromaLocation>(r.i32());out->yChromaOffset=static_cast<VkChromaLocation>(r.i32());
+    out->chromaFilter=static_cast<VkFilter>(r.i32());out->forceExplicitReconstruction=r.u32();
+    return r.ok()&&out->sType==VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_CREATE_INFO;
 }
 
 void write_DescriptorPoolCreateInfo(Writer& w, const VkDescriptorPoolCreateInfo& s) {
@@ -802,9 +1757,13 @@ void write_WriteDescriptorSet(Writer& w, const VkWriteDescriptorSet& s) {
                 w.u64(info.range);
             }
             break;
+        case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+        case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+            w.u32(3);
+            for (uint32_t i = 0; i < s.descriptorCount; ++i)
+                w.handle(id_of(s.pTexelBufferView[i]));
+            break;
         default:
-            // VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER / STORAGE_TEXEL_BUFFER
-            // need pTexelBufferView, which this project never uses.
             w.u32(0);
             break;
     }
@@ -851,11 +1810,18 @@ bool read_WriteDescriptorSet(Reader& r, Arena& arena, const HandleResolver& hr,
             infos[i].range = range;
         }
         out->pBufferInfo = infos;
-    } else if (kind != 0) {
+    } else if (kind == 3) {
+        VkBufferView* views = out->descriptorCount ? arena.array<VkBufferView>(out->descriptorCount)
+                                                   : nullptr;
+        for (uint32_t i = 0; i < out->descriptorCount; ++i) {
+            const uint64_t id = r.handle();
+            if (!r.ok() || id == 0 || hr.buffer_view(id) == VK_NULL_HANDLE) return false;
+            views[i] = hr.buffer_view(id);
+        }
+        out->pTexelBufferView = views;
+    } else {
         return false;
     }
-    // kind == 0: pTexelBufferView, unsupported - descriptorCount elements
-    // simply were not written, so there is nothing further to read.
 
     patch_handle(&out->dstSet, [&](uint64_t id) { return hr.descriptor_set(id); });
     return true;
@@ -916,53 +1882,58 @@ bool read_MemoryBarrier(Reader& r, Arena&, const HandleResolver&, VkMemoryBarrie
 // ---------------------------------------------------------------------------
 
 void write_BufferCreateInfo(Writer& w, const VkBufferCreateInfo& s) {
-    VkBufferCreateInfo tmp = s;
-    tmp.pNext = nullptr;
-    tmp.pQueueFamilyIndices = nullptr;
-    w.bytes(&tmp, sizeof(tmp));
-    write_pod_array(w, s.pQueueFamilyIndices, s.queueFamilyIndexCount);
+    Writer encoded; VkBufferCreateInfo tmp = s;
+    tmp.pNext = nullptr; tmp.pQueueFamilyIndices = nullptr;
+    encoded.bytes(&tmp, sizeof(tmp));
+    if (!write_pnext_chain(encoded, PNextContext::BufferCreate, s.pNext)) return;
+    write_pod_array(encoded, s.pQueueFamilyIndices, s.queueFamilyIndexCount);
+    w.append(encoded);
 }
 
-bool read_BufferCreateInfo(Reader& r, Arena& arena, const HandleResolver&,
+bool read_BufferCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                             VkBufferCreateInfo* out) {
-    if (!read_raw(r, out)) return false;
+    if (!read_raw(r, out) || !read_pnext_chain(r, arena, hr, PNextContext::BufferCreate,
+                                               &out->pNext)) return false;
     return read_pod_array(r, arena, out->queueFamilyIndexCount,
                            const_cast<uint32_t**>(&out->pQueueFamilyIndices));
 }
 
-void write_ImageCreateInfo(Writer& w, const VkImageCreateInfo& s) {
-    VkImageCreateInfo tmp = s;
-    tmp.pNext = nullptr;
-    tmp.pQueueFamilyIndices = nullptr;
-    w.bytes(&tmp, sizeof(tmp));
-    write_pod_array(w, s.pQueueFamilyIndices, s.queueFamilyIndexCount);
+bool write_ImageCreateInfo(Writer& w, const VkImageCreateInfo& s) {
+    Writer e;VkImageCreateInfo tmp=s;tmp.pNext=nullptr;tmp.pQueueFamilyIndices=nullptr;e.bytes(&tmp,sizeof(tmp));
+    if(!write_pnext_chain(e,PNextContext::ImageCreate,s.pNext))return false;
+    write_pod_array(e,s.pQueueFamilyIndices,s.queueFamilyIndexCount);w.append(e);return true;
 }
 
-bool read_ImageCreateInfo(Reader& r, Arena& arena, const HandleResolver&, VkImageCreateInfo* out) {
-    if (!read_raw(r, out)) return false;
+bool read_ImageCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr, VkImageCreateInfo* out) {
+    if (!read_raw(r, out) || !read_pnext_chain(r,arena,hr,PNextContext::ImageCreate,&out->pNext)) return false;
     return read_pod_array(r, arena, out->queueFamilyIndexCount,
                            const_cast<uint32_t**>(&out->pQueueFamilyIndices));
 }
 
 void write_MemoryAllocateInfo(Writer& w, const VkMemoryAllocateInfo& s) {
-    VkMemoryAllocateInfo tmp = s;
-    tmp.pNext = nullptr;
-    w.bytes(&tmp, sizeof(tmp));
+    Writer encoded; VkMemoryAllocateInfo tmp = s; tmp.pNext = nullptr;
+    encoded.bytes(&tmp, sizeof(tmp));
+    if (!write_pnext_chain(encoded, PNextContext::MemoryAllocate, s.pNext)) return;
+    w.append(encoded);
 }
 
-bool read_MemoryAllocateInfo(Reader& r, Arena&, const HandleResolver&,
+bool read_MemoryAllocateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                               VkMemoryAllocateInfo* out) {
-    return read_raw(r, out);
+    return read_raw(r, out) && read_pnext_chain(r, arena, hr, PNextContext::MemoryAllocate,
+                                                &out->pNext);
 }
 
 void write_SamplerCreateInfo(Writer& w, const VkSamplerCreateInfo& s) {
-    VkSamplerCreateInfo tmp = s;
-    tmp.pNext = nullptr;
-    w.bytes(&tmp, sizeof(tmp));
+    Writer encoded; VkSamplerCreateInfo tmp = s; tmp.pNext = nullptr;
+    encoded.bytes(&tmp, sizeof(tmp));
+    if (!write_pnext_chain(encoded, PNextContext::SamplerCreate, s.pNext)) return;
+    w.append(encoded);
 }
 
-bool read_SamplerCreateInfo(Reader& r, Arena&, const HandleResolver&, VkSamplerCreateInfo* out) {
-    return read_raw(r, out);
+bool read_SamplerCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
+                            VkSamplerCreateInfo* out) {
+    if (!read_raw(r, out)) return false;
+    return read_pnext_chain(r, arena, hr, PNextContext::SamplerCreate, &out->pNext);
 }
 
 void write_FenceCreateInfo(Writer& w, const VkFenceCreateInfo& s) {
@@ -976,14 +1947,16 @@ bool read_FenceCreateInfo(Reader& r, Arena&, const HandleResolver&, VkFenceCreat
 }
 
 void write_SemaphoreCreateInfo(Writer& w, const VkSemaphoreCreateInfo& s) {
-    VkSemaphoreCreateInfo tmp = s;
-    tmp.pNext = nullptr;
-    w.bytes(&tmp, sizeof(tmp));
+    Writer encoded; VkSemaphoreCreateInfo tmp = s; tmp.pNext = nullptr;
+    encoded.bytes(&tmp, sizeof(tmp));
+    if (!write_pnext_chain(encoded, PNextContext::SemaphoreCreate, s.pNext)) return;
+    w.append(encoded);
 }
 
-bool read_SemaphoreCreateInfo(Reader& r, Arena&, const HandleResolver&,
+bool read_SemaphoreCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                                VkSemaphoreCreateInfo* out) {
-    return read_raw(r, out);
+    return read_raw(r, out) && read_pnext_chain(r, arena, hr, PNextContext::SemaphoreCreate,
+                                                &out->pNext);
 }
 
 void write_CommandPoolCreateInfo(Writer& w, const VkCommandPoolCreateInfo& s) {
@@ -1287,36 +2260,121 @@ bool read_PhysicalDeviceProperties(Reader& r, VkPhysicalDeviceProperties* out) {
 #undef VK_PHYSICAL_DEVICE_LIMITS_U32_FIELDS
 
 void write_PhysicalDeviceMemoryProperties(Writer& w, const VkPhysicalDeviceMemoryProperties& s) {
-    w.bytes(&s, sizeof(s));
+    w.u32(s.memoryTypeCount);
+    for (uint32_t i = 0; i < s.memoryTypeCount; ++i) {
+        w.u32(s.memoryTypes[i].propertyFlags);
+        w.u32(s.memoryTypes[i].heapIndex);
+    }
+    w.u32(s.memoryHeapCount);
+    for (uint32_t i = 0; i < s.memoryHeapCount; ++i) {
+        w.u64(s.memoryHeaps[i].size);
+        w.u32(s.memoryHeaps[i].flags);
+    }
 }
 
-bool read_PhysicalDeviceMemoryProperties(Reader& r, Arena&, const HandleResolver&,
-                                          VkPhysicalDeviceMemoryProperties* out) {
-    return read_raw(r, out);
+bool read_PhysicalDeviceMemoryProperties(Reader& r, VkPhysicalDeviceMemoryProperties* out) {
+    *out = {};
+    const uint32_t type_count = r.u32();
+    if (!r.ok() || type_count > VK_MAX_MEMORY_TYPES ||
+        type_count > r.remaining() / (2 * sizeof(uint32_t))) return false;
+    out->memoryTypeCount = type_count;
+    for (uint32_t i = 0; i < type_count; ++i) {
+        out->memoryTypes[i].propertyFlags = r.u32();
+        out->memoryTypes[i].heapIndex = r.u32();
+    }
+    const uint32_t heap_count = r.u32();
+    if (!r.ok() || heap_count > VK_MAX_MEMORY_HEAPS ||
+        heap_count > r.remaining() / (sizeof(uint64_t) + sizeof(uint32_t))) return false;
+    out->memoryHeapCount = heap_count;
+    for (uint32_t i = 0; i < heap_count; ++i) {
+        out->memoryHeaps[i].size = r.u64();
+        out->memoryHeaps[i].flags = r.u32();
+    }
+    return r.ok();
 }
 
 void write_PhysicalDeviceFeatures(Writer& w, const VkPhysicalDeviceFeatures& s) {
-    w.bytes(&s, sizeof(s));
+    const VkBool32* fields = reinterpret_cast<const VkBool32*>(&s);
+    static_assert(sizeof(s) % sizeof(VkBool32) == 0, "features must contain VkBool32 fields");
+    for (size_t i = 0; i < sizeof(s) / sizeof(VkBool32); ++i) w.u32(fields[i]);
 }
 
-bool read_PhysicalDeviceFeatures(Reader& r, Arena&, const HandleResolver&,
-                                  VkPhysicalDeviceFeatures* out) {
-    return read_raw(r, out);
+bool read_PhysicalDeviceFeatures(Reader& r, VkPhysicalDeviceFeatures* out) {
+    *out = {};
+    VkBool32* fields = reinterpret_cast<VkBool32*>(out);
+    for (size_t i = 0; i < sizeof(*out) / sizeof(VkBool32); ++i) fields[i] = r.u32();
+    return r.ok();
 }
 
-void write_FormatProperties(Writer& w, const VkFormatProperties& s) { w.bytes(&s, sizeof(s)); }
+void write_FormatProperties(Writer& w, const VkFormatProperties& s) {
+    w.u32(s.linearTilingFeatures);
+    w.u32(s.optimalTilingFeatures);
+    w.u32(s.bufferFeatures);
+}
 
-bool read_FormatProperties(Reader& r, Arena&, const HandleResolver&, VkFormatProperties* out) {
-    return read_raw(r, out);
+bool read_FormatProperties(Reader& r, VkFormatProperties* out) {
+    *out = {};
+    out->linearTilingFeatures = r.u32();
+    out->optimalTilingFeatures = r.u32();
+    out->bufferFeatures = r.u32();
+    return r.ok();
+}
+
+void write_ImageFormatProperties(Writer& w, const VkImageFormatProperties& s) {
+    w.u32(s.maxExtent.width); w.u32(s.maxExtent.height); w.u32(s.maxExtent.depth);
+    w.u32(s.maxMipLevels); w.u32(s.maxArrayLayers); w.u32(s.sampleCounts);
+    w.u64(s.maxResourceSize);
+}
+
+bool read_ImageFormatProperties(Reader& r, VkImageFormatProperties* out) {
+    *out = {};
+    out->maxExtent.width = r.u32(); out->maxExtent.height = r.u32(); out->maxExtent.depth = r.u32();
+    out->maxMipLevels = r.u32(); out->maxArrayLayers = r.u32();
+    out->sampleCounts = r.u32(); out->maxResourceSize = r.u64();
+    return r.ok();
+}
+
+void write_QueueFamilyProperties(Writer& w, const VkQueueFamilyProperties& s) {
+    w.u32(s.queueFlags); w.u32(s.queueCount); w.u32(s.timestampValidBits);
+    w.u32(s.minImageTransferGranularity.width); w.u32(s.minImageTransferGranularity.height);
+    w.u32(s.minImageTransferGranularity.depth);
+}
+
+bool read_QueueFamilyProperties(Reader& r, VkQueueFamilyProperties* out) {
+    *out = {};
+    out->queueFlags = r.u32(); out->queueCount = r.u32(); out->timestampValidBits = r.u32();
+    out->minImageTransferGranularity.width = r.u32();
+    out->minImageTransferGranularity.height = r.u32();
+    out->minImageTransferGranularity.depth = r.u32();
+    return r.ok();
+}
+
+void write_SparseImageFormatProperties(Writer& w, const VkSparseImageFormatProperties& s) {
+    w.u32(s.aspectMask); w.u32(s.imageGranularity.width); w.u32(s.imageGranularity.height);
+    w.u32(s.imageGranularity.depth); w.u32(s.flags);
+}
+
+bool read_SparseImageFormatProperties(Reader& r, VkSparseImageFormatProperties* out) {
+    *out = {};
+    out->aspectMask = r.u32(); out->imageGranularity.width = r.u32();
+    out->imageGranularity.height = r.u32(); out->imageGranularity.depth = r.u32();
+    out->flags = r.u32();
+    return r.ok();
 }
 
 void write_ExtensionProperties(Writer& w, const VkExtensionProperties& s) {
-    w.bytes(&s, sizeof(s));
+    w.string(s.extensionName);
+    w.u32(s.specVersion);
 }
 
 bool read_ExtensionProperties(Reader& r, Arena&, const HandleResolver&,
                                VkExtensionProperties* out) {
-    return read_raw(r, out);
+    std::string name;
+    if (!r.string(&name) || name.size() >= VK_MAX_EXTENSION_NAME_SIZE) return false;
+    *out = {};
+    std::memcpy(out->extensionName, name.data(), name.size());
+    out->specVersion = r.u32();
+    return r.ok();
 }
 
 }  // namespace remoting

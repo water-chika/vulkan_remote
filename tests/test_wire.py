@@ -94,6 +94,14 @@ def decode_u32(payload, offset=0):
     return struct.unpack_from('<I', payload, offset)[0]
 
 
+def decode_string(payload, offset):
+    size = decode_u32(payload, offset)
+    offset += 4
+    if offset + size > len(payload):
+        raise Failure('truncated encoded string')
+    return payload[offset:offset + size].decode('utf-8'), offset + size
+
+
 def send_message(sock, opcode, payload=b''):
     sock.sendall(HEADER.pack(opcode, len(payload)) + payload)
 
@@ -170,12 +178,14 @@ class Server:
         return self.process.poll() is None
 
 
-def handshake(sock, digest, build_dir=None):
+def handshake(sock, digest, build_dir=None, overrides=None):
     values = read_protocol_constants(build_dir) if build_dir else {
-        'kWireSchemaRevision': 'wire-v10-mapped-memory-alignment',
+        'kWireSchemaRevision': 'wire-v15-vulkan12-internal',
         'kRegistrySha256': '0' * 64,
         'kWireAbi': 'x86_64-little-endian-v1',
     }
+    if overrides:
+        values.update(overrides)
     payload = (encode_string(values['kWireSchemaRevision']) +
                encode_string(values['kRegistrySha256']) +
                encode_string(values['kWireAbi']) +
@@ -194,24 +204,33 @@ def test_handshake_accepts_matching_digest(server, build_dir):
             raise Failure('server rejected its own digest (status {})'.format(status))
 
 
-def test_handshake_rejects_foreign_digest(server, build_dir):
-    """A peer built from a different vk.xml must be refused, not tolerated.
+def assert_handshake_rejected_and_closed(sock, status, build_dir, description):
+    if status == STATUS_OK:
+        raise Failure('server accepted ' + description)
+    send_message(sock, read_opcode(build_dir, 'vkEnumeratePhysicalDevices'))
+    try:
+        opcode, _ = recv_message(sock)
+    except (BrokenPipeError, ConnectionResetError, TimeoutError):
+        opcode = None
+    if opcode is not None:
+        raise Failure('server kept serving ' + description)
 
-    Tolerating it would be the worst outcome: opcode numbering would differ, so
-    every later call would invoke some other command and appear to work.
-    """
+
+def test_handshake_rejects_foreign_digest(server, build_dir):
+    """A peer built from a different command set must be refused, not tolerated."""
     with connect(server.port) as sock:
         status = handshake(sock, 'deadbeefdeadbeef', build_dir)
-        if status == STATUS_OK:
-            raise Failure('server accepted a foreign command set digest')
+        assert_handshake_rejected_and_closed(
+            sock, status, build_dir, 'a foreign command set digest')
 
-        send_message(sock, read_opcode(build_dir, 'vkEnumeratePhysicalDevices'))
-        try:
-            opcode, _ = recv_message(sock)
-        except (ConnectionResetError, TimeoutError):
-            opcode = None
-        if opcode is not None:
-            raise Failure('server kept serving a rejected peer')
+
+def test_handshake_rejects_schema_mismatch(server, build_dir):
+    """Schema changes without opcode changes must still reject the peer."""
+    with connect(server.port) as sock:
+        status = handshake(sock, read_digest(build_dir), build_dir,
+                           {'kWireSchemaRevision': 'wire-incompatible-test-schema'})
+        assert_handshake_rejected_and_closed(
+            sock, status, build_dir, 'a foreign wire schema')
 
 
 def test_unknown_opcode_is_reported(server, build_dir):
@@ -297,6 +316,64 @@ def test_compute_pipeline_count_is_bounded(server, build_dir):
             raise Failure('hostile compute pipeline count was not rejected')
 
 
+def test_shader_module_malformed_payloads_are_rejected(server, build_dir):
+    """Field-wise shader decoding rejects inconsistent data before Vulkan."""
+    digest = read_digest(build_dir)
+    shader_opcode = read_opcode(build_dir, 'vkCreateShaderModule')
+    shader_stype = 16  # VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO
+
+    def shader_payload(code_size, code=b'', pnext=b'', flags=0):
+        return (struct.pack('<QiII', 0, shader_stype, flags,
+                            1 if pnext else 0) + pnext +
+                struct.pack('<Q', code_size) + code)
+
+    cases = {
+        'zero code size': shader_payload(0),
+        'non-word-aligned code size': shader_payload(5, b'12345'),
+        'oversized code size': shader_payload(16 * 1024 * 1024 + 4),
+        'declared/payload mismatch': shader_payload(8, struct.pack('<I', 0x07230203)),
+        'truncated word': shader_payload(4, struct.pack('<I', 0x07230203)[:3]),
+        'trailing data': shader_payload(4, struct.pack('<II', 0x07230203, 0xDEADBEEF)),
+        'unsupported pNext': shader_payload(
+            4, struct.pack('<I', 0x07230203),
+            struct.pack('<i', 0)),  # VK_STRUCTURE_TYPE_APPLICATION_INFO
+    }
+
+    for description, payload in cases.items():
+        with connect(server.port) as sock:
+            if handshake(sock, digest, build_dir) != STATUS_OK:
+                raise Failure('handshake failed')
+            send_message(sock, shader_opcode, payload)
+            opcode, response = recv_message(sock)
+            if opcode != shader_opcode or len(response) < 4:
+                raise Failure('{} produced a malformed reply'.format(description))
+            if decode_u32(response) != STATUS_DECODE_ERROR:
+                raise Failure('{} was not rejected'.format(description))
+
+
+def test_vulkan10_family_payloads_are_bounded(server, build_dir):
+    """New object/query/sparse families reject hostile counts and bad handles."""
+    digest = read_digest(build_dir)
+    cases = {
+        'vkMergePipelineCaches': struct.pack('<QQI', 0, 0, 0xFFFFFFFF),
+        'vkFreeDescriptorSets': struct.pack('<QQI', 0, 0, 0xFFFFFFFF),
+        'vkGetQueryPoolResults': struct.pack('<QQIIQQI', 0, 0, 0, 1,
+                                                    64 * 1024 * 1024 + 1, 8, 0),
+        'vkQueueBindSparse': struct.pack('<QQI', 0, 0, 0xFFFFFFFF),
+    }
+    for name, payload in cases.items():
+        with connect(server.port) as sock:
+            if handshake(sock, digest, build_dir) != STATUS_OK:
+                raise Failure('handshake failed')
+            expected = read_opcode(build_dir, name)
+            send_message(sock, expected, payload)
+            opcode, response = recv_message(sock)
+            if opcode != expected or len(response) < 4:
+                raise Failure('{} produced no bounded error reply'.format(name))
+            if decode_u32(response) != STATUS_DECODE_ERROR:
+                raise Failure('{} did not reject malformed payload'.format(name))
+
+
 def test_transfer_command_payloads_are_bounded(server, build_dir):
     """Hostile transfer counts and byte lengths must not allocate or reach Vulkan."""
     digest = read_digest(build_dir)
@@ -322,6 +399,115 @@ def test_transfer_command_payloads_are_bounded(server, build_dir):
         if handshake(good, digest, build_dir) != STATUS_OK:
             raise Failure('server stopped serving after malformed transfer commands')
 
+
+def test_device_extension_advertisement_is_real_device_intersection(server, build_dir):
+    """The remote list is exactly swapchain plus the closed reviewed contract."""
+    with connect(server.port) as sock:
+        if handshake(sock, read_digest(build_dir), build_dir) != STATUS_OK:
+            raise Failure('handshake failed')
+        opcode = read_opcode(build_dir, 'vkEnumerateDeviceExtensionProperties')
+        send_message(sock, opcode, struct.pack('<Q', 1))
+        reply_opcode, response = recv_message(sock)
+        if reply_opcode != opcode or len(response) < 12:
+            raise Failure('device-extension enumeration reply was malformed')
+        if decode_u32(response) != STATUS_OK:
+            raise Failure('device-extension enumeration did not report Status::Ok')
+        result = struct.unpack_from('<i', response, 4)[0]
+        if result != 0:
+            raise Failure('device-extension enumeration returned {}'.format(result))
+        count = decode_u32(response, 8)
+        offset = 12
+        names = []
+        for _ in range(count):
+            name, offset = decode_string(response, offset)
+            if offset + 4 > len(response):
+                raise Failure('truncated extension version')
+            offset += 4
+            names.append(name)
+        if offset != len(response):
+            raise Failure('trailing bytes in device-extension enumeration')
+
+        contract = {
+            'VK_KHR_multiview',
+            'VK_KHR_maintenance2',
+            'VK_KHR_image_format_list',
+            'VK_KHR_create_renderpass2',
+            'VK_KHR_fragment_shading_rate',
+            'VK_KHR_imageless_framebuffer',
+        }
+        advertised_contract = contract.intersection(names)
+        if advertised_contract and advertised_contract != contract:
+            raise Failure('server advertised an incomplete extension contract: {}'.format(
+                sorted(advertised_contract)))
+        unexpected = set(names) - contract - {'VK_KHR_swapchain'}
+        if unexpected:
+            raise Failure('server exposed unreviewed device extensions: {}'.format(
+                sorted(unexpected)))
+        if 'VK_KHR_dynamic_rendering' in names:
+            raise Failure('server exposed dynamic rendering')
+
+
+def test_new_extension_opcode_decode_errors(server, build_dir):
+    """New synchronous and one-way commands reject malformed wire safely."""
+    digest = read_digest(build_dir)
+    with connect(server.port) as sock:
+        if handshake(sock, digest, build_dir) != STATUS_OK:
+            raise Failure('handshake failed')
+
+        synchronous = [
+            'vkCreateRenderPass2',
+            'vkGetPhysicalDeviceFragmentShadingRatesKHR',
+        ]
+        for name in synchronous:
+            expected_opcode = read_opcode(build_dir, name)
+            send_message(sock, expected_opcode, b'\x01')
+            opcode, response = recv_message(sock)
+            if opcode != expected_opcode:
+                raise Failure('{} reply had opcode {}'.format(name, opcode))
+            if len(response) < 4 or decode_u32(response) != STATUS_DECODE_ERROR:
+                raise Failure('{} did not report DecodeError'.format(name))
+
+        one_way = [
+            'vkCmdBeginRenderPass2',
+            'vkCmdNextSubpass2',
+            'vkCmdEndRenderPass2',
+            'vkCmdSetFragmentShadingRateKHR',
+        ]
+        for name in one_way:
+            send_message(sock, read_opcode(build_dir, name), b'\x01')
+
+    # One-way commands have no immediate reply by design. Their malformed
+    # payloads must neither call Vulkan nor terminate the process; prove the
+    # server remains available to a fresh, valid peer.
+    if not server.alive():
+        raise Failure('server died on malformed one-way extension commands')
+    with connect(server.port) as good:
+        if handshake(good, digest, build_dir) != STATUS_OK:
+            raise Failure('server stopped serving after malformed extension commands')
+
+
+
+def test_vulkan12_payloads_are_bounded(server, build_dir):
+    """Vulkan 1.2 counted arrays and object ids reject malformed requests."""
+    digest = read_digest(build_dir)
+    cases = {
+        'vkWaitSemaphores': struct.pack('<QII', 0, 0, 0xFFFFFFFF),
+        'vkSignalSemaphore': struct.pack('<QQQ', 0, 0, 1),
+        'vkResetQueryPool': struct.pack('<QQII', 0, 0, 0, 1),
+    }
+    for name, payload in cases.items():
+        with connect(server.port) as sock:
+            if handshake(sock, digest, build_dir) != STATUS_OK:
+                raise Failure('handshake failed')
+            opcode = read_opcode(build_dir, name)
+            send_message(sock, opcode, payload)
+            if name == 'vkResetQueryPool':
+                continue
+            reply_opcode, response = recv_message(sock)
+            if reply_opcode != opcode or len(response) < 4 or decode_u32(response) != STATUS_DECODE_ERROR:
+                raise Failure('{} did not reject malformed payload'.format(name))
+    if not server.alive():
+        raise Failure('server died on malformed Vulkan 1.2 payloads')
 
 def test_mapped_transfer_chunks_are_bounded(server, build_dir):
     """Mapped-memory RPCs reject malformed and over-limit chunks synchronously."""
@@ -457,13 +643,19 @@ def test_own_window_surface(server, build_dir):
 TESTS = [
     test_handshake_accepts_matching_digest,
     test_handshake_rejects_foreign_digest,
+    test_handshake_rejects_schema_mismatch,
     test_unknown_opcode_is_reported,
     test_reserved_opcode_zero_is_rejected,
     test_truncated_payload_does_not_hang,
     test_oversized_payload_is_refused,
     test_short_payload_for_known_command,
     test_compute_pipeline_count_is_bounded,
+    test_shader_module_malformed_payloads_are_rejected,
+    test_vulkan10_family_payloads_are_bounded,
     test_transfer_command_payloads_are_bounded,
+    test_device_extension_advertisement_is_real_device_intersection,
+    test_new_extension_opcode_decode_errors,
+    test_vulkan12_payloads_are_bounded,
     test_mapped_transfer_chunks_are_bounded,
     test_abrupt_disconnect_is_survivable,
     test_client_without_server_fails_cleanly,

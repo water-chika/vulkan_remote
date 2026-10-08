@@ -16,7 +16,19 @@ GRAPHICS_SAMPLES = (
     "vulkan_remoting_texture_upload",
 )
 TEXT_SAMPLES = {
+    "vulkan_remoting_renderpass2_fsr": (
+        "PASS: renderpass2-fsr ordinary 33x35 checksum=cd5bc1cf",
+        "PASS: renderpass2-fsr ordinary 151x431 checksum=f0f7a423",
+        "PASS: renderpass2-fsr ordinary 256x256 checksum=affe9dc5",
+        "PASS: renderpass2-fsr imageless 33x35 checksum=cd5bc1cf",
+        "PASS: renderpass2-fsr imageless 151x431 checksum=f0f7a423",
+        "PASS: renderpass2-fsr imageless 256x256 checksum=affe9dc5",
+        "SKIP: real ICD lacks complete renderpass2 fragment-shading-rate extension closure",
+    ),
     "vulkan_remoting_compute": ("PASS: compute checksum=ead71172 elements=64",),
+    "vulkan_remoting_spirv15_compute": (
+        "PASS: spirv15-compute checksum=ead71172 elements=64",
+    ),
     "vulkan_remoting_buffer_ops": ("PASS: buffer-ops checksum=3b5a6394 words=64",),
     "vulkan_remoting_mipmap": ("PASS: mipmap checksum=82f68ebe bytes=340 levels=4",),
     "vulkan_remoting_noncoherent_memory": (
@@ -124,10 +136,14 @@ def run_graphics_sample(binary, output, env, label):
 
 def run_text_sample(binary, env, label, expected):
     output = run_process([binary, "--no-validate"], env, label)
-    matches = [line.strip() for line in output.splitlines() if line.strip() in expected]
-    if len(matches) != 1:
+    lines = tuple(line.strip() for line in output.splitlines() if line.strip() in expected)
+    if binary.endswith("vulkan_remoting_renderpass2_fsr"):
+        valid = lines == expected[:-1] or lines == expected[-1:]
+    else:
+        valid = len(lines) == 1
+    if not valid:
         raise Failure("{} produced unexpected output\n{}".format(label, output))
-    return matches[0]
+    return lines
 
 
 def test_sample(build_dir, sample_name, temporary_dir, loader_data_root):
@@ -186,7 +202,7 @@ def test_sample(build_dir, sample_name, temporary_dir, loader_data_root):
         raise Failure(message) from error
 
     if sample_name in TEXT_SAMPLES:
-        print("  ok   {} ({})".format(sample_name, direct))
+        print("  ok   {} ({})".format(sample_name, ", ".join(direct)))
     else:
         print("  ok   {} ({} byte-identical bytes)".format(sample_name, len(direct)))
 

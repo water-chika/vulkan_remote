@@ -107,6 +107,8 @@ VKAPI_ATTR VkResult VKAPI_CALL ResetCommandBuffer(VkCommandBuffer handle,
     return VK_SUCCESS;
 }
 
+VKAPI_ATTR void VKAPI_CALL TrimCommandPool(VkDevice handle,VkCommandPool pool,VkCommandPoolTrimFlags flags){RemoteDevice*d=to_device(handle);Writer w;w.handle(d->remote_id);w.handle(id_from_handle(pool));w.u32(flags);d->instance->connection.send_oneway(Opcode::vkTrimCommandPool,w);}
+
 VKAPI_ATTR VkResult VKAPI_CALL ResetCommandPool(VkDevice handle, VkCommandPool pool,
                                                 VkCommandPoolResetFlags flags) {
     RemoteDevice* device = to_device(handle);
@@ -129,9 +131,17 @@ VKAPI_ATTR void VKAPI_CALL CmdBeginRenderPass(VkCommandBuffer handle,
     RemoteCommandBuffer* cb = to_cmd(handle);
     Writer request;
     request.handle(cb->remote_id);
-    write_RenderPassBeginInfo(request, *pRenderPassBegin);
+    if (!write_RenderPassBeginInfo(request, *pRenderPassBegin)) return;
     request.i32(static_cast<int32_t>(contents));
     cb->device->instance->connection.send_oneway(Opcode::vkCmdBeginRenderPass, request);
+}
+
+VKAPI_ATTR void VKAPI_CALL CmdNextSubpass(VkCommandBuffer handle, VkSubpassContents contents) {
+    RemoteCommandBuffer* cb = to_cmd(handle);
+    Writer request;
+    request.handle(cb->remote_id);
+    request.i32(static_cast<int32_t>(contents));
+    cb->device->instance->connection.send_oneway(Opcode::vkCmdNextSubpass, request);
 }
 
 VKAPI_ATTR void VKAPI_CALL CmdEndRenderPass(VkCommandBuffer handle) {
@@ -140,6 +150,51 @@ VKAPI_ATTR void VKAPI_CALL CmdEndRenderPass(VkCommandBuffer handle) {
     request.handle(cb->remote_id);
     cb->device->instance->connection.send_oneway(Opcode::vkCmdEndRenderPass, request);
 }
+
+VKAPI_ATTR void VKAPI_CALL CmdBeginRenderPass2(VkCommandBuffer handle,
+                                               const VkRenderPassBeginInfo* pRenderPassBegin,
+                                               const VkSubpassBeginInfo* pSubpassBeginInfo) {
+    RemoteCommandBuffer* cb = to_cmd(handle);
+    Writer request;
+    request.handle(cb->remote_id);
+    if (!write_RenderPassBeginInfo(request, *pRenderPassBegin) ||
+        !write_SubpassBeginInfo(request, *pSubpassBeginInfo)) return;
+    cb->device->instance->connection.send_oneway(Opcode::vkCmdBeginRenderPass2, request);
+}
+
+VKAPI_ATTR void VKAPI_CALL CmdNextSubpass2(VkCommandBuffer handle,
+                                           const VkSubpassBeginInfo* pSubpassBeginInfo,
+                                           const VkSubpassEndInfo* pSubpassEndInfo) {
+    RemoteCommandBuffer* cb = to_cmd(handle);
+    Writer request;
+    request.handle(cb->remote_id);
+    if (!write_SubpassBeginInfo(request, *pSubpassBeginInfo) ||
+        !write_SubpassEndInfo(request, *pSubpassEndInfo))
+        return;
+    cb->device->instance->connection.send_oneway(Opcode::vkCmdNextSubpass2, request);
+}
+
+VKAPI_ATTR void VKAPI_CALL CmdEndRenderPass2(VkCommandBuffer handle,
+                                             const VkSubpassEndInfo* pSubpassEndInfo) {
+    RemoteCommandBuffer* cb = to_cmd(handle);
+    Writer request;
+    request.handle(cb->remote_id);
+    if (!write_SubpassEndInfo(request, *pSubpassEndInfo)) return;
+    cb->device->instance->connection.send_oneway(Opcode::vkCmdEndRenderPass2, request);
+}
+
+VKAPI_ATTR void VKAPI_CALL CmdSetFragmentShadingRateKHR(
+    VkCommandBuffer handle, const VkExtent2D* pFragmentSize,
+    const VkFragmentShadingRateCombinerOpKHR combinerOps[2]) {
+    if (!pFragmentSize || !combinerOps) return;
+    RemoteCommandBuffer* cb = to_cmd(handle); Writer request;
+    request.handle(cb->remote_id); request.u32(pFragmentSize->width); request.u32(pFragmentSize->height);
+    request.i32(static_cast<int32_t>(combinerOps[0])); request.i32(static_cast<int32_t>(combinerOps[1]));
+    cb->device->instance->connection.send_oneway(Opcode::vkCmdSetFragmentShadingRateKHR, request);
+}
+
+VKAPI_ATTR void VKAPI_CALL CmdSetDeviceMask(VkCommandBuffer handle,uint32_t mask){RemoteCommandBuffer*cb=to_cmd(handle);Writer w;w.handle(cb->remote_id);w.u32(mask);cb->device->instance->connection.send_oneway(Opcode::vkCmdSetDeviceMask,w);}
+VKAPI_ATTR void VKAPI_CALL CmdDispatchBase(VkCommandBuffer handle,uint32_t bx,uint32_t by,uint32_t bz,uint32_t x,uint32_t y,uint32_t z){RemoteCommandBuffer*cb=to_cmd(handle);Writer w;w.handle(cb->remote_id);w.u32(bx);w.u32(by);w.u32(bz);w.u32(x);w.u32(y);w.u32(z);cb->device->instance->connection.send_oneway(Opcode::vkCmdDispatchBase,w);}
 
 VKAPI_ATTR void VKAPI_CALL CmdBindPipeline(VkCommandBuffer handle,
                                            VkPipelineBindPoint pipelineBindPoint,
@@ -403,6 +458,48 @@ VKAPI_ATTR void VKAPI_CALL CmdClearColorImage(VkCommandBuffer handle, VkImage im
     cb->device->instance->connection.send_oneway(Opcode::vkCmdClearColorImage, request);
 }
 
+VKAPI_ATTR void VKAPI_CALL CmdDrawIndirect(VkCommandBuffer h, VkBuffer b, VkDeviceSize off,
+                                            uint32_t count, uint32_t stride) {
+    auto* cb=to_cmd(h); Writer w; w.handle(cb->remote_id); w.handle(id_from_handle(b));
+    w.u64(off); w.u32(count); w.u32(stride); cb->device->instance->connection.send_oneway(Opcode::vkCmdDrawIndirect,w);
+}
+VKAPI_ATTR void VKAPI_CALL CmdDrawIndexedIndirect(VkCommandBuffer h, VkBuffer b, VkDeviceSize off,
+                                                   uint32_t count, uint32_t stride) {
+    auto* cb=to_cmd(h); Writer w; w.handle(cb->remote_id); w.handle(id_from_handle(b));
+    w.u64(off); w.u32(count); w.u32(stride); cb->device->instance->connection.send_oneway(Opcode::vkCmdDrawIndexedIndirect,w);
+}
+VKAPI_ATTR void VKAPI_CALL CmdDrawIndirectCount(VkCommandBuffer h,VkBuffer b,VkDeviceSize off,VkBuffer countBuffer,VkDeviceSize countOffset,uint32_t maxDrawCount,uint32_t stride){auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);w.handle(id_from_handle(b));w.u64(off);w.handle(id_from_handle(countBuffer));w.u64(countOffset);w.u32(maxDrawCount);w.u32(stride);cb->device->instance->connection.send_oneway(Opcode::vkCmdDrawIndirectCount,w);}
+VKAPI_ATTR void VKAPI_CALL CmdDrawIndexedIndirectCount(VkCommandBuffer h,VkBuffer b,VkDeviceSize off,VkBuffer countBuffer,VkDeviceSize countOffset,uint32_t maxDrawCount,uint32_t stride){auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);w.handle(id_from_handle(b));w.u64(off);w.handle(id_from_handle(countBuffer));w.u64(countOffset);w.u32(maxDrawCount);w.u32(stride);cb->device->instance->connection.send_oneway(Opcode::vkCmdDrawIndexedIndirectCount,w);}
+VKAPI_ATTR void VKAPI_CALL CmdDispatchIndirect(VkCommandBuffer h, VkBuffer b, VkDeviceSize off) {
+    auto* cb=to_cmd(h); Writer w; w.handle(cb->remote_id); w.handle(id_from_handle(b)); w.u64(off);
+    cb->device->instance->connection.send_oneway(Opcode::vkCmdDispatchIndirect,w);
+}
+VKAPI_ATTR void VKAPI_CALL CmdExecuteCommands(VkCommandBuffer h, uint32_t count,
+                                               const VkCommandBuffer* commands) {
+    auto* cb=to_cmd(h); Writer w; w.handle(cb->remote_id); w.u32(count);
+    for(uint32_t i=0;i<count;++i) w.handle(to_cmd(commands[i])->remote_id);
+    cb->device->instance->connection.send_oneway(Opcode::vkCmdExecuteCommands,w);
+}
+VKAPI_ATTR void VKAPI_CALL CmdBeginQuery(VkCommandBuffer h,VkQueryPool p,uint32_t q,VkQueryControlFlags f){auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);w.handle(id_from_handle(p));w.u32(q);w.u32(f);cb->device->instance->connection.send_oneway(Opcode::vkCmdBeginQuery,w);}
+VKAPI_ATTR void VKAPI_CALL CmdEndQuery(VkCommandBuffer h,VkQueryPool p,uint32_t q){auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);w.handle(id_from_handle(p));w.u32(q);cb->device->instance->connection.send_oneway(Opcode::vkCmdEndQuery,w);}
+VKAPI_ATTR void VKAPI_CALL CmdResetQueryPool(VkCommandBuffer h,VkQueryPool p,uint32_t first,uint32_t count){auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);w.handle(id_from_handle(p));w.u32(first);w.u32(count);cb->device->instance->connection.send_oneway(Opcode::vkCmdResetQueryPool,w);}
+VKAPI_ATTR void VKAPI_CALL CmdWriteTimestamp(VkCommandBuffer h,VkPipelineStageFlagBits stage,VkQueryPool p,uint32_t q){auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);w.u32(stage);w.handle(id_from_handle(p));w.u32(q);cb->device->instance->connection.send_oneway(Opcode::vkCmdWriteTimestamp,w);}
+VKAPI_ATTR void VKAPI_CALL CmdCopyQueryPoolResults(VkCommandBuffer h,VkQueryPool p,uint32_t first,uint32_t count,VkBuffer b,VkDeviceSize off,VkDeviceSize stride,VkQueryResultFlags flags){auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);w.handle(id_from_handle(p));w.u32(first);w.u32(count);w.handle(id_from_handle(b));w.u64(off);w.u64(stride);w.u32(flags);cb->device->instance->connection.send_oneway(Opcode::vkCmdCopyQueryPoolResults,w);}
+VKAPI_ATTR void VKAPI_CALL CmdSetEvent(VkCommandBuffer h,VkEvent e,VkPipelineStageFlags stage){auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);w.handle(id_from_handle(e));w.u32(stage);cb->device->instance->connection.send_oneway(Opcode::vkCmdSetEvent,w);}
+VKAPI_ATTR void VKAPI_CALL CmdResetEvent(VkCommandBuffer h,VkEvent e,VkPipelineStageFlags stage){auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);w.handle(id_from_handle(e));w.u32(stage);cb->device->instance->connection.send_oneway(Opcode::vkCmdResetEvent,w);}
+VKAPI_ATTR void VKAPI_CALL CmdSetLineWidth(VkCommandBuffer h,float v){auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);w.f32(v);cb->device->instance->connection.send_oneway(Opcode::vkCmdSetLineWidth,w);}
+VKAPI_ATTR void VKAPI_CALL CmdSetDepthBias(VkCommandBuffer h,float a,float b,float d){auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);w.f32(a);w.f32(b);w.f32(d);cb->device->instance->connection.send_oneway(Opcode::vkCmdSetDepthBias,w);}
+VKAPI_ATTR void VKAPI_CALL CmdSetBlendConstants(VkCommandBuffer h,const float v[4]){auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);for(int i=0;i<4;++i)w.f32(v[i]);cb->device->instance->connection.send_oneway(Opcode::vkCmdSetBlendConstants,w);}
+VKAPI_ATTR void VKAPI_CALL CmdSetDepthBounds(VkCommandBuffer h,float a,float b){auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);w.f32(a);w.f32(b);cb->device->instance->connection.send_oneway(Opcode::vkCmdSetDepthBounds,w);}
+VKAPI_ATTR void VKAPI_CALL CmdSetStencilCompareMask(VkCommandBuffer h,VkStencilFaceFlags f,uint32_t m){auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);w.u32(f);w.u32(m);cb->device->instance->connection.send_oneway(Opcode::vkCmdSetStencilCompareMask,w);}
+VKAPI_ATTR void VKAPI_CALL CmdSetStencilWriteMask(VkCommandBuffer h,VkStencilFaceFlags f,uint32_t m){auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);w.u32(f);w.u32(m);cb->device->instance->connection.send_oneway(Opcode::vkCmdSetStencilWriteMask,w);}
+VKAPI_ATTR void VKAPI_CALL CmdSetStencilReference(VkCommandBuffer h,VkStencilFaceFlags f,uint32_t m){auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);w.u32(f);w.u32(m);cb->device->instance->connection.send_oneway(Opcode::vkCmdSetStencilReference,w);}
+
+VKAPI_ATTR void VKAPI_CALL CmdResolveImage(VkCommandBuffer h,VkImage src,VkImageLayout sl,VkImage dst,VkImageLayout dl,uint32_t count,const VkImageResolve* regions){auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);w.handle(id_from_handle(src));w.i32(sl);w.handle(id_from_handle(dst));w.i32(dl);w.u32(count);for(uint32_t i=0;i<count;++i){const auto&r=regions[i];w.u32(r.srcSubresource.aspectMask);w.u32(r.srcSubresource.mipLevel);w.u32(r.srcSubresource.baseArrayLayer);w.u32(r.srcSubresource.layerCount);w.i32(r.srcOffset.x);w.i32(r.srcOffset.y);w.i32(r.srcOffset.z);w.u32(r.dstSubresource.aspectMask);w.u32(r.dstSubresource.mipLevel);w.u32(r.dstSubresource.baseArrayLayer);w.u32(r.dstSubresource.layerCount);w.i32(r.dstOffset.x);w.i32(r.dstOffset.y);w.i32(r.dstOffset.z);w.u32(r.extent.width);w.u32(r.extent.height);w.u32(r.extent.depth);}cb->device->instance->connection.send_oneway(Opcode::vkCmdResolveImage,w);}
+VKAPI_ATTR void VKAPI_CALL CmdClearDepthStencilImage(VkCommandBuffer h,VkImage image,VkImageLayout layout,const VkClearDepthStencilValue* value,uint32_t count,const VkImageSubresourceRange* ranges){if(!value)return;auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);w.handle(id_from_handle(image));w.i32(layout);w.f32(value->depth);w.u32(value->stencil);w.u32(count);for(uint32_t i=0;i<count;++i){w.u32(ranges[i].aspectMask);w.u32(ranges[i].baseMipLevel);w.u32(ranges[i].levelCount);w.u32(ranges[i].baseArrayLayer);w.u32(ranges[i].layerCount);}cb->device->instance->connection.send_oneway(Opcode::vkCmdClearDepthStencilImage,w);}
+VKAPI_ATTR void VKAPI_CALL CmdClearAttachments(VkCommandBuffer h,uint32_t attachmentCount,const VkClearAttachment* attachments,uint32_t rectCount,const VkClearRect* rects){auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);w.u32(attachmentCount);for(uint32_t i=0;i<attachmentCount;++i){w.u32(attachments[i].aspectMask);w.u32(attachments[i].colorAttachment);w.bytes(&attachments[i].clearValue,sizeof(VkClearValue));}w.u32(rectCount);for(uint32_t i=0;i<rectCount;++i){w.i32(rects[i].rect.offset.x);w.i32(rects[i].rect.offset.y);w.u32(rects[i].rect.extent.width);w.u32(rects[i].rect.extent.height);w.u32(rects[i].baseArrayLayer);w.u32(rects[i].layerCount);}cb->device->instance->connection.send_oneway(Opcode::vkCmdClearAttachments,w);}
+VKAPI_ATTR void VKAPI_CALL CmdWaitEvents(VkCommandBuffer h,uint32_t eventCount,const VkEvent* events,VkPipelineStageFlags src,VkPipelineStageFlags dst,uint32_t memoryCount,const VkMemoryBarrier* memory,uint32_t bufferCount,const VkBufferMemoryBarrier* buffers,uint32_t imageCount,const VkImageMemoryBarrier* images){auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);w.u32(eventCount);for(uint32_t i=0;i<eventCount;++i)w.handle(id_from_handle(events[i]));w.u32(src);w.u32(dst);w.u32(memoryCount);for(uint32_t i=0;i<memoryCount;++i)write_MemoryBarrier(w,memory[i]);w.u32(bufferCount);for(uint32_t i=0;i<bufferCount;++i)write_BufferMemoryBarrier(w,buffers[i]);w.u32(imageCount);for(uint32_t i=0;i<imageCount;++i)write_ImageMemoryBarrier(w,images[i]);cb->device->instance->connection.send_oneway(Opcode::vkCmdWaitEvents,w);}
+
 VKAPI_ATTR void VKAPI_CALL CmdPushConstants(VkCommandBuffer handle, VkPipelineLayout layout,
                                             VkShaderStageFlags stageFlags, uint32_t offset,
                                             uint32_t size, const void* pValues) {
@@ -427,8 +524,22 @@ const DeviceEntry* get_command_entries(size_t* count) {
         D(EndCommandBuffer),
         D(ResetCommandBuffer),
         D(ResetCommandPool),
+        D(TrimCommandPool),
+        {"vkTrimCommandPoolKHR", reinterpret_cast<PFN_vkVoidFunction>(TrimCommandPool)},
         D(CmdBeginRenderPass),
+        D(CmdNextSubpass),
         D(CmdEndRenderPass),
+        D(CmdBeginRenderPass2),
+        {"vkCmdBeginRenderPass2KHR", reinterpret_cast<PFN_vkVoidFunction>(CmdBeginRenderPass2)},
+        D(CmdNextSubpass2),
+        {"vkCmdNextSubpass2KHR", reinterpret_cast<PFN_vkVoidFunction>(CmdNextSubpass2)},
+        D(CmdEndRenderPass2),
+        {"vkCmdEndRenderPass2KHR", reinterpret_cast<PFN_vkVoidFunction>(CmdEndRenderPass2)},
+        D(CmdSetFragmentShadingRateKHR),
+        D(CmdSetDeviceMask),
+        {"vkCmdSetDeviceMaskKHR", reinterpret_cast<PFN_vkVoidFunction>(CmdSetDeviceMask)},
+        D(CmdDispatchBase),
+        {"vkCmdDispatchBaseKHR", reinterpret_cast<PFN_vkVoidFunction>(CmdDispatchBase)},
         D(CmdBindPipeline),
         D(CmdBindDescriptorSets),
         D(CmdBindVertexBuffers),
@@ -438,6 +549,28 @@ const DeviceEntry* get_command_entries(size_t* count) {
         D(CmdDraw),
         D(CmdDispatch),
         D(CmdDrawIndexed),
+        D(CmdDrawIndirect),
+        D(CmdDrawIndexedIndirect),
+        D(CmdDrawIndirectCount),
+        {"vkCmdDrawIndirectCountKHR", reinterpret_cast<PFN_vkVoidFunction>(CmdDrawIndirectCount)},
+        D(CmdDrawIndexedIndirectCount),
+        {"vkCmdDrawIndexedIndirectCountKHR", reinterpret_cast<PFN_vkVoidFunction>(CmdDrawIndexedIndirectCount)},
+        D(CmdDispatchIndirect),
+        D(CmdExecuteCommands),
+        D(CmdBeginQuery),
+        D(CmdEndQuery),
+        D(CmdResetQueryPool),
+        D(CmdWriteTimestamp),
+        D(CmdCopyQueryPoolResults),
+        D(CmdSetEvent),
+        D(CmdResetEvent),
+        D(CmdSetLineWidth),
+        D(CmdSetDepthBias),
+        D(CmdSetBlendConstants),
+        D(CmdSetDepthBounds),
+        D(CmdSetStencilCompareMask),
+        D(CmdSetStencilWriteMask),
+        D(CmdSetStencilReference),
         D(CmdPipelineBarrier),
         D(CmdCopyBuffer),
         D(CmdCopyBufferToImage),
@@ -447,6 +580,10 @@ const DeviceEntry* get_command_entries(size_t* count) {
         D(CmdFillBuffer),
         D(CmdUpdateBuffer),
         D(CmdClearColorImage),
+        D(CmdClearDepthStencilImage),
+        D(CmdClearAttachments),
+        D(CmdResolveImage),
+        D(CmdWaitEvents),
         D(CmdPushConstants),
 #undef D
     };

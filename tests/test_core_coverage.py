@@ -10,11 +10,11 @@ import sys
 import xml.etree.ElementTree as ET
 
 
-def core_commands(registry):
+def core_commands(registry, version="1.0"):
     root = ET.parse(registry).getroot()
     names = set()
     for feature in root.findall("feature"):
-        if feature.get("number") != "1.0":
+        if feature.get("number") != version:
             continue
         if "vulkan" not in feature.get("api", "vulkan").split(","):
             continue
@@ -46,7 +46,10 @@ def main():
     parser.add_argument("--icd", help="built ICD for runtime proc-address verification")
     args = parser.parse_args()
     source = os.path.abspath(args.source_dir)
-    core = core_commands(os.path.join(source, "registry", "vk.xml"))
+    registry = os.path.join(source, "registry", "vk.xml")
+    core = core_commands(registry)
+    core11 = core_commands(registry, "1.1")
+    core12 = core_commands(registry, "1.2")
     client = source_entries(source)
     server = server_handlers(source)
     missing_client = sorted(core - client)
@@ -61,13 +64,16 @@ def main():
         # one same-named Vulkan RPC.
         "vkMapMemory", "vkUnmapMemory", "vkFlushMappedMemoryRanges",
         "vkInvalidateMappedMemoryRanges",
-        # A truthful local zero-count implementation while sparse features are
-        # not yet part of the remoting contract.
-        "vkGetPhysicalDeviceSparseImageFormatProperties",
     }
     missing_server = sorted(core - local_only - server)
     if len(core) != 137:
         print("FAIL: expected 137 Vulkan 1.0 commands, found {}".format(len(core)))
+        return 1
+    if len(core11) != 28:
+        print("FAIL: expected 28 Vulkan 1.1 commands, found {}".format(len(core11)))
+        return 1
+    if len(core12) != 13:
+        print("FAIL: expected 13 Vulkan 1.2 commands, found {}".format(len(core12)))
         return 1
     print("Vulkan 1.0 core: 137")
     print("client entries: {} / 137".format(len(core & client)))
@@ -95,6 +101,28 @@ def main():
         print("  server-only: " + ", ".join(sorted(set(missing_client) - set(missing_server))))
         print("  client-only: " + ", ".join(sorted(set(missing_server) - set(missing_client))))
         return 1
+    local11 = {"vkEnumerateInstanceVersion", "vkEnumeratePhysicalDeviceGroups",
+               "vkGetPhysicalDeviceExternalBufferProperties",
+               "vkGetPhysicalDeviceExternalFenceProperties",
+               "vkGetPhysicalDeviceExternalSemaphoreProperties"}
+    missing11_client = sorted(core11 - client)
+    missing11_server = sorted(core11 - local11 - server)
+    print("Vulkan 1.1 core: 28")
+    print("client entries: {} / 28".format(len(core11 & client)))
+    print("server handlers/local implementations: {} / 28".format(28 - len(missing11_server)))
+    if missing11_client or missing11_server:
+        print("FAIL: Vulkan 1.1 client gap: " + ", ".join(missing11_client))
+        print("FAIL: Vulkan 1.1 server gap: " + ", ".join(missing11_server))
+        return 1
+    missing12_client = sorted(core12 - client)
+    missing12_server = sorted(core12 - server)
+    print("Vulkan 1.2 core: 13")
+    print("client entries: {} / 13".format(len(core12 & client)))
+    print("server handlers/local implementations: {} / 13".format(13 - len(missing12_server)))
+    if missing12_client or missing12_server:
+        print("FAIL: Vulkan 1.2 client gap: " + ", ".join(missing12_client))
+        print("FAIL: Vulkan 1.2 server gap: " + ", ".join(missing12_server))
+        return 1
     if args.icd:
         library = ctypes.CDLL(os.path.abspath(args.icd))
         get_proc = library.vk_icdGetInstanceProcAddr
@@ -105,6 +133,14 @@ def main():
         if runtime_missing != expected_missing:
             print("FAIL: compiled ICD proc-address gap differs from reviewed inventory")
             print("  runtime gap: " + ", ".join(runtime_missing))
+            return 1
+        runtime11_missing = sorted(name for name in core11 if not get_proc(None, name.encode()))
+        if runtime11_missing:
+            print("FAIL: compiled ICD Vulkan 1.1 gap: " + ", ".join(runtime11_missing))
+            return 1
+        runtime12_missing = sorted(name for name in core12 if not get_proc(None, name.encode()))
+        if runtime12_missing:
+            print("FAIL: compiled ICD Vulkan 1.2 gap: " + ", ".join(runtime12_missing))
             return 1
     return 0
 

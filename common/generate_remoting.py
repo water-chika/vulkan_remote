@@ -52,7 +52,7 @@ def generate(registry_xml, output):
     # Include an explicit schema revision as well as opcode names. Handler or
     # marshalling changes can otherwise leave two wire-incompatible builds
     # presenting the same digest and accepting each other.
-    schema_revision = 'wire-v10-mapped-memory-alignment'
+    schema_revision = 'wire-v16-vulkan12-public-spirv15'
     with open(registry_xml, 'rb') as registry_file:
         registry_sha256 = hashlib.sha256(registry_file.read()).hexdigest()
     digest = hashlib.sha256(

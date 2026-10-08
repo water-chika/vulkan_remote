@@ -15,6 +15,7 @@
 #include <unistd.h>
 #endif
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 
@@ -35,6 +36,7 @@
 #include <vulkan/vulkan.h>
 
 #include "entry_table.hpp"
+#include "extension_contract.hpp"
 #include "marshal.hpp"
 #include "remote_objects.hpp"
 #include "remoting_commands.inl"
@@ -51,8 +53,19 @@ using remoting::Writer;
 bool valid_instance_pnext(const void* pnext) {
     const VkBaseInStructure* current = static_cast<const VkBaseInStructure*>(pnext);
     while (current) {
-        if (current->sType != VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO) return false;
-        current = current->pNext;
+        if (current->sType == VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO) {
+            const auto* loader = reinterpret_cast<const VkLayerInstanceCreateInfo*>(current);
+            current = static_cast<const VkBaseInStructure*>(loader->pNext);
+            continue;
+        }
+        // Loader tooling may splice callback descriptors into the ICD chain.
+        // They are client-process diagnostics and have no server-side meaning.
+        if (current->sType == VK_STRUCTURE_TYPE_DEBUG_REPORT_CALLBACK_CREATE_INFO_EXT ||
+            current->sType == VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT) {
+            current = current->pNext;
+            continue;
+        }
+        return false;
     }
     return true;
 }
@@ -64,6 +77,12 @@ RemoteInstance* to_instance(VkInstance instance) {
 bool round_trip(RemoteInstance* instance, Opcode opcode, const Writer& request,
                 std::vector<char>* reply) {
     return instance->connection.round_trip(opcode, request, reply);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL EnumerateInstanceVersion(uint32_t* pApiVersion) {
+    if (pApiVersion == nullptr) return VK_ERROR_INITIALIZATION_FAILED;
+    *pApiVersion = VK_API_VERSION_1_2;
+    return VK_SUCCESS;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL EnumerateInstanceLayerProperties(uint32_t* count,
@@ -87,10 +106,12 @@ VKAPI_ATTR VkResult VKAPI_CALL EnumerateInstanceExtensionProperties(const char* 
     static const char* const kNames[] = {
         VK_KHR_SURFACE_EXTENSION_NAME,
         VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
+        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
     };
     static const uint32_t kVersions[] = {
         VK_KHR_SURFACE_SPEC_VERSION,
         VK_KHR_WIN32_SURFACE_SPEC_VERSION,
+        remoting::kProperties2InstanceExtension.spec_version,
     };
 #else
     // The only WSI platform this driver ever offers is Wayland, because that
@@ -99,10 +120,12 @@ VKAPI_ATTR VkResult VKAPI_CALL EnumerateInstanceExtensionProperties(const char* 
     static const char* const kNames[] = {
         VK_KHR_SURFACE_EXTENSION_NAME,
         VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME,
+        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
     };
     static const uint32_t kVersions[] = {
         VK_KHR_SURFACE_SPEC_VERSION,
         VK_KHR_WAYLAND_SURFACE_SPEC_VERSION,
+        remoting::kProperties2InstanceExtension.spec_version,
     };
 #endif
     constexpr uint32_t kCount = sizeof(kNames) / sizeof(kNames[0]);
@@ -130,8 +153,8 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo* pCreat
     // own allocation policy; accepting callbacks preserves valid core usage.
     (void)pAllocator;
     // The loader may insert private link information in pNext before calling an
-    // ICD. Reject any public chain node: this Vulkan 1.0 boundary does not yet
-    // encode extension structures, and silently dropping one changes semantics.
+    // ICD. Accept loader-owned diagnostic nodes locally, but reject any other
+    // public chain node rather than silently changing its semantics.
     if (!valid_instance_pnext(pCreateInfo->pNext)) return VK_ERROR_EXTENSION_NOT_PRESENT;
     // It also permits instance creation at a newer loader API version while
     // individual physical devices report their own lower apiVersion. Capability
@@ -140,10 +163,12 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo* pCreat
 
 #if defined(_WIN32)
     static const char* const supported_extensions[] = {
-        VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
+        VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
+        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME};
 #else
     static const char* const supported_extensions[] = {
-        VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME};
+        VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME,
+        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME};
 #endif
     if (pCreateInfo->enabledLayerCount != 0) return VK_ERROR_LAYER_NOT_PRESENT;
     for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; ++i) {
@@ -167,6 +192,8 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo* pCreat
     }
 
     auto* instance = new RemoteInstance();
+    instance->requested_api_version = pCreateInfo->pApplicationInfo
+        ? pCreateInfo->pApplicationInfo->apiVersion : VK_API_VERSION_1_0;
     // Required of every dispatchable handle an ICD creates.
     set_loader_magic_value(instance);
 
@@ -194,6 +221,20 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo* pCreat
             delete instance;
             return VK_ERROR_INCOMPATIBLE_DRIVER;
         }
+        Reader negotiated(reply.data(), reply.size());
+        negotiated.u32();
+        std::string digest;
+        negotiated.string(&digest);
+        negotiated.u32();
+        instance->server_loader_api_version = negotiated.u32();
+        if (!negotiated.ok() || digest != remoting::kCommandSetDigest) {
+            remoting::close_socket(instance->connection.fd);
+            delete instance;
+            return VK_ERROR_INCOMPATIBLE_DRIVER;
+        }
+        instance->negotiated_api_version = (std::min)(
+            (std::min)(instance->requested_api_version, instance->server_loader_api_version),
+            VK_API_VERSION_1_2);
     }
 
     for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; ++i) {
@@ -224,6 +265,7 @@ const DeviceEntry* get_icd_core_entries(size_t* count) {
         D(DestroyInstance),
         D(EnumerateInstanceExtensionProperties),
         D(EnumerateInstanceLayerProperties),
+        D(EnumerateInstanceVersion),
 #undef D
     };
     *count = sizeof(kEntries) / sizeof(kEntries[0]);

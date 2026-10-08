@@ -27,7 +27,7 @@ using remoting::mark_oneway_error;
         InfoType info{};                                                                    \
         if (!c.reader.ok() || device == VK_NULL_HANDLE ||                                   \
             !ReadFn(c.reader, arena, c.tables, &info)) {                                    \
-            c.writer.u32(static_cast<uint32_t>(Status::DecodeError));                       \
+            c.reply_status(Status::DecodeError);                                           \
             return;                                                                         \
         }                                                                                   \
         VkType obj = VK_NULL_HANDLE;                                                        \
@@ -74,7 +74,9 @@ void handle_AllocateCommandBuffers(Session& c) {
     c.writer.i32(result);
     c.writer.u32(info.commandBufferCount);
     for (uint32_t i = 0; i < info.commandBufferCount; ++i) {
-        c.writer.handle(result == VK_SUCCESS ? c.tables.command_buffers.add(cbs[i]) : 0);
+        const uint64_t id = result == VK_SUCCESS ? c.tables.command_buffers.add(cbs[i]) : 0;
+        if (id) c.tables.command_buffer_devices[cbs[i]] = device;
+        c.writer.handle(id);
     }
     c.reply();
 }
@@ -89,7 +91,10 @@ void handle_FreeCommandBuffers(Session& c) {
         return;
     }
     std::vector<VkCommandBuffer> cbs(count);
-    for (uint32_t i = 0; i < count; ++i) cbs[i] = c.tables.command_buffers.take(c.reader.handle());
+    for (uint32_t i = 0; i < count; ++i) {
+        cbs[i] = c.tables.command_buffers.take(c.reader.handle());
+        c.tables.command_buffer_devices.erase(cbs[i]);
+    }
     if (!c.reader.ok() || device == VK_NULL_HANDLE) {
         mark_oneway_error(c);
         return;
@@ -128,6 +133,8 @@ void handle_ResetCommandBuffer(Session& c) {
     if (vkResetCommandBuffer(cb, flags) != VK_SUCCESS) mark_oneway_error(c);
 }
 
+void handle_TrimCommandPool(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());VkCommandPool p=c.tables.command_pool(c.reader.handle());auto flags=c.reader.u32();if(!c.reader.ok()||!d||!p){mark_oneway_error(c);return;}auto fn=reinterpret_cast<PFN_vkTrimCommandPool>(vkGetDeviceProcAddr(d,"vkTrimCommandPool"));if(!fn){mark_oneway_error(c);return;}fn(d,p,flags);}
+
 void handle_ResetCommandPool(Session& c) {
     VkDevice device = c.tables.devices.get(c.reader.handle());
     VkCommandPool pool = c.tables.command_pool(c.reader.handle());
@@ -158,6 +165,16 @@ void handle_CmdBeginRenderPass(Session& c) {
     vkCmdBeginRenderPass(cb, &info, static_cast<VkSubpassContents>(contents));
 }
 
+void handle_CmdNextSubpass(Session& c) {
+    VkCommandBuffer cb = c.tables.command_buffer(c.reader.handle());
+    const int32_t contents = c.reader.i32();
+    if (!c.reader.ok() || cb == VK_NULL_HANDLE) {
+        mark_oneway_error(c);
+        return;
+    }
+    vkCmdNextSubpass(cb, static_cast<VkSubpassContents>(contents));
+}
+
 void handle_CmdEndRenderPass(Session& c) {
     VkCommandBuffer cb = c.tables.command_buffer(c.reader.handle());
     if (!c.reader.ok() || cb == VK_NULL_HANDLE) {
@@ -166,6 +183,73 @@ void handle_CmdEndRenderPass(Session& c) {
     }
     vkCmdEndRenderPass(cb);
 }
+
+void handle_CmdBeginRenderPass2(Session& c) {
+    VkCommandBuffer cb = c.tables.command_buffer(c.reader.handle());
+    Arena arena;
+    VkRenderPassBeginInfo render_pass_begin{};
+    VkSubpassBeginInfo subpass_begin{};
+    if (!c.reader.ok() || cb == VK_NULL_HANDLE ||
+        !remoting::read_RenderPassBeginInfo(c.reader, arena, c.tables, &render_pass_begin) ||
+        !remoting::read_SubpassBeginInfo(c.reader, arena, c.tables, &subpass_begin)) {
+        mark_oneway_error(c);
+        return;
+    }
+    const auto owner = c.tables.command_buffer_devices.find(cb);
+    if (owner == c.tables.command_buffer_devices.end()) { mark_oneway_error(c); return; }
+    auto fn = reinterpret_cast<PFN_vkCmdBeginRenderPass2KHR>(
+        vkGetDeviceProcAddr(owner->second, "vkCmdBeginRenderPass2KHR"));
+    if (!fn) { mark_oneway_error(c); return; }
+    fn(cb, &render_pass_begin, &subpass_begin);
+}
+
+void handle_CmdNextSubpass2(Session& c) {
+    VkCommandBuffer cb = c.tables.command_buffer(c.reader.handle());
+    Arena arena;
+    VkSubpassBeginInfo subpass_begin{};
+    VkSubpassEndInfo subpass_end{};
+    if (!c.reader.ok() || cb == VK_NULL_HANDLE ||
+        !remoting::read_SubpassBeginInfo(c.reader, arena, c.tables, &subpass_begin) ||
+        !remoting::read_SubpassEndInfo(c.reader, arena, c.tables, &subpass_end)) {
+        mark_oneway_error(c);
+        return;
+    }
+    const auto owner = c.tables.command_buffer_devices.find(cb);
+    if (owner == c.tables.command_buffer_devices.end()) { mark_oneway_error(c); return; }
+    auto fn = reinterpret_cast<PFN_vkCmdNextSubpass2KHR>(
+        vkGetDeviceProcAddr(owner->second, "vkCmdNextSubpass2KHR"));
+    if (!fn) { mark_oneway_error(c); return; }
+    fn(cb, &subpass_begin, &subpass_end);
+}
+
+void handle_CmdEndRenderPass2(Session& c) {
+    VkCommandBuffer cb = c.tables.command_buffer(c.reader.handle());
+    Arena arena;
+    VkSubpassEndInfo subpass_end{};
+    if (!c.reader.ok() || cb == VK_NULL_HANDLE ||
+        !remoting::read_SubpassEndInfo(c.reader, arena, c.tables, &subpass_end)) {
+        mark_oneway_error(c);
+        return;
+    }
+    const auto owner = c.tables.command_buffer_devices.find(cb);
+    if (owner == c.tables.command_buffer_devices.end()) { mark_oneway_error(c); return; }
+    auto fn = reinterpret_cast<PFN_vkCmdEndRenderPass2KHR>(
+        vkGetDeviceProcAddr(owner->second, "vkCmdEndRenderPass2KHR"));
+    if (!fn) { mark_oneway_error(c); return; }
+    fn(cb, &subpass_end);
+}
+
+void handle_CmdSetFragmentShadingRateKHR(Session& c) {
+    VkCommandBuffer cb=c.tables.command_buffer(c.reader.handle()); VkExtent2D size{c.reader.u32(),c.reader.u32()};
+    VkFragmentShadingRateCombinerOpKHR ops[2]{static_cast<VkFragmentShadingRateCombinerOpKHR>(c.reader.i32()),static_cast<VkFragmentShadingRateCombinerOpKHR>(c.reader.i32())};
+    auto owner=c.tables.command_buffer_devices.find(cb);
+    if(!c.reader.ok()||cb==VK_NULL_HANDLE||owner==c.tables.command_buffer_devices.end()){mark_oneway_error(c);return;}
+    auto fn=reinterpret_cast<PFN_vkCmdSetFragmentShadingRateKHR>(vkGetDeviceProcAddr(owner->second,"vkCmdSetFragmentShadingRateKHR"));
+    if(!fn){mark_oneway_error(c);return;} fn(cb,&size,ops);
+}
+
+void handle_CmdSetDeviceMask(Session& c){VkCommandBuffer cb=c.tables.command_buffer(c.reader.handle());uint32_t mask=c.reader.u32();if(!c.reader.ok()||!cb){mark_oneway_error(c);return;}auto d=c.tables.command_buffer_devices.find(cb);if(d==c.tables.command_buffer_devices.end()){mark_oneway_error(c);return;}auto fn=reinterpret_cast<PFN_vkCmdSetDeviceMask>(vkGetDeviceProcAddr(d->second,"vkCmdSetDeviceMask"));if(!fn){mark_oneway_error(c);return;}fn(cb,mask);}
+void handle_CmdDispatchBase(Session& c){VkCommandBuffer cb=c.tables.command_buffer(c.reader.handle());uint32_t bx=c.reader.u32(),by=c.reader.u32(),bz=c.reader.u32(),x=c.reader.u32(),y=c.reader.u32(),z=c.reader.u32();if(!c.reader.ok()||!cb){mark_oneway_error(c);return;}auto d=c.tables.command_buffer_devices.find(cb);if(d==c.tables.command_buffer_devices.end()){mark_oneway_error(c);return;}auto fn=reinterpret_cast<PFN_vkCmdDispatchBase>(vkGetDeviceProcAddr(d->second,"vkCmdDispatchBase"));if(!fn){mark_oneway_error(c);return;}fn(cb,bx,by,bz,x,y,z);}
 
 void handle_CmdBindPipeline(Session& c) {
     VkCommandBuffer cb = c.tables.command_buffer(c.reader.handle());
@@ -543,6 +627,32 @@ void handle_CmdClearColorImage(Session& c) {
                         ranges.data());
 }
 
+void handle_CmdDrawIndirect(Session& c){auto cb=c.tables.command_buffer(c.reader.handle());auto b=c.tables.buffer(c.reader.handle());auto off=c.reader.u64();auto n=c.reader.u32();auto stride=c.reader.u32();if(!c.reader.ok()||!cb||!b){mark_oneway_error(c);return;}vkCmdDrawIndirect(cb,b,off,n,stride);}
+void handle_CmdDrawIndexedIndirect(Session& c){auto cb=c.tables.command_buffer(c.reader.handle());auto b=c.tables.buffer(c.reader.handle());auto off=c.reader.u64();auto n=c.reader.u32();auto stride=c.reader.u32();if(!c.reader.ok()||!cb||!b){mark_oneway_error(c);return;}vkCmdDrawIndexedIndirect(cb,b,off,n,stride);}
+void handle_CmdDispatchIndirect(Session& c){auto cb=c.tables.command_buffer(c.reader.handle());auto b=c.tables.buffer(c.reader.handle());auto off=c.reader.u64();if(!c.reader.ok()||!cb||!b){mark_oneway_error(c);return;}vkCmdDispatchIndirect(cb,b,off);}
+void handle_CmdDrawIndirectCount(Session& c){auto cb=c.tables.command_buffer(c.reader.handle());auto b=c.tables.buffer(c.reader.handle());auto off=c.reader.u64();auto count=c.tables.buffer(c.reader.handle());auto countOffset=c.reader.u64();auto maxDrawCount=c.reader.u32();auto stride=c.reader.u32();if(!c.reader.ok()||!cb||!b||!count){mark_oneway_error(c);return;}auto fn=reinterpret_cast<PFN_vkCmdDrawIndirectCount>(vkGetDeviceProcAddr(c.tables.command_buffer_devices[cb],"vkCmdDrawIndirectCount"));if(!fn){mark_oneway_error(c);return;}fn(cb,b,off,count,countOffset,maxDrawCount,stride);}
+void handle_CmdDrawIndexedIndirectCount(Session& c){auto cb=c.tables.command_buffer(c.reader.handle());auto b=c.tables.buffer(c.reader.handle());auto off=c.reader.u64();auto count=c.tables.buffer(c.reader.handle());auto countOffset=c.reader.u64();auto maxDrawCount=c.reader.u32();auto stride=c.reader.u32();if(!c.reader.ok()||!cb||!b||!count){mark_oneway_error(c);return;}auto fn=reinterpret_cast<PFN_vkCmdDrawIndexedIndirectCount>(vkGetDeviceProcAddr(c.tables.command_buffer_devices[cb],"vkCmdDrawIndexedIndirectCount"));if(!fn){mark_oneway_error(c);return;}fn(cb,b,off,count,countOffset,maxDrawCount,stride);}
+void handle_CmdExecuteCommands(Session& c){auto cb=c.tables.command_buffer(c.reader.handle());auto n=c.reader.u32();if(n>remoting::kMaxArrayElements||!count_fits(c.reader,n,8)){mark_oneway_error(c);return;}std::vector<VkCommandBuffer> v(n);for(uint32_t i=0;i<n;++i)v[i]=c.tables.command_buffer(c.reader.handle());if(!c.reader.ok()||!cb){mark_oneway_error(c);return;}vkCmdExecuteCommands(cb,n,v.data());}
+void handle_CmdBeginQuery(Session& c){auto cb=c.tables.command_buffer(c.reader.handle());auto p=c.tables.query_pool(c.reader.handle());auto q=c.reader.u32();auto f=c.reader.u32();if(!c.reader.ok()||!cb||!p){mark_oneway_error(c);return;}vkCmdBeginQuery(cb,p,q,f);}
+void handle_CmdEndQuery(Session& c){auto cb=c.tables.command_buffer(c.reader.handle());auto p=c.tables.query_pool(c.reader.handle());auto q=c.reader.u32();if(!c.reader.ok()||!cb||!p){mark_oneway_error(c);return;}vkCmdEndQuery(cb,p,q);}
+void handle_CmdResetQueryPool(Session& c){auto cb=c.tables.command_buffer(c.reader.handle());auto p=c.tables.query_pool(c.reader.handle());auto first=c.reader.u32();auto n=c.reader.u32();if(!c.reader.ok()||!cb||!p){mark_oneway_error(c);return;}vkCmdResetQueryPool(cb,p,first,n);}
+void handle_CmdWriteTimestamp(Session& c){auto cb=c.tables.command_buffer(c.reader.handle());auto stage=c.reader.u32();auto p=c.tables.query_pool(c.reader.handle());auto q=c.reader.u32();if(!c.reader.ok()||!cb||!p){mark_oneway_error(c);return;}vkCmdWriteTimestamp(cb,static_cast<VkPipelineStageFlagBits>(stage),p,q);}
+void handle_CmdCopyQueryPoolResults(Session& c){auto cb=c.tables.command_buffer(c.reader.handle());auto p=c.tables.query_pool(c.reader.handle());auto first=c.reader.u32();auto n=c.reader.u32();auto b=c.tables.buffer(c.reader.handle());auto off=c.reader.u64();auto stride=c.reader.u64();auto flags=c.reader.u32();if(!c.reader.ok()||!cb||!p||!b){mark_oneway_error(c);return;}vkCmdCopyQueryPoolResults(cb,p,first,n,b,off,stride,flags);}
+void handle_CmdSetEvent(Session& c){auto cb=c.tables.command_buffer(c.reader.handle());auto e=c.tables.event(c.reader.handle());auto stage=c.reader.u32();if(!c.reader.ok()||!cb||!e){mark_oneway_error(c);return;}vkCmdSetEvent(cb,e,stage);}
+void handle_CmdResetEvent(Session& c){auto cb=c.tables.command_buffer(c.reader.handle());auto e=c.tables.event(c.reader.handle());auto stage=c.reader.u32();if(!c.reader.ok()||!cb||!e){mark_oneway_error(c);return;}vkCmdResetEvent(cb,e,stage);}
+void handle_CmdSetLineWidth(Session& c){auto cb=c.tables.command_buffer(c.reader.handle());auto v=c.reader.f32();if(!c.reader.ok()||!cb){mark_oneway_error(c);return;}vkCmdSetLineWidth(cb,v);}
+void handle_CmdSetDepthBias(Session& c){auto cb=c.tables.command_buffer(c.reader.handle());auto a=c.reader.f32(),b=c.reader.f32(),d=c.reader.f32();if(!c.reader.ok()||!cb){mark_oneway_error(c);return;}vkCmdSetDepthBias(cb,a,b,d);}
+void handle_CmdSetBlendConstants(Session& c){auto cb=c.tables.command_buffer(c.reader.handle());float v[4];for(auto&x:v)x=c.reader.f32();if(!c.reader.ok()||!cb){mark_oneway_error(c);return;}vkCmdSetBlendConstants(cb,v);}
+void handle_CmdSetDepthBounds(Session& c){auto cb=c.tables.command_buffer(c.reader.handle());auto a=c.reader.f32(),b=c.reader.f32();if(!c.reader.ok()||!cb){mark_oneway_error(c);return;}vkCmdSetDepthBounds(cb,a,b);}
+void handle_CmdSetStencilCompareMask(Session& c){auto cb=c.tables.command_buffer(c.reader.handle());auto f=c.reader.u32(),m=c.reader.u32();if(!c.reader.ok()||!cb){mark_oneway_error(c);return;}vkCmdSetStencilCompareMask(cb,f,m);}
+void handle_CmdSetStencilWriteMask(Session& c){auto cb=c.tables.command_buffer(c.reader.handle());auto f=c.reader.u32(),m=c.reader.u32();if(!c.reader.ok()||!cb){mark_oneway_error(c);return;}vkCmdSetStencilWriteMask(cb,f,m);}
+void handle_CmdSetStencilReference(Session& c){auto cb=c.tables.command_buffer(c.reader.handle());auto f=c.reader.u32(),m=c.reader.u32();if(!c.reader.ok()||!cb){mark_oneway_error(c);return;}vkCmdSetStencilReference(cb,f,m);}
+
+void handle_CmdResolveImage(Session& c){auto cb=c.tables.command_buffer(c.reader.handle());auto src=c.tables.image(c.reader.handle());auto sl=static_cast<VkImageLayout>(c.reader.i32());auto dst=c.tables.image(c.reader.handle());auto dl=static_cast<VkImageLayout>(c.reader.i32());auto n=c.reader.u32();if(n>remoting::kMaxArrayElements||!count_fits(c.reader,n,64)){mark_oneway_error(c);return;}std::vector<VkImageResolve> v(n);for(auto&r:v){r.srcSubresource.aspectMask=c.reader.u32();r.srcSubresource.mipLevel=c.reader.u32();r.srcSubresource.baseArrayLayer=c.reader.u32();r.srcSubresource.layerCount=c.reader.u32();r.srcOffset.x=c.reader.i32();r.srcOffset.y=c.reader.i32();r.srcOffset.z=c.reader.i32();r.dstSubresource.aspectMask=c.reader.u32();r.dstSubresource.mipLevel=c.reader.u32();r.dstSubresource.baseArrayLayer=c.reader.u32();r.dstSubresource.layerCount=c.reader.u32();r.dstOffset.x=c.reader.i32();r.dstOffset.y=c.reader.i32();r.dstOffset.z=c.reader.i32();r.extent.width=c.reader.u32();r.extent.height=c.reader.u32();r.extent.depth=c.reader.u32();}if(!c.reader.ok()||!cb||!src||!dst){mark_oneway_error(c);return;}vkCmdResolveImage(cb,src,sl,dst,dl,n,v.data());}
+void handle_CmdClearDepthStencilImage(Session& c){auto cb=c.tables.command_buffer(c.reader.handle());auto image=c.tables.image(c.reader.handle());auto layout=static_cast<VkImageLayout>(c.reader.i32());VkClearDepthStencilValue value{c.reader.f32(),c.reader.u32()};auto n=c.reader.u32();if(n>remoting::kMaxArrayElements||!count_fits(c.reader,n,20)){mark_oneway_error(c);return;}std::vector<VkImageSubresourceRange> v(n);for(auto&r:v){r.aspectMask=c.reader.u32();r.baseMipLevel=c.reader.u32();r.levelCount=c.reader.u32();r.baseArrayLayer=c.reader.u32();r.layerCount=c.reader.u32();}if(!c.reader.ok()||!cb||!image){mark_oneway_error(c);return;}vkCmdClearDepthStencilImage(cb,image,layout,&value,n,v.data());}
+void handle_CmdClearAttachments(Session& c){auto cb=c.tables.command_buffer(c.reader.handle());auto an=c.reader.u32();if(an>remoting::kMaxArrayElements||!count_fits(c.reader,an,12)){mark_oneway_error(c);return;}std::vector<VkClearAttachment>a(an);bool ok=true;for(auto&x:a){x.aspectMask=c.reader.u32();x.colorAttachment=c.reader.u32();std::vector<char>b;if(!c.reader.bytes(&b,sizeof(VkClearValue))||b.size()!=sizeof(VkClearValue)){ok=false;break;}memcpy(&x.clearValue,b.data(),sizeof(VkClearValue));}auto rn=ok?c.reader.u32():0;if(rn>remoting::kMaxArrayElements||!count_fits(c.reader,rn,24)){mark_oneway_error(c);return;}std::vector<VkClearRect>r(rn);for(auto&x:r){x.rect.offset.x=c.reader.i32();x.rect.offset.y=c.reader.i32();x.rect.extent.width=c.reader.u32();x.rect.extent.height=c.reader.u32();x.baseArrayLayer=c.reader.u32();x.layerCount=c.reader.u32();}if(!ok||!c.reader.ok()||!cb){mark_oneway_error(c);return;}vkCmdClearAttachments(cb,an,a.data(),rn,r.data());}
+void handle_CmdWaitEvents(Session& c){auto cb=c.tables.command_buffer(c.reader.handle());auto en=c.reader.u32();if(en>remoting::kMaxArrayElements||!count_fits(c.reader,en,8)){mark_oneway_error(c);return;}std::vector<VkEvent>events(en);for(auto&e:events)e=c.tables.event(c.reader.handle());auto src=c.reader.u32(),dst=c.reader.u32();Arena arena;auto mn=c.reader.u32();if(mn>remoting::kMaxArrayElements||!count_fits(c.reader,mn,4)){mark_oneway_error(c);return;}std::vector<VkMemoryBarrier>m(mn);bool ok=true;for(auto&x:m)ok=ok&&remoting::read_MemoryBarrier(c.reader,arena,c.tables,&x);auto bn=ok?c.reader.u32():0;if(bn>remoting::kMaxArrayElements||!count_fits(c.reader,bn,4)){mark_oneway_error(c);return;}std::vector<VkBufferMemoryBarrier>b(bn);for(auto&x:b)ok=ok&&remoting::read_BufferMemoryBarrier(c.reader,arena,c.tables,&x);auto in=ok?c.reader.u32():0;if(in>remoting::kMaxArrayElements||!count_fits(c.reader,in,4)){mark_oneway_error(c);return;}std::vector<VkImageMemoryBarrier>i(in);for(auto&x:i)ok=ok&&remoting::read_ImageMemoryBarrier(c.reader,arena,c.tables,&x);if(!ok||!c.reader.ok()||!cb){mark_oneway_error(c);return;}vkCmdWaitEvents(cb,en,events.data(),src,dst,mn,m.data(),bn,b.data(),in,i.data());}
+
 void handle_CmdPushConstants(Session& c) {
     VkCommandBuffer cb = c.tables.command_buffer(c.reader.handle());
     VkPipelineLayout layout = c.tables.pipeline_layout(c.reader.handle());
@@ -568,8 +678,16 @@ REGISTER_HANDLER(vkBeginCommandBuffer, handle_BeginCommandBuffer);
 REGISTER_HANDLER(vkEndCommandBuffer, handle_EndCommandBuffer);
 REGISTER_HANDLER(vkResetCommandBuffer, handle_ResetCommandBuffer);
 REGISTER_HANDLER(vkResetCommandPool, handle_ResetCommandPool);
+REGISTER_HANDLER(vkTrimCommandPool, handle_TrimCommandPool);
 REGISTER_HANDLER(vkCmdBeginRenderPass, handle_CmdBeginRenderPass);
+REGISTER_HANDLER(vkCmdNextSubpass, handle_CmdNextSubpass);
 REGISTER_HANDLER(vkCmdEndRenderPass, handle_CmdEndRenderPass);
+REGISTER_HANDLER(vkCmdBeginRenderPass2, handle_CmdBeginRenderPass2);
+REGISTER_HANDLER(vkCmdNextSubpass2, handle_CmdNextSubpass2);
+REGISTER_HANDLER(vkCmdEndRenderPass2, handle_CmdEndRenderPass2);
+REGISTER_HANDLER(vkCmdSetFragmentShadingRateKHR, handle_CmdSetFragmentShadingRateKHR);
+REGISTER_HANDLER(vkCmdSetDeviceMask, handle_CmdSetDeviceMask);
+REGISTER_HANDLER(vkCmdDispatchBase, handle_CmdDispatchBase);
 REGISTER_HANDLER(vkCmdBindPipeline, handle_CmdBindPipeline);
 REGISTER_HANDLER(vkCmdBindDescriptorSets, handle_CmdBindDescriptorSets);
 REGISTER_HANDLER(vkCmdBindVertexBuffers, handle_CmdBindVertexBuffers);
@@ -579,6 +697,26 @@ REGISTER_HANDLER(vkCmdSetScissor, handle_CmdSetScissor);
 REGISTER_HANDLER(vkCmdDraw, handle_CmdDraw);
 REGISTER_HANDLER(vkCmdDispatch, handle_CmdDispatch);
 REGISTER_HANDLER(vkCmdDrawIndexed, handle_CmdDrawIndexed);
+REGISTER_HANDLER(vkCmdDrawIndirect, handle_CmdDrawIndirect);
+REGISTER_HANDLER(vkCmdDrawIndexedIndirect, handle_CmdDrawIndexedIndirect);
+REGISTER_HANDLER(vkCmdDrawIndirectCount, handle_CmdDrawIndirectCount);
+REGISTER_HANDLER(vkCmdDrawIndexedIndirectCount, handle_CmdDrawIndexedIndirectCount);
+REGISTER_HANDLER(vkCmdDispatchIndirect, handle_CmdDispatchIndirect);
+REGISTER_HANDLER(vkCmdExecuteCommands, handle_CmdExecuteCommands);
+REGISTER_HANDLER(vkCmdBeginQuery, handle_CmdBeginQuery);
+REGISTER_HANDLER(vkCmdEndQuery, handle_CmdEndQuery);
+REGISTER_HANDLER(vkCmdResetQueryPool, handle_CmdResetQueryPool);
+REGISTER_HANDLER(vkCmdWriteTimestamp, handle_CmdWriteTimestamp);
+REGISTER_HANDLER(vkCmdCopyQueryPoolResults, handle_CmdCopyQueryPoolResults);
+REGISTER_HANDLER(vkCmdSetEvent, handle_CmdSetEvent);
+REGISTER_HANDLER(vkCmdResetEvent, handle_CmdResetEvent);
+REGISTER_HANDLER(vkCmdSetLineWidth, handle_CmdSetLineWidth);
+REGISTER_HANDLER(vkCmdSetDepthBias, handle_CmdSetDepthBias);
+REGISTER_HANDLER(vkCmdSetBlendConstants, handle_CmdSetBlendConstants);
+REGISTER_HANDLER(vkCmdSetDepthBounds, handle_CmdSetDepthBounds);
+REGISTER_HANDLER(vkCmdSetStencilCompareMask, handle_CmdSetStencilCompareMask);
+REGISTER_HANDLER(vkCmdSetStencilWriteMask, handle_CmdSetStencilWriteMask);
+REGISTER_HANDLER(vkCmdSetStencilReference, handle_CmdSetStencilReference);
 REGISTER_HANDLER(vkCmdPipelineBarrier, handle_CmdPipelineBarrier);
 REGISTER_HANDLER(vkCmdCopyBuffer, handle_CmdCopyBuffer);
 REGISTER_HANDLER(vkCmdCopyBufferToImage, handle_CmdCopyBufferToImage);
@@ -588,4 +726,8 @@ REGISTER_HANDLER(vkCmdBlitImage, handle_CmdBlitImage);
 REGISTER_HANDLER(vkCmdFillBuffer, handle_CmdFillBuffer);
 REGISTER_HANDLER(vkCmdUpdateBuffer, handle_CmdUpdateBuffer);
 REGISTER_HANDLER(vkCmdClearColorImage, handle_CmdClearColorImage);
+REGISTER_HANDLER(vkCmdClearDepthStencilImage, handle_CmdClearDepthStencilImage);
+REGISTER_HANDLER(vkCmdClearAttachments, handle_CmdClearAttachments);
+REGISTER_HANDLER(vkCmdResolveImage, handle_CmdResolveImage);
+REGISTER_HANDLER(vkCmdWaitEvents, handle_CmdWaitEvents);
 REGISTER_HANDLER(vkCmdPushConstants, handle_CmdPushConstants);

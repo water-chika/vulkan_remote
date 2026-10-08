@@ -6,6 +6,7 @@
 // command buffers move with the vkCmd* recording functions instead, into
 // handlers_command.cpp, since they are meaningless without each other.
 
+#include <algorithm>
 #include <cstring>
 #include <vector>
 
@@ -94,6 +95,14 @@ void handle_GetDeviceQueue(Session& c) {
     c.reply();
 }
 
+void handle_GetDeviceQueue2(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());VkDeviceQueueInfo2 info{VK_STRUCTURE_TYPE_DEVICE_QUEUE_INFO_2};info.flags=c.reader.u32();info.queueFamilyIndex=c.reader.u32();info.queueIndex=c.reader.u32();if(!c.reader.ok()||!d){c.reply_status(Status::DecodeError);return;}auto fn=reinterpret_cast<PFN_vkGetDeviceQueue2>(vkGetDeviceProcAddr(d,"vkGetDeviceQueue2"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}VkQueue q=VK_NULL_HANDLE;fn(d,&info,&q);c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.handle(q?c.tables.queues.add(q):0);c.reply();}
+void handle_GetDeviceGroupPeerMemoryFeatures(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());uint32_t heap=c.reader.u32(),local=c.reader.u32(),remote=c.reader.u32();if(!c.reader.ok()||!d){c.reply_status(Status::DecodeError);return;}auto fn=reinterpret_cast<PFN_vkGetDeviceGroupPeerMemoryFeatures>(vkGetDeviceProcAddr(d,"vkGetDeviceGroupPeerMemoryFeatures"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}VkPeerMemoryFeatureFlags flags=0;fn(d,heap,local,remote,&flags);c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.u32(flags);c.reply();}
+
+void handle_GetSemaphoreCounterValue(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());VkSemaphore sem=c.tables.semaphore(c.reader.handle());if(!c.reader.ok()||!d||!sem){c.reply_status(Status::DecodeError);return;}auto fn=reinterpret_cast<PFN_vkGetSemaphoreCounterValue>(vkGetDeviceProcAddr(d,"vkGetSemaphoreCounterValue"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}uint64_t value=0;VkResult result=fn(d,sem,&value);c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.i32(result);c.writer.u64(value);c.reply();}
+void handle_WaitSemaphores(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());VkSemaphoreWaitInfo info{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};info.flags=c.reader.u32();info.semaphoreCount=c.reader.u32();if(info.semaphoreCount>remoting::kMaxArrayElements||!count_fits(c.reader,info.semaphoreCount,16)){c.reply_status(Status::DecodeError);return;}std::vector<VkSemaphore>sems(info.semaphoreCount);std::vector<uint64_t>values(info.semaphoreCount);bool ok=d!=VK_NULL_HANDLE;for(uint32_t i=0;i<info.semaphoreCount;++i){sems[i]=c.tables.semaphore(c.reader.handle());values[i]=c.reader.u64();ok=ok&&sems[i]!=VK_NULL_HANDLE;}uint64_t timeout=c.reader.u64();if(!ok||!c.reader.ok()){c.reply_status(Status::DecodeError);return;}info.pSemaphores=sems.data();info.pValues=values.data();auto fn=reinterpret_cast<PFN_vkWaitSemaphores>(vkGetDeviceProcAddr(d,"vkWaitSemaphores"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.i32(fn(d,&info,timeout));c.reply();}
+void handle_SignalSemaphore(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());VkSemaphoreSignalInfo info{VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO};info.semaphore=c.tables.semaphore(c.reader.handle());info.value=c.reader.u64();if(!c.reader.ok()||!d||!info.semaphore){c.reply_status(Status::DecodeError);return;}auto fn=reinterpret_cast<PFN_vkSignalSemaphore>(vkGetDeviceProcAddr(d,"vkSignalSemaphore"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.i32(fn(d,&info));c.reply();}
+void handle_ResetQueryPool(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());VkQueryPool pool=c.tables.query_pool(c.reader.handle());uint32_t first=c.reader.u32(),count=c.reader.u32();if(!c.reader.ok()||!d||!pool){mark_oneway_error(c);return;}auto fn=reinterpret_cast<PFN_vkResetQueryPool>(vkGetDeviceProcAddr(d,"vkResetQueryPool"));if(!fn){mark_oneway_error(c);return;}fn(d,pool,first,count);}
+
 void handle_QueueSubmit(Session& c) {
     const uint64_t queue_id = c.reader.handle();
     VkQueue queue = c.tables.queues.get(queue_id);
@@ -113,11 +122,14 @@ void handle_QueueSubmit(Session& c) {
     std::vector<std::vector<VkPipelineStageFlags>> wait_stages(submit_count);
     std::vector<std::vector<VkCommandBuffer>> command_buffers(submit_count);
     std::vector<std::vector<VkSemaphore>> signal_semaphores(submit_count);
+    Arena arena;
 
     bool ok = c.reader.ok() && queue != VK_NULL_HANDLE;
     for (uint32_t i = 0; ok && i < submit_count; ++i) {
         VkSubmitInfo& s = submits[i];
         s.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        ok = remoting::read_pnext_chain(c.reader, arena, c.tables,
+                                        remoting::PNextContext::Submit, &s.pNext);
 
         const uint32_t wait_count = c.reader.u32();
         if (ok && !count_fits(c.reader, wait_count, 12)) ok = false;
@@ -165,6 +177,14 @@ void handle_QueueSubmit(Session& c) {
     c.writer.u32(c.oneway_errors);
     c.oneway_errors = 0;
     c.reply();
+}
+
+void handle_QueueBindSparse(Session& c) {
+    VkQueue queue=c.tables.queues.get(c.reader.handle());VkFence fence=c.tables.fence(c.reader.handle());uint32_t n=c.reader.u32();
+    if(n>remoting::kMaxArrayElements||!count_fits(c.reader,n,16)){c.reply_status(Status::DecodeError);return;}
+    std::vector<VkBindSparseInfo> infos(n);std::vector<std::vector<VkSemaphore>> waits(n),signals(n);std::vector<std::vector<VkSparseBufferMemoryBindInfo>> buffers(n);std::vector<std::vector<std::vector<VkSparseMemoryBind>>> buffer_binds(n);std::vector<std::vector<VkSparseImageOpaqueMemoryBindInfo>> opaques(n);std::vector<std::vector<std::vector<VkSparseMemoryBind>>> opaque_binds(n);std::vector<std::vector<VkSparseImageMemoryBindInfo>> images(n);std::vector<std::vector<std::vector<VkSparseImageMemoryBind>>> image_binds(n);bool ok=queue!=VK_NULL_HANDLE;
+    Arena arena;for(uint32_t i=0;i<n&&ok;++i){auto&x=infos[i];x.sType=VK_STRUCTURE_TYPE_BIND_SPARSE_INFO;ok=remoting::read_pnext_chain(c.reader,arena,c.tables,remoting::PNextContext::Submit,&x.pNext);uint32_t wn=c.reader.u32();if(wn>remoting::kMaxArrayElements||!count_fits(c.reader,wn,8)){ok=false;break;}waits[i].resize(wn);for(auto&v:waits[i])v=c.tables.semaphore(c.reader.handle());x.waitSemaphoreCount=wn;x.pWaitSemaphores=waits[i].data();uint32_t bn=c.reader.u32();if(bn>remoting::kMaxArrayElements||!count_fits(c.reader,bn,12)){ok=false;break;}buffers[i].resize(bn);buffer_binds[i].resize(bn);for(uint32_t j=0;j<bn;++j){auto&bi=buffers[i][j];bi.buffer=c.tables.buffer(c.reader.handle());uint32_t kcount=c.reader.u32();if(kcount>remoting::kMaxArrayElements||!count_fits(c.reader,kcount,36)){ok=false;break;}buffer_binds[i][j].resize(kcount);for(auto&b:buffer_binds[i][j]){b.resourceOffset=c.reader.u64();b.size=c.reader.u64();b.memory=c.tables.memory(c.reader.handle());b.memoryOffset=c.reader.u64();b.flags=c.reader.u32();}bi.bindCount=kcount;bi.pBinds=buffer_binds[i][j].data();}x.bufferBindCount=bn;x.pBufferBinds=buffers[i].data();uint32_t on=c.reader.u32();if(on>remoting::kMaxArrayElements||!count_fits(c.reader,on,12)){ok=false;break;}opaques[i].resize(on);opaque_binds[i].resize(on);for(uint32_t j=0;j<on;++j){auto&bi=opaques[i][j];bi.image=c.tables.image(c.reader.handle());uint32_t kcount=c.reader.u32();if(kcount>remoting::kMaxArrayElements||!count_fits(c.reader,kcount,36)){ok=false;break;}opaque_binds[i][j].resize(kcount);for(auto&b:opaque_binds[i][j]){b.resourceOffset=c.reader.u64();b.size=c.reader.u64();b.memory=c.tables.memory(c.reader.handle());b.memoryOffset=c.reader.u64();b.flags=c.reader.u32();}bi.bindCount=kcount;bi.pBinds=opaque_binds[i][j].data();}x.imageOpaqueBindCount=on;x.pImageOpaqueBinds=opaques[i].data();uint32_t in=c.reader.u32();if(in>remoting::kMaxArrayElements||!count_fits(c.reader,in,12)){ok=false;break;}images[i].resize(in);image_binds[i].resize(in);for(uint32_t j=0;j<in;++j){auto&bi=images[i][j];bi.image=c.tables.image(c.reader.handle());uint32_t kcount=c.reader.u32();if(kcount>remoting::kMaxArrayElements||!count_fits(c.reader,kcount,56)){ok=false;break;}image_binds[i][j].resize(kcount);for(auto&b:image_binds[i][j]){b.subresource.aspectMask=c.reader.u32();b.subresource.mipLevel=c.reader.u32();b.subresource.arrayLayer=c.reader.u32();b.offset.x=c.reader.i32();b.offset.y=c.reader.i32();b.offset.z=c.reader.i32();b.extent.width=c.reader.u32();b.extent.height=c.reader.u32();b.extent.depth=c.reader.u32();b.memory=c.tables.memory(c.reader.handle());b.memoryOffset=c.reader.u64();b.flags=c.reader.u32();}bi.bindCount=kcount;bi.pBinds=image_binds[i][j].data();}x.imageBindCount=in;x.pImageBinds=images[i].data();uint32_t sn=c.reader.u32();if(sn>remoting::kMaxArrayElements||!count_fits(c.reader,sn,8)){ok=false;break;}signals[i].resize(sn);for(auto&v:signals[i])v=c.tables.semaphore(c.reader.handle());x.signalSemaphoreCount=sn;x.pSignalSemaphores=signals[i].data();ok=ok&&c.reader.ok();}
+    if(!ok){c.reply_status(Status::DecodeError);return;}VkResult result=vkQueueBindSparse(queue,n,infos.data(),fence);c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.i32(result);c.writer.u32(c.oneway_errors);c.oneway_errors=0;c.reply();
 }
 
 void handle_QueueWaitIdle(Session& c) {
@@ -319,7 +339,7 @@ void handle_DestroySemaphore(Session& c) {
         InfoType info{};                                                                    \
         if (!c.reader.ok() || device == VK_NULL_HANDLE ||                                   \
             !ReadFn(c.reader, arena, c.tables, &info)) {                                    \
-            c.writer.u32(static_cast<uint32_t>(Status::DecodeError));                       \
+            c.reply_status(Status::DecodeError);                                           \
             return;                                                                         \
         }                                                                                   \
         VkType obj = VK_NULL_HANDLE;                                                        \
@@ -355,12 +375,41 @@ SERVER_CREATE(ImageView, VkImageView, VkImageViewCreateInfo, remoting::read_Imag
               vkCreateImageView, image_views)
 SERVER_DESTROY(ImageView, VkImageView, vkDestroyImageView, image_views)
 
+SERVER_CREATE(BufferView, VkBufferView, VkBufferViewCreateInfo,
+              remoting::read_BufferViewCreateInfo, vkCreateBufferView, buffer_views)
+SERVER_DESTROY(BufferView, VkBufferView, vkDestroyBufferView, buffer_views)
+
+SERVER_CREATE(Event, VkEvent, VkEventCreateInfo, remoting::read_EventCreateInfo,
+              vkCreateEvent, events)
+SERVER_DESTROY(Event, VkEvent, vkDestroyEvent, events)
+
+SERVER_CREATE(QueryPool, VkQueryPool, VkQueryPoolCreateInfo,
+              remoting::read_QueryPoolCreateInfo, vkCreateQueryPool, query_pools)
+SERVER_DESTROY(QueryPool, VkQueryPool, vkDestroyQueryPool, query_pools)
+
 SERVER_CREATE(Sampler, VkSampler, VkSamplerCreateInfo, remoting::read_SamplerCreateInfo,
               vkCreateSampler, samplers)
 SERVER_DESTROY(Sampler, VkSampler, vkDestroySampler, samplers)
 
-SERVER_CREATE(ShaderModule, VkShaderModule, VkShaderModuleCreateInfo,
-              remoting::read_ShaderModuleCreateInfo, vkCreateShaderModule, shader_modules)
+void handle_CreateShaderModule(Session& c) {
+    const uint64_t device_id = c.reader.handle();
+    VkDevice device = c.tables.devices.get(device_id);
+    Arena arena;
+    VkShaderModuleCreateInfo info{};
+    // Decode the complete request even when the handle is invalid so malformed
+    // shader payloads are classified deterministically and never reach Vulkan.
+    if (!remoting::read_ShaderModuleCreateInfo(c.reader, arena, c.tables, &info) ||
+        !c.reader.ok() || c.reader.remaining() != 0 || device == VK_NULL_HANDLE) {
+        c.reply_status(Status::DecodeError);
+        return;
+    }
+    VkShaderModule module = VK_NULL_HANDLE;
+    const VkResult result = vkCreateShaderModule(device, &info, nullptr, &module);
+    c.writer.u32(static_cast<uint32_t>(Status::Ok));
+    c.writer.i32(result);
+    c.writer.handle(result == VK_SUCCESS ? c.tables.shader_modules.add(module) : 0);
+    c.reply();
+}
 SERVER_DESTROY(ShaderModule, VkShaderModule, vkDestroyShaderModule, shader_modules)
 
 SERVER_CREATE(PipelineCache, VkPipelineCache, VkPipelineCacheCreateInfo,
@@ -375,6 +424,15 @@ SERVER_DESTROY(Pipeline, VkPipeline, vkDestroyPipeline, pipelines)
 
 SERVER_CREATE(RenderPass, VkRenderPass, VkRenderPassCreateInfo, remoting::read_RenderPassCreateInfo,
               vkCreateRenderPass, render_passes)
+
+void handle_CreateRenderPass2(Session& c) {
+    VkDevice device=c.tables.devices.get(c.reader.handle()); Arena arena; VkRenderPassCreateInfo2 info{};
+    if(!c.reader.ok()||device==VK_NULL_HANDLE||!remoting::read_RenderPassCreateInfo2(c.reader,arena,c.tables,&info)){c.reply_status(Status::DecodeError);return;}
+    auto fn=reinterpret_cast<PFN_vkCreateRenderPass2>(vkGetDeviceProcAddr(device,"vkCreateRenderPass2"));
+    if(!fn) fn=reinterpret_cast<PFN_vkCreateRenderPass2>(vkGetDeviceProcAddr(device,"vkCreateRenderPass2KHR"));
+    if(!fn){c.reply_status(Status::UnsupportedCommand);return;}
+    VkRenderPass pass=VK_NULL_HANDLE;VkResult result=fn(device,&info,nullptr,&pass);c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.i32(result);c.writer.handle(result==VK_SUCCESS?c.tables.render_passes.add(pass):0);c.reply();
+}
 SERVER_DESTROY(RenderPass, VkRenderPass, vkDestroyRenderPass, render_passes)
 
 SERVER_CREATE(Framebuffer, VkFramebuffer, VkFramebufferCreateInfo,
@@ -431,6 +489,113 @@ void handle_GetImageSubresourceLayout(Session& c) {
     c.writer.u64(layout.arrayPitch);
     c.writer.u64(layout.depthPitch);
     c.reply();
+}
+
+void handle_EventOperation(Session& c, int operation) {
+    VkDevice device = c.tables.devices.get(c.reader.handle());
+    VkEvent event = c.tables.event(c.reader.handle());
+    if (!c.reader.ok() || device == VK_NULL_HANDLE || event == VK_NULL_HANDLE) {
+        c.reply_status(Status::DecodeError); return;
+    }
+    VkResult result = operation == 0 ? vkGetEventStatus(device, event)
+                      : operation == 1 ? vkSetEvent(device, event)
+                                       : vkResetEvent(device, event);
+    c.writer.u32(static_cast<uint32_t>(Status::Ok)); c.writer.i32(result); c.reply();
+}
+void handle_GetEventStatus(Session& c) { handle_EventOperation(c, 0); }
+void handle_SetEvent(Session& c) { handle_EventOperation(c, 1); }
+void handle_ResetEvent(Session& c) { handle_EventOperation(c, 2); }
+
+void handle_GetQueryPoolResults(Session& c) {
+    VkDevice device = c.tables.devices.get(c.reader.handle());
+    VkQueryPool pool = c.tables.query_pool(c.reader.handle());
+    const uint32_t first = c.reader.u32(), count = c.reader.u32();
+    const uint64_t size64 = c.reader.u64(), stride = c.reader.u64();
+    const VkQueryResultFlags flags = c.reader.u32();
+    if (!c.reader.ok() || device == VK_NULL_HANDLE || pool == VK_NULL_HANDLE ||
+        size64 > 64u * 1024u * 1024u || size64 > SIZE_MAX) {
+        c.reply_status(Status::DecodeError); return;
+    }
+    std::vector<char> data(static_cast<size_t>(size64));
+    VkResult result = vkGetQueryPoolResults(device, pool, first, count, data.size(),
+                                            data.empty() ? nullptr : data.data(), stride, flags);
+    c.writer.u32(static_cast<uint32_t>(Status::Ok)); c.writer.i32(result);
+    c.writer.bytes(data.data(), data.size()); c.reply();
+}
+
+void handle_GetPipelineCacheData(Session& c) {
+    VkDevice device = c.tables.devices.get(c.reader.handle());
+    VkPipelineCache cache = c.tables.pipeline_cache(c.reader.handle());
+    const uint64_t capacity64 = c.reader.u64(); const bool want_data = c.reader.u32() != 0;
+    if (!c.reader.ok() || device == VK_NULL_HANDLE || cache == VK_NULL_HANDLE ||
+        capacity64 > 64u * 1024u * 1024u || capacity64 > SIZE_MAX) {
+        c.reply_status(Status::DecodeError); return;
+    }
+    size_t size = static_cast<size_t>(capacity64);
+    std::vector<char> data(want_data ? size : 0);
+    VkResult result = vkGetPipelineCacheData(device, cache, &size,
+                                             want_data && !data.empty() ? data.data() : nullptr);
+    if (data.size() > size) data.resize(size);
+    c.writer.u32(static_cast<uint32_t>(Status::Ok)); c.writer.i32(result); c.writer.u64(size);
+    c.writer.bytes(data.data(), data.size()); c.reply();
+}
+
+void handle_MergePipelineCaches(Session& c) {
+    VkDevice device = c.tables.devices.get(c.reader.handle());
+    VkPipelineCache dst = c.tables.pipeline_cache(c.reader.handle());
+    const uint32_t count = c.reader.u32();
+    if (count > remoting::kMaxArrayElements || !count_fits(c.reader, count, 8)) {
+        c.reply_status(Status::DecodeError); return;
+    }
+    std::vector<VkPipelineCache> sources(count);
+    bool valid = device != VK_NULL_HANDLE && dst != VK_NULL_HANDLE;
+    for (uint32_t i = 0; i < count; ++i) {
+        sources[i] = c.tables.pipeline_cache(c.reader.handle()); valid &= sources[i] != VK_NULL_HANDLE;
+    }
+    if (!c.reader.ok() || !valid) { c.reply_status(Status::DecodeError); return; }
+    VkResult result = vkMergePipelineCaches(device, dst, count, sources.data());
+    c.writer.u32(static_cast<uint32_t>(Status::Ok)); c.writer.i32(result); c.reply();
+}
+
+void handle_GetRenderAreaGranularity(Session& c) {
+    VkDevice device = c.tables.devices.get(c.reader.handle());
+    VkRenderPass pass = c.tables.render_pass(c.reader.handle());
+    if (!c.reader.ok() || device == VK_NULL_HANDLE || pass == VK_NULL_HANDLE) {
+        c.reply_status(Status::DecodeError); return;
+    }
+    VkExtent2D value{}; vkGetRenderAreaGranularity(device, pass, &value);
+    c.writer.u32(static_cast<uint32_t>(Status::Ok)); c.writer.u32(value.width);
+    c.writer.u32(value.height); c.reply();
+}
+
+void handle_FreeDescriptorSets(Session& c) {
+    VkDevice device = c.tables.devices.get(c.reader.handle());
+    VkDescriptorPool pool = c.tables.descriptor_pool(c.reader.handle());
+    const uint32_t count = c.reader.u32();
+    if (count > remoting::kMaxArrayElements || !count_fits(c.reader, count, 8)) {
+        c.reply_status(Status::DecodeError); return;
+    }
+    std::vector<VkDescriptorSet> sets(count);
+    for (uint32_t i = 0; i < count; ++i) sets[i] = c.tables.descriptor_sets.get(c.reader.handle());
+    if (!c.reader.ok() || device == VK_NULL_HANDLE || pool == VK_NULL_HANDLE) {
+        c.reply_status(Status::DecodeError); return;
+    }
+    const VkResult result = vkFreeDescriptorSets(device, pool, count, sets.data());
+    if (result == VK_SUCCESS) for (VkDescriptorSet set : sets)
+        for (size_t i = 0; i < c.tables.descriptor_sets.all().size(); ++i)
+            if (c.tables.descriptor_sets.all()[i] == set) c.tables.descriptor_sets.take(i + 1);
+    c.writer.u32(static_cast<uint32_t>(Status::Ok)); c.writer.i32(result); c.reply();
+}
+
+void handle_ResetDescriptorPool(Session& c) {
+    VkDevice device = c.tables.devices.get(c.reader.handle());
+    VkDescriptorPool pool = c.tables.descriptor_pool(c.reader.handle());
+    const VkDescriptorPoolResetFlags flags = c.reader.u32();
+    if (!c.reader.ok() || device == VK_NULL_HANDLE || pool == VK_NULL_HANDLE) {
+        c.reply_status(Status::DecodeError); return;
+    }
+    const VkResult result = vkResetDescriptorPool(device, pool, flags);
+    c.writer.u32(static_cast<uint32_t>(Status::Ok)); c.writer.i32(result); c.reply();
 }
 
 void handle_CreateGraphicsPipelines(Session& c) {
@@ -532,6 +697,13 @@ void handle_AllocateDescriptorSets(Session& c) {
     c.reply();
 }
 
+void handle_CreateDescriptorUpdateTemplate(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());Arena arena;VkDescriptorUpdateTemplateCreateInfo info{};if(!d||!remoting::read_DescriptorUpdateTemplateCreateInfo(c.reader,arena,c.tables,&info)){c.reply_status(Status::DecodeError);return;}auto fn=reinterpret_cast<PFN_vkCreateDescriptorUpdateTemplate>(vkGetDeviceProcAddr(d,"vkCreateDescriptorUpdateTemplate"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}VkDescriptorUpdateTemplate object=VK_NULL_HANDLE;VkResult result=fn(d,&info,nullptr,&object);uint64_t id=result==VK_SUCCESS?c.tables.descriptor_update_templates.add(object):0;if(id){c.tables.descriptor_update_template_owners[id]=d;c.tables.descriptor_update_template_entries[id]=std::vector<VkDescriptorUpdateTemplateEntry>(info.pDescriptorUpdateEntries,info.pDescriptorUpdateEntries+info.descriptorUpdateEntryCount);}c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.i32(result);c.writer.handle(id);c.reply();}
+void handle_DestroyDescriptorUpdateTemplate(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());uint64_t id=c.reader.handle();auto owner=c.tables.descriptor_update_template_owners.find(id);if(!c.reader.ok()||!d||owner==c.tables.descriptor_update_template_owners.end()||owner->second!=d){mark_oneway_error(c);return;}auto object=c.tables.descriptor_update_templates.take(id);auto fn=reinterpret_cast<PFN_vkDestroyDescriptorUpdateTemplate>(vkGetDeviceProcAddr(d,"vkDestroyDescriptorUpdateTemplate"));if(!fn||!object){mark_oneway_error(c);return;}fn(d,object,nullptr);c.tables.descriptor_update_template_owners.erase(id);c.tables.descriptor_update_template_entries.erase(id);}
+void handle_UpdateDescriptorSetWithTemplate(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());VkDescriptorSet set=c.tables.descriptor_set(c.reader.handle());uint64_t id=c.reader.handle();auto object=c.tables.descriptor_update_templates.get(id);auto meta=c.tables.descriptor_update_template_entries.find(id);uint32_t n=c.reader.u32();if(!d||!set||!object||meta==c.tables.descriptor_update_template_entries.end()||n!=meta->second.size()){mark_oneway_error(c);return;}size_t size=0;for(const auto&e:meta->second){if(e.descriptorCount>remoting::kMaxArrayElements){mark_oneway_error(c);return;}size_t elem=(e.descriptorType==VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER||e.descriptorType==VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)?sizeof(VkBufferView):(e.descriptorType<=VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT&&e.descriptorType!=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER&&e.descriptorType!=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER&&e.descriptorType!=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC&&e.descriptorType!=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)?sizeof(VkDescriptorImageInfo):sizeof(VkDescriptorBufferInfo);if(e.descriptorCount&&(e.offset>SIZE_MAX-(e.descriptorCount-1)*e.stride||e.offset+(e.descriptorCount-1)*e.stride>SIZE_MAX-elem)){mark_oneway_error(c);return;}size=std::max(size,e.offset+(e.descriptorCount?e.descriptorCount-1:0)*e.stride+(e.descriptorCount?elem:0));}if(size>64u*1024u*1024u){mark_oneway_error(c);return;}std::vector<char>data(size);for(const auto&e:meta->second){uint32_t count=c.reader.u32();auto type=static_cast<VkDescriptorType>(c.reader.i32());if(count!=e.descriptorCount||type!=e.descriptorType){mark_oneway_error(c);return;}for(uint32_t i=0;i<count;++i){char*p=data.data()+e.offset+i*e.stride;if(type==VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER||type==VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER){*reinterpret_cast<VkBufferView*>(p)=c.tables.buffer_view(c.reader.handle());}else if(type==VK_DESCRIPTOR_TYPE_SAMPLER||type==VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER||type==VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE||type==VK_DESCRIPTOR_TYPE_STORAGE_IMAGE||type==VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT){auto*x=reinterpret_cast<VkDescriptorImageInfo*>(p);x->sampler=c.tables.sampler(c.reader.handle());x->imageView=c.tables.image_view(c.reader.handle());x->imageLayout=static_cast<VkImageLayout>(c.reader.i32());}else{auto*x=reinterpret_cast<VkDescriptorBufferInfo*>(p);x->buffer=c.tables.buffer(c.reader.handle());x->offset=c.reader.u64();x->range=c.reader.u64();}}}if(!c.reader.ok()||c.reader.remaining()){mark_oneway_error(c);return;}auto fn=reinterpret_cast<PFN_vkUpdateDescriptorSetWithTemplate>(vkGetDeviceProcAddr(d,"vkUpdateDescriptorSetWithTemplate"));if(!fn){mark_oneway_error(c);return;}fn(d,set,object,data.data());}
+void handle_GetDescriptorSetLayoutSupport(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());Arena arena;VkDescriptorSetLayoutCreateInfo info{};if(!d||!remoting::read_DescriptorSetLayoutCreateInfo(c.reader,arena,c.tables,&info)){c.reply_status(Status::DecodeError);return;}VkDescriptorSetLayoutSupport out{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_SUPPORT};auto fn=reinterpret_cast<PFN_vkGetDescriptorSetLayoutSupport>(vkGetDeviceProcAddr(d,"vkGetDescriptorSetLayoutSupport"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}fn(d,&info,&out);c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.u32(out.supported);c.reply();}
+void handle_CreateSamplerYcbcrConversion(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());Arena arena;VkSamplerYcbcrConversionCreateInfo info{};if(!d||!remoting::read_SamplerYcbcrConversionCreateInfo(c.reader,arena,c.tables,&info)){c.reply_status(Status::DecodeError);return;}auto fn=reinterpret_cast<PFN_vkCreateSamplerYcbcrConversion>(vkGetDeviceProcAddr(d,"vkCreateSamplerYcbcrConversion"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}VkSamplerYcbcrConversion object=VK_NULL_HANDLE;VkResult result=fn(d,&info,nullptr,&object);uint64_t id=result==VK_SUCCESS?c.tables.sampler_ycbcr_conversions.add(object):0;if(id)c.tables.sampler_ycbcr_conversion_owners[id]=d;c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.i32(result);c.writer.handle(id);c.reply();}
+void handle_DestroySamplerYcbcrConversion(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());uint64_t id=c.reader.handle();auto owner=c.tables.sampler_ycbcr_conversion_owners.find(id);if(!c.reader.ok()||!d||owner==c.tables.sampler_ycbcr_conversion_owners.end()||owner->second!=d){mark_oneway_error(c);return;}auto object=c.tables.sampler_ycbcr_conversions.take(id);auto fn=reinterpret_cast<PFN_vkDestroySamplerYcbcrConversion>(vkGetDeviceProcAddr(d,"vkDestroySamplerYcbcrConversion"));if(!fn||!object){mark_oneway_error(c);return;}fn(d,object,nullptr);c.tables.sampler_ycbcr_conversion_owners.erase(id);}
+
 void handle_UpdateDescriptorSets(Session& c) {
     const uint64_t device_id = c.reader.handle();
     VkDevice device = c.tables.devices.get(device_id);
@@ -567,7 +739,10 @@ void handle_UpdateDescriptorSets(Session& c) {
 REGISTER_HANDLER(vkCreateDevice, handle_CreateDevice);
 REGISTER_HANDLER(vkDestroyDevice, handle_DestroyDevice);
 REGISTER_HANDLER(vkGetDeviceQueue, handle_GetDeviceQueue);
+REGISTER_HANDLER(vkGetDeviceQueue2, handle_GetDeviceQueue2);
+REGISTER_HANDLER(vkGetDeviceGroupPeerMemoryFeatures, handle_GetDeviceGroupPeerMemoryFeatures);
 REGISTER_HANDLER(vkQueueSubmit, handle_QueueSubmit);
+REGISTER_HANDLER(vkQueueBindSparse, handle_QueueBindSparse);
 REGISTER_HANDLER(vkQueueWaitIdle, handle_QueueWaitIdle);
 REGISTER_HANDLER(vkDeviceWaitIdle, handle_DeviceWaitIdle);
 REGISTER_HANDLER(vkCreateFence, handle_CreateFence);
@@ -577,22 +752,40 @@ REGISTER_HANDLER(vkGetFenceStatus, handle_GetFenceStatus);
 REGISTER_HANDLER(vkWaitForFences, handle_WaitForFences);
 REGISTER_HANDLER(vkCreateSemaphore, handle_CreateSemaphore);
 REGISTER_HANDLER(vkDestroySemaphore, handle_DestroySemaphore);
+REGISTER_HANDLER(vkGetSemaphoreCounterValue, handle_GetSemaphoreCounterValue);
+REGISTER_HANDLER(vkWaitSemaphores, handle_WaitSemaphores);
+REGISTER_HANDLER(vkSignalSemaphore, handle_SignalSemaphore);
+REGISTER_HANDLER(vkResetQueryPool, handle_ResetQueryPool);
 REGISTER_HANDLER(vkCreateBuffer, handle_CreateBuffer);
 REGISTER_HANDLER(vkDestroyBuffer, handle_DestroyBuffer);
 REGISTER_HANDLER(vkCreateImage, handle_CreateImage);
 REGISTER_HANDLER(vkDestroyImage, handle_DestroyImage);
 REGISTER_HANDLER(vkCreateImageView, handle_CreateImageView);
 REGISTER_HANDLER(vkDestroyImageView, handle_DestroyImageView);
+REGISTER_HANDLER(vkCreateBufferView, handle_CreateBufferView);
+REGISTER_HANDLER(vkDestroyBufferView, handle_DestroyBufferView);
+REGISTER_HANDLER(vkCreateEvent, handle_CreateEvent);
+REGISTER_HANDLER(vkDestroyEvent, handle_DestroyEvent);
+REGISTER_HANDLER(vkGetEventStatus, handle_GetEventStatus);
+REGISTER_HANDLER(vkSetEvent, handle_SetEvent);
+REGISTER_HANDLER(vkResetEvent, handle_ResetEvent);
+REGISTER_HANDLER(vkCreateQueryPool, handle_CreateQueryPool);
+REGISTER_HANDLER(vkDestroyQueryPool, handle_DestroyQueryPool);
+REGISTER_HANDLER(vkGetQueryPoolResults, handle_GetQueryPoolResults);
 REGISTER_HANDLER(vkCreateSampler, handle_CreateSampler);
 REGISTER_HANDLER(vkDestroySampler, handle_DestroySampler);
 REGISTER_HANDLER(vkCreateShaderModule, handle_CreateShaderModule);
 REGISTER_HANDLER(vkDestroyShaderModule, handle_DestroyShaderModule);
 REGISTER_HANDLER(vkCreatePipelineCache, handle_CreatePipelineCache);
 REGISTER_HANDLER(vkDestroyPipelineCache, handle_DestroyPipelineCache);
+REGISTER_HANDLER(vkGetPipelineCacheData, handle_GetPipelineCacheData);
+REGISTER_HANDLER(vkMergePipelineCaches, handle_MergePipelineCaches);
 REGISTER_HANDLER(vkCreatePipelineLayout, handle_CreatePipelineLayout);
 REGISTER_HANDLER(vkDestroyPipelineLayout, handle_DestroyPipelineLayout);
 REGISTER_HANDLER(vkDestroyPipeline, handle_DestroyPipeline);
 REGISTER_HANDLER(vkCreateRenderPass, handle_CreateRenderPass);
+REGISTER_HANDLER(vkGetRenderAreaGranularity, handle_GetRenderAreaGranularity);
+REGISTER_HANDLER(vkCreateRenderPass2, handle_CreateRenderPass2);
 REGISTER_HANDLER(vkDestroyRenderPass, handle_DestroyRenderPass);
 REGISTER_HANDLER(vkCreateFramebuffer, handle_CreateFramebuffer);
 REGISTER_HANDLER(vkDestroyFramebuffer, handle_DestroyFramebuffer);
@@ -604,4 +797,12 @@ REGISTER_HANDLER(vkGetImageSubresourceLayout, handle_GetImageSubresourceLayout);
 REGISTER_HANDLER(vkCreateGraphicsPipelines, handle_CreateGraphicsPipelines);
 REGISTER_HANDLER(vkCreateComputePipelines, handle_CreateComputePipelines);
 REGISTER_HANDLER(vkAllocateDescriptorSets, handle_AllocateDescriptorSets);
+REGISTER_HANDLER(vkFreeDescriptorSets, handle_FreeDescriptorSets);
+REGISTER_HANDLER(vkResetDescriptorPool, handle_ResetDescriptorPool);
 REGISTER_HANDLER(vkUpdateDescriptorSets, handle_UpdateDescriptorSets);
+REGISTER_HANDLER(vkCreateDescriptorUpdateTemplate, handle_CreateDescriptorUpdateTemplate);
+REGISTER_HANDLER(vkDestroyDescriptorUpdateTemplate, handle_DestroyDescriptorUpdateTemplate);
+REGISTER_HANDLER(vkUpdateDescriptorSetWithTemplate, handle_UpdateDescriptorSetWithTemplate);
+REGISTER_HANDLER(vkGetDescriptorSetLayoutSupport, handle_GetDescriptorSetLayoutSupport);
+REGISTER_HANDLER(vkCreateSamplerYcbcrConversion, handle_CreateSamplerYcbcrConversion);
+REGISTER_HANDLER(vkDestroySamplerYcbcrConversion, handle_DestroySamplerYcbcrConversion);

@@ -63,6 +63,9 @@ struct RemoteInstance {
     Connection connection;
     std::vector<struct RemotePhysicalDevice*> physical_devices;
     std::unordered_set<std::string> enabled_extensions;
+    uint32_t requested_api_version = VK_API_VERSION_1_0;
+    uint32_t server_loader_api_version = VK_API_VERSION_1_0;
+    uint32_t negotiated_api_version = VK_API_VERSION_1_0;
 #if defined(_WIN32)
     std::mutex surface_input_mutex;
     std::unordered_map<uint64_t, uintptr_t> surface_windows;
@@ -77,7 +80,13 @@ struct RemotePhysicalDevice {
     RemoteInstance* instance = nullptr;
     uint64_t remote_id = 0;
     VkDeviceSize map_alignment = 1;
+    uint32_t api_version = VK_API_VERSION_1_0;
     std::vector<VkMemoryPropertyFlags> memory_type_flags;
+};
+
+struct DescriptorTemplateMetadata {
+    VkDescriptorUpdateTemplateType type = VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET;
+    std::vector<VkDescriptorUpdateTemplateEntry> entries;
 };
 
 struct RemoteDevice {
@@ -85,11 +94,13 @@ struct RemoteDevice {
     RemoteInstance* instance = nullptr;
     uint64_t remote_id = 0;
     std::unordered_set<std::string> enabled_extensions;
+    uint32_t api_version = VK_API_VERSION_1_0;
     std::vector<struct RemoteQueue*> queues;
     std::vector<struct RemoteCommandBuffer*> command_buffers;
     std::vector<MappedRange> mapped;
     std::mutex mapped_mutex;
     std::unordered_map<uint64_t, MemoryAllocation> memories;
+    std::unordered_map<uint64_t, DescriptorTemplateMetadata> descriptor_templates;
     VkDeviceSize map_alignment = 1;
     std::vector<VkMemoryPropertyFlags> memory_type_flags;
 

@@ -76,9 +76,11 @@ struct ObjectTables final : public HandleResolver {
     Table<VkBuffer> buffers;
     Table<VkImage> images;
     Table<VkImageView> image_views;
+    Table<VkBufferView> buffer_views;
     Table<VkDeviceMemory> memories;
     std::unordered_map<uint64_t, ServerMemory> memory_metadata;
     std::unordered_map<VkDevice, VkPhysicalDevice> device_physical_devices;
+    std::unordered_map<VkCommandBuffer, VkDevice> command_buffer_devices;
     Table<VkRenderPass> render_passes;
     Table<VkFramebuffer> framebuffers;
     Table<VkShaderModule> shader_modules;
@@ -89,8 +91,15 @@ struct ObjectTables final : public HandleResolver {
     Table<VkDescriptorPool> descriptor_pools;
     Table<VkDescriptorSet> descriptor_sets;
     Table<VkSampler> samplers;
+    Table<VkDescriptorUpdateTemplate> descriptor_update_templates;
+    Table<VkSamplerYcbcrConversion> sampler_ycbcr_conversions;
+    std::unordered_map<uint64_t, VkDevice> descriptor_update_template_owners;
+    std::unordered_map<uint64_t, std::vector<VkDescriptorUpdateTemplateEntry>> descriptor_update_template_entries;
+    std::unordered_map<uint64_t, VkDevice> sampler_ycbcr_conversion_owners;
     Table<VkSemaphore> semaphores;
     Table<VkFence> fences;
+    Table<VkEvent> events;
+    Table<VkQueryPool> query_pools;
     Table<VkSurfaceKHR> surfaces;
     Table<VkSwapchainKHR> swapchains;
 
@@ -111,6 +120,7 @@ struct ObjectTables final : public HandleResolver {
     VkBuffer buffer(uint64_t id) const override { return buffers.get(id); }
     VkImage image(uint64_t id) const override { return images.get(id); }
     VkImageView image_view(uint64_t id) const override { return image_views.get(id); }
+    VkBufferView buffer_view(uint64_t id) const override { return buffer_views.get(id); }
     VkDeviceMemory memory(uint64_t id) const override { return memories.get(id); }
     VkRenderPass render_pass(uint64_t id) const override { return render_passes.get(id); }
     VkFramebuffer framebuffer(uint64_t id) const override { return framebuffers.get(id); }
@@ -126,8 +136,13 @@ struct ObjectTables final : public HandleResolver {
     VkDescriptorPool descriptor_pool(uint64_t id) const override { return descriptor_pools.get(id); }
     VkDescriptorSet descriptor_set(uint64_t id) const override { return descriptor_sets.get(id); }
     VkSampler sampler(uint64_t id) const override { return samplers.get(id); }
+    VkSamplerYcbcrConversion sampler_ycbcr_conversion(uint64_t id) const override {
+        return sampler_ycbcr_conversions.get(id);
+    }
     VkSemaphore semaphore(uint64_t id) const override { return semaphores.get(id); }
     VkFence fence(uint64_t id) const override { return fences.get(id); }
+    VkEvent event(uint64_t id) const override { return events.get(id); }
+    VkQueryPool query_pool(uint64_t id) const override { return query_pools.get(id); }
     VkSurfaceKHR surface(uint64_t id) const override { return surfaces.get(id); }
     VkSwapchainKHR swapchain(uint64_t id) const override { return swapchains.get(id); }
     VkCommandPool command_pool(uint64_t id) const override { return command_pools.get(id); }
