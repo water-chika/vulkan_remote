@@ -12,6 +12,7 @@ Stdlib only, so it runs anywhere the server builds.
 """
 
 import argparse
+import ctypes
 import os
 import re
 import socket
@@ -88,6 +89,10 @@ def unhandled_opcode(build_dir):
 def encode_string(text):
     raw = text.encode('utf-8')
     return struct.pack('<I', len(raw)) + raw
+
+
+def pack_blob(data):
+    return struct.pack('<I', len(data)) + data
 
 
 def decode_u32(payload, offset=0):
@@ -300,20 +305,180 @@ def test_short_payload_for_known_command(server, build_dir):
             raise Failure('short payload was not reported as a decode error')
 
 
-def test_compute_pipeline_count_is_bounded(server, build_dir):
-    """A hostile outer createInfoCount must be rejected before allocation."""
-    with connect(server.port) as sock:
-        if handshake(sock, read_digest(build_dir), build_dir) != STATUS_OK:
-            raise Failure('handshake failed')
+def test_pipeline_counts_are_bounded(server, build_dir):
+    """Hostile outer createInfoCount values get synchronous DecodeError replies."""
+    digest = read_digest(build_dir)
+    for name in ('vkCreateGraphicsPipelines', 'vkCreateComputePipelines'):
+        with connect(server.port) as sock:
+            if handshake(sock, digest, build_dir) != STATUS_OK:
+                raise Failure('handshake failed')
 
-        expected_opcode = read_opcode(build_dir, 'vkCreateComputePipelines')
-        payload = struct.pack('<QQI', 0, 0, 0xFFFFFFFF)
-        send_message(sock, expected_opcode, payload)
-        opcode, response = recv_message(sock)
-        if opcode != expected_opcode:
-            raise Failure('vkCreateComputePipelines reply had opcode {}'.format(opcode))
-        if len(response) < 4 or decode_u32(response) != STATUS_DECODE_ERROR:
-            raise Failure('hostile compute pipeline count was not rejected')
+            expected_opcode = read_opcode(build_dir, name)
+            count = (1 << 20) + 1
+            # Supply enough bytes for the handler's minimum per-create-info
+            # check, proving the explicit element cap rejects this count.
+            payload = struct.pack('<QQI', 0, 0, count) + b'\0' * (count * 4)
+            send_message(sock, expected_opcode, payload)
+            opcode, response = recv_message(sock)
+            if opcode != expected_opcode:
+                raise Failure('{} reply had opcode {}'.format(name, opcode))
+            if len(response) < 4 or decode_u32(response) != STATUS_DECODE_ERROR:
+                raise Failure('{} hostile pipeline count was not rejected'.format(name))
+
+
+def test_graphics_pipeline_nested_counts_are_bounded(server, build_dir):
+    """Nested vertex-input counts must agree with their bounded wire blobs."""
+    class GraphicsPipelineCreateInfo(ctypes.Structure):
+        _fields_ = [
+            ('sType', ctypes.c_int32), ('pNext', ctypes.c_void_p),
+            ('flags', ctypes.c_uint32), ('stageCount', ctypes.c_uint32),
+            ('pStages', ctypes.c_void_p), ('pVertexInputState', ctypes.c_void_p),
+            ('pInputAssemblyState', ctypes.c_void_p),
+            ('pTessellationState', ctypes.c_void_p),
+            ('pViewportState', ctypes.c_void_p),
+            ('pRasterizationState', ctypes.c_void_p),
+            ('pMultisampleState', ctypes.c_void_p),
+            ('pDepthStencilState', ctypes.c_void_p),
+            ('pColorBlendState', ctypes.c_void_p),
+            ('pDynamicState', ctypes.c_void_p), ('layout', ctypes.c_uint64),
+            ('renderPass', ctypes.c_uint64), ('subpass', ctypes.c_uint32),
+            ('basePipelineHandle', ctypes.c_uint64),
+            ('basePipelineIndex', ctypes.c_int32),
+        ]
+
+    class VertexInputState(ctypes.Structure):
+        _fields_ = [
+            ('sType', ctypes.c_int32), ('pNext', ctypes.c_void_p),
+            ('flags', ctypes.c_uint32),
+            ('vertexBindingDescriptionCount', ctypes.c_uint32),
+            ('pVertexBindingDescriptions', ctypes.c_void_p),
+            ('vertexAttributeDescriptionCount', ctypes.c_uint32),
+            ('pVertexAttributeDescriptions', ctypes.c_void_p),
+        ]
+
+    if (ctypes.sizeof(ctypes.c_void_p) != 8 or
+            ctypes.sizeof(GraphicsPipelineCreateInfo) != 144 or
+            ctypes.sizeof(VertexInputState) != 48):
+        raise Failure('wire test Vulkan structure layout is not the required x86-64 ABI')
+
+    digest = read_digest(build_dir)
+    opcode = read_opcode(build_dir, 'vkCreateGraphicsPipelines')
+    outer = GraphicsPipelineCreateInfo()
+    outer.pVertexInputState = 1
+    for description, binding_count, attribute_count in (
+            ('binding', 1, 0), ('attribute', 0, 1)):
+        vertex = VertexInputState()
+        vertex.vertexBindingDescriptionCount = binding_count
+        vertex.vertexAttributeDescriptionCount = attribute_count
+        # After the two deliberately inconsistent blobs, append the complete
+        # otherwise-valid tail: absent input/tessellation/viewport/raster/
+        # multisample/depth/color/dynamic states and empty graphics pNext.
+        tail = struct.pack('<IIIIIIIII', 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        payload = (struct.pack('<QQI', 0, 0, 1) + pack_blob(bytes(outer)) +
+                   struct.pack('<I', 1) + pack_blob(bytes(vertex)) +
+                   pack_blob(b'') + pack_blob(b'') + tail)
+        with connect(server.port) as sock:
+            if handshake(sock, digest, build_dir) != STATUS_OK:
+                raise Failure('handshake failed')
+            send_message(sock, opcode, payload)
+            reply_opcode, response = recv_message(sock)
+            if (reply_opcode != opcode or len(response) < 4 or
+                    decode_u32(response) != STATUS_DECODE_ERROR):
+                raise Failure('nested vertex-input {} count was not rejected'.format(
+                    description))
+
+
+def test_indexed_binding_payloads_are_rejected(server, build_dir):
+    """Malformed and invalid-handle indexed binding requests remain safe one-way calls."""
+    digest = read_digest(build_dir)
+    cases = (
+        # A small, plausible count whose single buffer/offset entry is truncated.
+        ('truncated vertex binding', 'vkCmdBindVertexBuffers',
+         struct.pack('<QII', 0, 0, 1)),
+        # Complete vertex-binding shape with a nonzero unresolved buffer id.
+        ('invalid vertex buffer', 'vkCmdBindVertexBuffers',
+         struct.pack('<QIIQQ', 1, 0, 1, 0xBAD, 0)),
+        # Complete index-binding shape with a nonzero unresolved buffer id.
+        ('invalid index buffer', 'vkCmdBindIndexBuffer',
+         struct.pack('<QQQi', 1, 0xBAD, 0, 0)),
+    )
+    for description, name, payload in cases:
+        with connect(server.port) as sock:
+            if handshake(sock, digest, build_dir) != STATUS_OK:
+                raise Failure('handshake failed for {}'.format(description))
+            send_message(sock, read_opcode(build_dir, name), payload)
+        if not server.alive():
+            raise Failure('server died on {}'.format(description))
+
+    with connect(server.port) as good:
+        if handshake(good, digest, build_dir) != STATUS_OK:
+            raise Failure('server stopped serving after malformed indexed bindings')
+
+
+def test_push_constant_and_descriptor_payloads_are_rejected(server, build_dir):
+    """Current push/descriptor hardening rejects hostile one-way payloads safely."""
+    digest = read_digest(build_dir)
+    max_elements = (1 << 20)
+    push = read_opcode(build_dir, 'vkCmdPushConstants')
+    bind = read_opcode(build_dir, 'vkCmdBindDescriptorSets')
+    update = read_opcode(build_dir, 'vkUpdateDescriptorSets')
+
+    class WriteDescriptorSet(ctypes.Structure):
+        _fields_ = [
+            ('sType', ctypes.c_int32), ('pNext', ctypes.c_void_p),
+            ('dstSet', ctypes.c_uint64), ('dstBinding', ctypes.c_uint32),
+            ('dstArrayElement', ctypes.c_uint32), ('descriptorCount', ctypes.c_uint32),
+            ('descriptorType', ctypes.c_int32), ('pImageInfo', ctypes.c_void_p),
+            ('pBufferInfo', ctypes.c_void_p), ('pTexelBufferView', ctypes.c_void_p),
+        ]
+
+    if ctypes.sizeof(WriteDescriptorSet) != 64:
+        raise Failure('wire test VkWriteDescriptorSet layout is not x86-64 ABI')
+
+    write = WriteDescriptorSet()
+    write.sType = 35  # VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET
+    write.dstSet = 1
+    write.descriptorCount = 1
+    write.descriptorType = 6  # VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+    raw_write = pack_blob(bytes(write))
+    update_prefix = struct.pack('<QI', 0, 1) + raw_write
+
+    cases = (
+        ('push oversized', push, struct.pack('<QQIII', 1, 1, 1, 0, 65537)),
+        ('push truncated', push, struct.pack('<QQIII', 1, 1, 1, 0, 4) + b'abc'),
+        ('push misaligned', push, struct.pack('<QQIII', 1, 1, 1, 0, 3) + b'abc'),
+        ('push trailing', push, struct.pack('<QQIII', 1, 1, 1, 0, 4) + b'abcd!'),
+        ('push invalid layout', push, struct.pack('<QQIII', 1, 0xBAD, 1, 0, 4) + b'abcd'),
+        ('bind descriptor count cap', bind,
+         struct.pack('<QiQII', 1, 0, 1, 0, max_elements + 1)),
+        ('bind descriptor truncation', bind,
+         struct.pack('<QiQII', 1, 0, 1, 0, 1)),
+        ('bind descriptor invalid handles', bind,
+         struct.pack('<QiQIIQI', 1, 0, 0xBAD, 0, 1, 0xBAD, 0)),
+        ('update outer count cap', update, struct.pack('<QI', 0, max_elements + 1)),
+        ('update discriminator mismatch', update, update_prefix + struct.pack('<I', 1)),
+        ('update descriptorCount cap', update,
+         struct.pack('<QI', 0, 1) + pack_blob(bytes(WriteDescriptorSet(
+             sType=35, dstSet=1, descriptorCount=max_elements + 1,
+             descriptorType=6))) + struct.pack('<I', 2)),
+        ('update truncated buffer array', update, update_prefix + struct.pack('<I', 2)),
+        ('update invalid required handles', update,
+         update_prefix + struct.pack('<IQQQ', 2, 0, 0, 64) + struct.pack('<I', 0)),
+        ('update trailing', update,
+         update_prefix + struct.pack('<IQQQ', 2, 1, 0, 64) + struct.pack('<I', 0) + b'!'),
+    )
+    for description, opcode, payload in cases:
+        with connect(server.port) as sock:
+            if handshake(sock, digest, build_dir) != STATUS_OK:
+                raise Failure('handshake failed for {}'.format(description))
+            send_message(sock, opcode, payload)
+
+    time.sleep(0.2)
+    if not server.alive():
+        raise Failure('server died on hardened push/descriptor payloads')
+    with connect(server.port) as good:
+        if handshake(good, digest, build_dir) != STATUS_OK:
+            raise Failure('server stopped serving after push/descriptor payloads')
 
 
 def test_shader_module_malformed_payloads_are_rejected(server, build_dir):
@@ -347,6 +512,57 @@ def test_shader_module_malformed_payloads_are_rejected(server, build_dir):
             opcode, response = recv_message(sock)
             if opcode != shader_opcode or len(response) < 4:
                 raise Failure('{} produced a malformed reply'.format(description))
+            if decode_u32(response) != STATUS_DECODE_ERROR:
+                raise Failure('{} was not rejected'.format(description))
+
+
+def test_submit_and_fence_payloads_are_rejected(server, build_dir):
+    """Submit and fence RPCs reject hostile counts, ids, and trailing bytes."""
+    digest = read_digest(build_dir)
+    max_elements = 1 << 20
+    cases = (
+        ('queue submit outer count cap', 'vkQueueSubmit',
+         struct.pack('<QQI', 0, 0, max_elements + 1)),
+        ('queue submit nested wait count cap', 'vkQueueSubmit',
+         struct.pack('<QQIII', 0, 0, 1, 0, max_elements + 1)),
+        ('queue submit unresolved queue', 'vkQueueSubmit',
+         struct.pack('<QQIIIII', 0xBAD, 0, 1, 0, 0, 0, 0)),
+        ('queue submit unresolved fence', 'vkQueueSubmit',
+         struct.pack('<QQI', 0, 0xBAD, 0)),
+        ('queue submit unresolved wait semaphore', 'vkQueueSubmit',
+         struct.pack('<QQIIIQIII', 0, 0, 1, 0, 1, 0xBAD, 0, 0, 0)),
+        ('queue submit unresolved command buffer', 'vkQueueSubmit',
+         struct.pack('<QQIIIIQ', 0, 0, 1, 0, 0, 1, 0xBAD) + struct.pack('<I', 0)),
+        ('queue submit unresolved signal semaphore', 'vkQueueSubmit',
+         struct.pack('<QQIIIIIQ', 0, 0, 1, 0, 0, 0, 1, 0xBAD)),
+        ('queue submit trailing data', 'vkQueueSubmit',
+         struct.pack('<QQI', 0, 0, 0) + b'!'),
+        ('reset fences count cap', 'vkResetFences',
+         struct.pack('<QI', 0, max_elements + 1)),
+        ('reset fences unresolved id', 'vkResetFences',
+         struct.pack('<QIQ', 0, 1, 0xBAD)),
+        ('reset fences trailing data', 'vkResetFences',
+         struct.pack('<QI', 0, 0) + b'!'),
+        ('wait fences count cap', 'vkWaitForFences',
+         struct.pack('<QII', 0, 0, max_elements + 1)),
+        ('wait fences unresolved id', 'vkWaitForFences',
+         struct.pack('<QIIQQ', 0, 0, 1, 0xBAD, 0)),
+        ('wait fences trailing data', 'vkWaitForFences',
+         struct.pack('<QIIQQ', 0, 0, 1, 0xBAD, 0) + b'!'),
+        ('fence status unresolved id', 'vkGetFenceStatus',
+         struct.pack('<QQ', 0, 0xBAD)),
+        ('fence status trailing data', 'vkGetFenceStatus',
+         struct.pack('<QQ', 0, 0xBAD) + b'!'),
+    )
+    for description, name, payload in cases:
+        with connect(server.port) as sock:
+            if handshake(sock, digest, build_dir) != STATUS_OK:
+                raise Failure('handshake failed for {}'.format(description))
+            expected = read_opcode(build_dir, name)
+            send_message(sock, expected, payload)
+            opcode, response = recv_message(sock)
+            if opcode != expected or len(response) < 4:
+                raise Failure('{} produced no synchronous error reply'.format(description))
             if decode_u32(response) != STATUS_DECODE_ERROR:
                 raise Failure('{} was not rejected'.format(description))
 
@@ -649,8 +865,12 @@ TESTS = [
     test_truncated_payload_does_not_hang,
     test_oversized_payload_is_refused,
     test_short_payload_for_known_command,
-    test_compute_pipeline_count_is_bounded,
+    test_pipeline_counts_are_bounded,
+    test_graphics_pipeline_nested_counts_are_bounded,
+    test_indexed_binding_payloads_are_rejected,
+    test_push_constant_and_descriptor_payloads_are_rejected,
     test_shader_module_malformed_payloads_are_rejected,
+    test_submit_and_fence_payloads_are_rejected,
     test_vulkan10_family_payloads_are_bounded,
     test_transfer_command_payloads_are_bounded,
     test_device_extension_advertisement_is_real_device_intersection,

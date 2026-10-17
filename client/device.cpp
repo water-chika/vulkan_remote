@@ -186,6 +186,36 @@ VKAPI_ATTR void VKAPI_CALL GetDeviceGroupPeerMemoryFeatures(VkDevice handle,uint
 
 VKAPI_ATTR VkResult VKAPI_CALL QueueSubmit(VkQueue handle, uint32_t submitCount,
                                            const VkSubmitInfo* pSubmits, VkFence fence) {
+    if (handle == VK_NULL_HANDLE || submitCount > kMaxArrayElements ||
+        (submitCount != 0 && pSubmits == nullptr)) {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    for (uint32_t i = 0; i < submitCount; ++i) {
+        const VkSubmitInfo& s = pSubmits[i];
+        if (s.sType != VK_STRUCTURE_TYPE_SUBMIT_INFO ||
+            s.waitSemaphoreCount > kMaxArrayElements ||
+            s.commandBufferCount > kMaxArrayElements ||
+            s.signalSemaphoreCount > kMaxArrayElements ||
+            (s.waitSemaphoreCount != 0 &&
+             (s.pWaitSemaphores == nullptr || s.pWaitDstStageMask == nullptr)) ||
+            (s.commandBufferCount != 0 && s.pCommandBuffers == nullptr) ||
+            (s.signalSemaphoreCount != 0 && s.pSignalSemaphores == nullptr)) {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        for (uint32_t j = 0; j < s.waitSemaphoreCount; ++j) {
+            if (s.pWaitSemaphores[j] == VK_NULL_HANDLE)
+                return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        for (uint32_t j = 0; j < s.commandBufferCount; ++j) {
+            if (s.pCommandBuffers[j] == VK_NULL_HANDLE)
+                return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        for (uint32_t j = 0; j < s.signalSemaphoreCount; ++j) {
+            if (s.pSignalSemaphores[j] == VK_NULL_HANDLE)
+                return VK_ERROR_INITIALIZATION_FAILED;
+        }
+    }
+
     RemoteQueue* queue = to_queue(handle);
     RemoteDevice* device = queue->device;
 
@@ -226,7 +256,7 @@ VKAPI_ATTR VkResult VKAPI_CALL QueueSubmit(VkQueue handle, uint32_t submitCount,
     Reader r = payload_reader(reply);
     const VkResult result = static_cast<VkResult>(r.i32());
     const uint32_t oneway_errors = r.u32();
-    if (!r.ok()) return VK_ERROR_DEVICE_LOST;
+    if (!r.ok() || r.remaining() != 0) return VK_ERROR_DEVICE_LOST;
     report_oneway_errors(oneway_errors);
     return result;
 }
@@ -315,18 +345,30 @@ VKAPI_ATTR void VKAPI_CALL DestroyFence(VkDevice handle, VkFence fence,
 
 VKAPI_ATTR VkResult VKAPI_CALL ResetFences(VkDevice handle, uint32_t count,
                                            const VkFence* pFences) {
+    if (handle == VK_NULL_HANDLE || count == 0 || count > kMaxArrayElements ||
+        pFences == nullptr) {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+        if (pFences[i] == VK_NULL_HANDLE) return VK_ERROR_INITIALIZATION_FAILED;
+    }
     RemoteDevice* device = to_device(handle);
     Writer request;
     request.handle(device->remote_id);
     request.u32(count);
     for (uint32_t i = 0; i < count; ++i) request.handle(id_from_handle(pFences[i]));
-    device->instance->connection.send_oneway(Opcode::vkResetFences, request);
-    // Nobody waits for this one, per the fire-and-forget convention; a failure
-    // surfaces later via the oneway error count on the next submit/wait-idle.
-    return VK_SUCCESS;
+    std::vector<char> reply;
+    if (!device->instance->connection.round_trip(Opcode::vkResetFences, request, &reply)) {
+        return VK_ERROR_DEVICE_LOST;
+    }
+    Reader r = payload_reader(reply);
+    const VkResult result = static_cast<VkResult>(r.i32());
+    return r.ok() && r.remaining() == 0 ? result : VK_ERROR_DEVICE_LOST;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL GetFenceStatus(VkDevice handle, VkFence fence) {
+    if (handle == VK_NULL_HANDLE || fence == VK_NULL_HANDLE)
+        return VK_ERROR_INITIALIZATION_FAILED;
     RemoteDevice* device = to_device(handle);
     Writer request;
     request.handle(device->remote_id);
@@ -344,6 +386,13 @@ VKAPI_ATTR VkResult VKAPI_CALL GetFenceStatus(VkDevice handle, VkFence fence) {
 VKAPI_ATTR VkResult VKAPI_CALL WaitForFences(VkDevice handle, uint32_t count,
                                              const VkFence* pFences, VkBool32 waitAll,
                                              uint64_t timeout) {
+    if (handle == VK_NULL_HANDLE || count == 0 || count > kMaxArrayElements ||
+        pFences == nullptr) {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+        if (pFences[i] == VK_NULL_HANDLE) return VK_ERROR_INITIALIZATION_FAILED;
+    }
     RemoteDevice* device = to_device(handle);
     Writer request;
     request.handle(device->remote_id);
@@ -695,6 +744,13 @@ VKAPI_ATTR void VKAPI_CALL GetRenderAreaGranularity(VkDevice handle, VkRenderPas
 
 VKAPI_ATTR VkResult VKAPI_CALL FreeDescriptorSets(VkDevice handle, VkDescriptorPool pool,
                                                   uint32_t count, const VkDescriptorSet* pSets) {
+    if (pool == VK_NULL_HANDLE || count > kMaxArrayElements ||
+        (count != 0 && pSets == nullptr)) {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+        if (pSets[i] == VK_NULL_HANDLE) return VK_ERROR_INITIALIZATION_FAILED;
+    }
     RemoteDevice* device = to_device(handle); Writer request;
     request.handle(device->remote_id); request.handle(id_from_handle(pool)); request.u32(count);
     for (uint32_t i = 0; i < count; ++i) request.handle(id_from_handle(pSets[i]));
@@ -702,24 +758,29 @@ VKAPI_ATTR VkResult VKAPI_CALL FreeDescriptorSets(VkDevice handle, VkDescriptorP
     if (!device->instance->connection.round_trip(Opcode::vkFreeDescriptorSets, request, &reply))
         return VK_ERROR_DEVICE_LOST;
     Reader r = payload_reader(reply); const VkResult result = static_cast<VkResult>(r.i32());
-    return r.ok() ? result : VK_ERROR_DEVICE_LOST;
+    return r.ok() && r.remaining() == 0 ? result : VK_ERROR_DEVICE_LOST;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL ResetDescriptorPool(VkDevice handle, VkDescriptorPool pool,
                                                    VkDescriptorPoolResetFlags flags) {
+    if (pool == VK_NULL_HANDLE) return VK_ERROR_INITIALIZATION_FAILED;
     RemoteDevice* device = to_device(handle); Writer request;
     request.handle(device->remote_id); request.handle(id_from_handle(pool)); request.u32(flags);
     std::vector<char> reply;
     if (!device->instance->connection.round_trip(Opcode::vkResetDescriptorPool, request, &reply))
         return VK_ERROR_DEVICE_LOST;
     Reader r = payload_reader(reply); const VkResult result = static_cast<VkResult>(r.i32());
-    return r.ok() ? result : VK_ERROR_DEVICE_LOST;
+    return r.ok() && r.remaining() == 0 ? result : VK_ERROR_DEVICE_LOST;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL CreateGraphicsPipelines(
     VkDevice handle, VkPipelineCache pipelineCache, uint32_t createInfoCount,
     const VkGraphicsPipelineCreateInfo* pCreateInfos, const VkAllocationCallbacks*,
     VkPipeline* pPipelines) {
+    if (createInfoCount > kMaxArrayElements ||
+        (createInfoCount != 0 && (pCreateInfos == nullptr || pPipelines == nullptr))) {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
     RemoteDevice* device = to_device(handle);
     Writer request;
     request.handle(device->remote_id);
@@ -738,11 +799,15 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateGraphicsPipelines(
     Reader r = payload_reader(reply);
     const VkResult result = static_cast<VkResult>(r.i32());
     const uint32_t count = r.u32();
-    for (uint32_t i = 0; i < count && i < createInfoCount; ++i) {
+    if (!r.ok() || count > kMaxArrayElements || count != createInfoCount ||
+        count > r.remaining() / sizeof(uint64_t)) {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    for (uint32_t i = 0; i < count; ++i) {
         const uint64_t id = r.handle();
         pPipelines[i] = id ? handle_from_id<VkPipeline>(id) : VK_NULL_HANDLE;
     }
-    return result;
+    return r.ok() && r.remaining() == 0 ? result : VK_ERROR_INITIALIZATION_FAILED;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL CreateComputePipelines(
@@ -799,6 +864,15 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateDescriptorSetLayout(
 VKAPI_ATTR VkResult VKAPI_CALL AllocateDescriptorSets(VkDevice handle,
                                                       const VkDescriptorSetAllocateInfo* pInfo,
                                                       VkDescriptorSet* pSets) {
+    if (pInfo == nullptr || pInfo->descriptorPool == VK_NULL_HANDLE ||
+        pInfo->descriptorSetCount > kMaxArrayElements ||
+        (pInfo->descriptorSetCount != 0 &&
+         (pInfo->pSetLayouts == nullptr || pSets == nullptr))) {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    for (uint32_t i = 0; i < pInfo->descriptorSetCount; ++i) {
+        if (pInfo->pSetLayouts[i] == VK_NULL_HANDLE) return VK_ERROR_INITIALIZATION_FAILED;
+    }
     RemoteDevice* device = to_device(handle);
     Writer request;
     request.handle(device->remote_id);
@@ -811,10 +885,15 @@ VKAPI_ATTR VkResult VKAPI_CALL AllocateDescriptorSets(VkDevice handle,
     Reader r = payload_reader(reply);
     const VkResult result = static_cast<VkResult>(r.i32());
     const uint32_t count = r.u32();
-    for (uint32_t i = 0; i < count && i < pInfo->descriptorSetCount; ++i) {
-        pSets[i] = handle_from_id<VkDescriptorSet>(r.handle());
+    if (!r.ok() || count > kMaxArrayElements || count != pInfo->descriptorSetCount ||
+        count > r.remaining() / sizeof(uint64_t)) {
+        return VK_ERROR_INITIALIZATION_FAILED;
     }
-    return result;
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint64_t id = r.handle();
+        pSets[i] = id ? handle_from_id<VkDescriptorSet>(id) : VK_NULL_HANDLE;
+    }
+    return r.ok() && r.remaining() == 0 ? result : VK_ERROR_INITIALIZATION_FAILED;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL CreateDescriptorUpdateTemplate(VkDevice handle,const VkDescriptorUpdateTemplateCreateInfo* info,const VkAllocationCallbacks*,VkDescriptorUpdateTemplate* out){if(!info||!out)return VK_ERROR_INITIALIZATION_FAILED;RemoteDevice*d=to_device(handle);Writer w;w.handle(d->remote_id);if(!write_DescriptorUpdateTemplateCreateInfo(w,*info))return VK_ERROR_INITIALIZATION_FAILED;std::vector<char>reply;if(!d->instance->connection.round_trip(Opcode::vkCreateDescriptorUpdateTemplate,w,&reply))return VK_ERROR_INITIALIZATION_FAILED;Reader r=payload_reader(reply);VkResult result=static_cast<VkResult>(r.i32());uint64_t id=r.handle();if(result==VK_SUCCESS&&r.ok()){*out=handle_from_id<VkDescriptorUpdateTemplate>(id);d->descriptor_templates[id]={info->templateType,std::vector<VkDescriptorUpdateTemplateEntry>(info->pDescriptorUpdateEntries,info->pDescriptorUpdateEntries+info->descriptorUpdateEntryCount)};}return result;}
@@ -828,13 +907,23 @@ VKAPI_ATTR void VKAPI_CALL UpdateDescriptorSets(VkDevice handle, uint32_t writeC
                                                 const VkWriteDescriptorSet* pWrites,
                                                 uint32_t copyCount,
                                                 const VkCopyDescriptorSet* pCopies) {
+    if (writeCount > kMaxArrayElements || copyCount > kMaxArrayElements ||
+        (writeCount != 0 && pWrites == nullptr) ||
+        (copyCount != 0 && pCopies == nullptr)) {
+        return;
+    }
     RemoteDevice* device = to_device(handle);
     Writer request;
     request.handle(device->remote_id);
     request.u32(writeCount);
-    for (uint32_t i = 0; i < writeCount; ++i) write_WriteDescriptorSet(request, pWrites[i]);
+    for (uint32_t i = 0; i < writeCount; ++i) {
+        if (!write_WriteDescriptorSet(request, pWrites[i])) return;
+    }
     request.u32(copyCount);
-    for (uint32_t i = 0; i < copyCount; ++i) write_CopyDescriptorSet(request, pCopies[i]);
+    for (uint32_t i = 0; i < copyCount; ++i) {
+        if (pCopies[i].srcSet == VK_NULL_HANDLE || pCopies[i].dstSet == VK_NULL_HANDLE) return;
+        write_CopyDescriptorSet(request, pCopies[i]);
+    }
     device->instance->connection.send_oneway(Opcode::vkUpdateDescriptorSets, request);
 }
 

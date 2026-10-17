@@ -78,7 +78,7 @@ VkResult RemoteDevice::flush_mapped(const VkMappedMemoryRange* ranges, uint32_t 
         if (!resolve_range(mapped, ranges[i], &mapping, &offset, &size)) return VK_ERROR_DEVICE_LOST;
         const VkDeviceSize local = offset - mapping->offset;
         for (VkDeviceSize done = 0; done < size;) {
-            VkDeviceSize chunk = std::min(kMaxMappedChunk, size - done);
+            VkDeviceSize chunk = (std::min)(kMaxMappedChunk, size - done);
             if (!mapping->coherent && chunk < size - done) {
                 const auto allocation = memories.find(mapping->memory_id);
                 if (allocation == memories.end()) return VK_ERROR_DEVICE_LOST;
@@ -134,7 +134,7 @@ VkResult RemoteDevice::download_mapped(const VkMappedMemoryRange* ranges, uint32
         if (!resolve_range(mapped, ranges[i], &mapping, &offset, &size)) return VK_ERROR_DEVICE_LOST;
         const VkDeviceSize local = offset - mapping->offset;
         for (VkDeviceSize done = 0; done < size;) {
-            VkDeviceSize chunk = std::min(kMaxMappedChunk, size - done);
+            VkDeviceSize chunk = (std::min)(kMaxMappedChunk, size - done);
             if (!mapping->coherent && chunk < size - done) {
                 const auto allocation = memories.find(mapping->memory_id);
                 if (allocation == memories.end()) return VK_ERROR_DEVICE_LOST;

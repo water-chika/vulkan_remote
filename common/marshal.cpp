@@ -62,7 +62,7 @@ void write_opt_pod_array(Writer& w, const T* arr, uint32_t count) {
 template <typename T>
 bool read_opt_pod_array(Reader& r, Arena& arena, uint32_t count, T** out) {
     const uint32_t present = r.u32();
-    if (!r.ok()) return false;
+    if (!r.ok() || count > kMaxArrayElements) return false;
     if (!present) {
         *out = nullptr;
         return true;
@@ -204,8 +204,9 @@ bool read_PipelineShaderStageCreateInfo(Reader& r, Arena& arena, const HandleRes
         out->pSpecializationInfo = nullptr;
     }
 
+    const uint64_t module_id = id_of(out->module);
     patch_handle(&out->module, [&](uint64_t id) { return hr.shader_module(id); });
-    return true;
+    return !module_id || out->module != VK_NULL_HANDLE;
 }
 
 // --- VkSubpassDescription, nested inside VkRenderPassCreateInfo::pSubpasses ---
@@ -1159,6 +1160,36 @@ bool read_PipelineLayoutCreateInfo(Reader& r, Arena& arena, const HandleResolver
 }
 
 bool write_GraphicsPipelineCreateInfo(Writer& w, const VkGraphicsPipelineCreateInfo& s) {
+    if (!valid_count(s.stageCount, sizeof(VkPipelineShaderStageCreateInfo)) ||
+        (s.stageCount != 0 && s.pStages == nullptr) ||
+        (s.pVertexInputState &&
+         ((!valid_count(s.pVertexInputState->vertexBindingDescriptionCount,
+                        sizeof(VkVertexInputBindingDescription)) ||
+           (s.pVertexInputState->vertexBindingDescriptionCount != 0 &&
+            s.pVertexInputState->pVertexBindingDescriptions == nullptr)) ||
+          (!valid_count(s.pVertexInputState->vertexAttributeDescriptionCount,
+                        sizeof(VkVertexInputAttributeDescription)) ||
+           (s.pVertexInputState->vertexAttributeDescriptionCount != 0 &&
+            s.pVertexInputState->pVertexAttributeDescriptions == nullptr)))) ||
+        (s.pViewportState &&
+         (!valid_count(s.pViewportState->viewportCount, sizeof(VkViewport)) ||
+          !valid_count(s.pViewportState->scissorCount, sizeof(VkRect2D)))) ||
+        (s.pMultisampleState &&
+         (s.pMultisampleState->rasterizationSamples < VK_SAMPLE_COUNT_1_BIT ||
+          s.pMultisampleState->rasterizationSamples > VK_SAMPLE_COUNT_64_BIT ||
+          (static_cast<uint32_t>(s.pMultisampleState->rasterizationSamples) &
+           (static_cast<uint32_t>(s.pMultisampleState->rasterizationSamples) - 1)) != 0)) ||
+        (s.pColorBlendState &&
+         (!valid_count(s.pColorBlendState->attachmentCount,
+                       sizeof(VkPipelineColorBlendAttachmentState)) ||
+          (s.pColorBlendState->attachmentCount != 0 &&
+           s.pColorBlendState->pAttachments == nullptr))) ||
+        (s.pDynamicState &&
+         (!valid_count(s.pDynamicState->dynamicStateCount, sizeof(VkDynamicState)) ||
+          (s.pDynamicState->dynamicStateCount != 0 &&
+           s.pDynamicState->pDynamicStates == nullptr)))) {
+        return false;
+    }
     Writer encoded;
     VkGraphicsPipelineCreateInfo tmp = s;
     tmp.pNext = nullptr;
@@ -1250,8 +1281,12 @@ bool write_GraphicsPipelineCreateInfo(Writer& w, const VkGraphicsPipelineCreateI
 bool read_GraphicsPipelineCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                                       VkGraphicsPipelineCreateInfo* out) {
     if (!read_raw(r, out)) return false;
+    const uint64_t layout_id = id_of(out->layout);
+    const uint64_t render_pass_id = id_of(out->renderPass);
+    const uint64_t base_pipeline_id = id_of(out->basePipelineHandle);
 
-    if (out->stageCount > kMaxArrayElements) return false;
+    if (!r.ok() || out->stageCount > kMaxArrayElements ||
+        out->stageCount > r.remaining() / 12) return false;
     VkPipelineShaderStageCreateInfo* stages =
         out->stageCount ? arena.array<VkPipelineShaderStageCreateInfo>(out->stageCount) : nullptr;
     for (uint32_t i = 0; i < out->stageCount; ++i)
@@ -1311,7 +1346,10 @@ bool read_GraphicsPipelineCreateInfo(Reader& r, Arena& arena, const HandleResolv
     if (present) {
         auto* ms = arena.array<VkPipelineMultisampleStateCreateInfo>(1);
         if (!read_raw(r, ms)) return false;
-        const uint32_t mask_words = (static_cast<uint32_t>(ms->rasterizationSamples) + 31) / 32;
+        const uint32_t samples = static_cast<uint32_t>(ms->rasterizationSamples);
+        if (samples < VK_SAMPLE_COUNT_1_BIT || samples > VK_SAMPLE_COUNT_64_BIT ||
+            (samples & (samples - 1)) != 0) return false;
+        const uint32_t mask_words = (samples + 31) / 32;
         if (!read_opt_pod_array(r, arena, mask_words, const_cast<VkSampleMask**>(&ms->pSampleMask)))
             return false;
         out->pMultisampleState = ms;
@@ -1362,7 +1400,9 @@ bool read_GraphicsPipelineCreateInfo(Reader& r, Arena& arena, const HandleResolv
     patch_handle(&out->layout, [&](uint64_t id) { return hr.pipeline_layout(id); });
     patch_handle(&out->renderPass, [&](uint64_t id) { return hr.render_pass(id); });
     patch_handle(&out->basePipelineHandle, [&](uint64_t id) { return hr.pipeline(id); });
-    return true;
+    return (!layout_id || out->layout != VK_NULL_HANDLE) &&
+           (!render_pass_id || out->renderPass != VK_NULL_HANDLE) &&
+           (!base_pipeline_id || out->basePipelineHandle != VK_NULL_HANDLE);
 }
 
 void write_ComputePipelineCreateInfo(Writer& w, const VkComputePipelineCreateInfo& s) {
@@ -1617,7 +1657,7 @@ void write_DescriptorSetLayoutCreateInfo(Writer& w, const VkDescriptorSetLayoutC
 bool read_DescriptorSetLayoutCreateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                                          VkDescriptorSetLayoutCreateInfo* out) {
     if (!read_raw(r, out)) return false;
-    if (out->bindingCount > kMaxArrayElements) return false;
+    if (out->bindingCount > kMaxArrayElements || out->bindingCount > r.remaining() / 4) return false;
     VkDescriptorSetLayoutBinding* bindings =
         out->bindingCount ? arena.array<VkDescriptorSetLayoutBinding>(out->bindingCount) : nullptr;
     for (uint32_t i = 0; i < out->bindingCount; ++i) {
@@ -1711,23 +1751,29 @@ void write_DescriptorSetAllocateInfo(Writer& w, const VkDescriptorSetAllocateInf
 
 bool read_DescriptorSetAllocateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                                      VkDescriptorSetAllocateInfo* out) {
-    if (!read_raw(r, out)) return false;
+    if (!read_raw(r, out) || out->descriptorSetCount > kMaxArrayElements) return false;
+    const uint64_t pool_id = id_of(out->descriptorPool);
     if (!read_handle_array(
             r, arena, out->descriptorSetCount,
             [&](uint64_t id) { return hr.descriptor_set_layout(id); },
             const_cast<VkDescriptorSetLayout**>(&out->pSetLayouts)))
         return false;
+    for (uint32_t i = 0; i < out->descriptorSetCount; ++i) {
+        if (out->pSetLayouts[i] == VK_NULL_HANDLE) return false;
+    }
     patch_handle(&out->descriptorPool, [&](uint64_t id) { return hr.descriptor_pool(id); });
-    return true;
+    return pool_id != 0 && out->descriptorPool != VK_NULL_HANDLE;
 }
 
-void write_WriteDescriptorSet(Writer& w, const VkWriteDescriptorSet& s) {
+bool write_WriteDescriptorSet(Writer& w, const VkWriteDescriptorSet& s) {
+    if (s.descriptorCount > kMaxArrayElements || s.dstSet == VK_NULL_HANDLE) return false;
+    Writer encoded;
     VkWriteDescriptorSet tmp = s;
     tmp.pNext = nullptr;
     tmp.pImageInfo = nullptr;
     tmp.pBufferInfo = nullptr;
     tmp.pTexelBufferView = nullptr;
-    w.bytes(&tmp, sizeof(tmp));
+    encoded.bytes(&tmp, sizeof(tmp));
 
     // Discriminator: which of the three arrays is meaningful for this
     // descriptorType, per the Vulkan spec's rules for VkWriteDescriptorSet.
@@ -1737,36 +1783,50 @@ void write_WriteDescriptorSet(Writer& w, const VkWriteDescriptorSet& s) {
         case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
         case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
         case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
-            w.u32(1);
+            if (s.descriptorCount != 0 && s.pImageInfo == nullptr) return false;
+            encoded.u32(1);
             for (uint32_t i = 0; i < s.descriptorCount; ++i) {
                 const VkDescriptorImageInfo& info = s.pImageInfo[i];
-                w.handle(id_of(info.sampler));
-                w.handle(id_of(info.imageView));
-                w.i32(static_cast<int32_t>(info.imageLayout));
+                const bool sampler_used = s.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER ||
+                                          s.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                const bool view_used = s.descriptorType != VK_DESCRIPTOR_TYPE_SAMPLER;
+                if ((sampler_used && info.sampler == VK_NULL_HANDLE) ||
+                    (view_used && info.imageView == VK_NULL_HANDLE)) {
+                    return false;
+                }
+                encoded.handle(sampler_used ? id_of(info.sampler) : 0);
+                encoded.handle(view_used ? id_of(info.imageView) : 0);
+                encoded.i32(static_cast<int32_t>(info.imageLayout));
             }
             break;
         case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
         case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
         case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
         case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
-            w.u32(2);
+            if (s.descriptorCount != 0 && s.pBufferInfo == nullptr) return false;
+            encoded.u32(2);
             for (uint32_t i = 0; i < s.descriptorCount; ++i) {
                 const VkDescriptorBufferInfo& info = s.pBufferInfo[i];
-                w.handle(id_of(info.buffer));
-                w.u64(info.offset);
-                w.u64(info.range);
+                if (info.buffer == VK_NULL_HANDLE) return false;
+                encoded.handle(id_of(info.buffer));
+                encoded.u64(info.offset);
+                encoded.u64(info.range);
             }
             break;
         case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
         case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
-            w.u32(3);
-            for (uint32_t i = 0; i < s.descriptorCount; ++i)
-                w.handle(id_of(s.pTexelBufferView[i]));
+            if (s.descriptorCount != 0 && s.pTexelBufferView == nullptr) return false;
+            encoded.u32(3);
+            for (uint32_t i = 0; i < s.descriptorCount; ++i) {
+                if (s.pTexelBufferView[i] == VK_NULL_HANDLE) return false;
+                encoded.handle(id_of(s.pTexelBufferView[i]));
+            }
             break;
         default:
-            w.u32(0);
-            break;
+            return false;
     }
+    w.append(encoded);
+    return true;
 }
 
 bool read_WriteDescriptorSet(Reader& r, Arena& arena, const HandleResolver& hr,
@@ -1774,8 +1834,31 @@ bool read_WriteDescriptorSet(Reader& r, Arena& arena, const HandleResolver& hr,
     if (!read_raw(r, out)) return false;
     if (out->descriptorCount > kMaxArrayElements) return false;
 
+    const uint64_t dst_set_id = id_of(out->dstSet);
     const uint32_t kind = r.u32();
-    if (!r.ok()) return false;
+    uint32_t expected_kind = 0;
+    switch (out->descriptorType) {
+        case VK_DESCRIPTOR_TYPE_SAMPLER:
+        case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+        case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+        case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+        case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
+            expected_kind = 1;
+            break;
+        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
+        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+            expected_kind = 2;
+            break;
+        case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+        case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+            expected_kind = 3;
+            break;
+        default:
+            return false;
+    }
+    if (!r.ok() || kind != expected_kind) return false;
 
     out->pImageInfo = nullptr;
     out->pBufferInfo = nullptr;
@@ -1790,9 +1873,17 @@ bool read_WriteDescriptorSet(Reader& r, Arena& arena, const HandleResolver& hr,
             const uint64_t view_id = r.handle();
             const int32_t layout = r.i32();
             if (!r.ok()) return false;
-            infos[i].sampler = sampler_id ? hr.sampler(sampler_id) : static_cast<VkSampler>(0);
-            infos[i].imageView =
-                view_id ? hr.image_view(view_id) : static_cast<VkImageView>(0);
+            const bool sampler_used = out->descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER ||
+                                      out->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            const bool view_used = out->descriptorType != VK_DESCRIPTOR_TYPE_SAMPLER;
+            infos[i].sampler = sampler_used && sampler_id ? hr.sampler(sampler_id)
+                                                          : static_cast<VkSampler>(0);
+            infos[i].imageView = view_used && view_id ? hr.image_view(view_id)
+                                                       : static_cast<VkImageView>(0);
+            if ((sampler_used && (sampler_id == 0 || infos[i].sampler == VK_NULL_HANDLE)) ||
+                (view_used && (view_id == 0 || infos[i].imageView == VK_NULL_HANDLE))) {
+                return false;
+            }
             infos[i].imageLayout = static_cast<VkImageLayout>(layout);
         }
         out->pImageInfo = infos;
@@ -1806,6 +1897,7 @@ bool read_WriteDescriptorSet(Reader& r, Arena& arena, const HandleResolver& hr,
             const uint64_t range = r.u64();
             if (!r.ok()) return false;
             infos[i].buffer = buffer_id ? hr.buffer(buffer_id) : static_cast<VkBuffer>(0);
+            if (buffer_id == 0 || infos[i].buffer == VK_NULL_HANDLE) return false;
             infos[i].offset = offset;
             infos[i].range = range;
         }
@@ -1824,7 +1916,7 @@ bool read_WriteDescriptorSet(Reader& r, Arena& arena, const HandleResolver& hr,
     }
 
     patch_handle(&out->dstSet, [&](uint64_t id) { return hr.descriptor_set(id); });
-    return true;
+    return dst_set_id != 0 && out->dstSet != VK_NULL_HANDLE;
 }
 
 void write_CopyDescriptorSet(Writer& w, const VkCopyDescriptorSet& s) {
@@ -1836,9 +1928,12 @@ void write_CopyDescriptorSet(Writer& w, const VkCopyDescriptorSet& s) {
 bool read_CopyDescriptorSet(Reader& r, Arena&, const HandleResolver& hr,
                              VkCopyDescriptorSet* out) {
     if (!read_raw(r, out)) return false;
+    const uint64_t src_set_id = id_of(out->srcSet);
+    const uint64_t dst_set_id = id_of(out->dstSet);
     patch_handle(&out->srcSet, [&](uint64_t id) { return hr.descriptor_set(id); });
     patch_handle(&out->dstSet, [&](uint64_t id) { return hr.descriptor_set(id); });
-    return true;
+    return src_set_id != 0 && out->srcSet != VK_NULL_HANDLE &&
+           dst_set_id != 0 && out->dstSet != VK_NULL_HANDLE;
 }
 
 void write_ImageMemoryBarrier(Writer& w, const VkImageMemoryBarrier& s) {

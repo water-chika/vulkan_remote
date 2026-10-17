@@ -183,6 +183,10 @@ using Handler = void (*)(Session&);
 void register_handler(Opcode opcode, Handler fn);
 Handler find_handler(Opcode opcode);
 
+// Retires every table entry owned by device and destroys native children in
+// dependency-safe order. Used for both vkDestroyDevice and disconnect cleanup.
+bool destroy_device_objects(ObjectTables& tables, VkDevice device);
+
 struct HandlerRegistrar {
     HandlerRegistrar(Opcode opcode, Handler fn) { register_handler(opcode, fn); }
 };

@@ -56,6 +56,7 @@ constexpr uint32_t kMaxPNextDepth = 4;
 // Keep shader requests comfortably below the common 64 MiB message cap after
 // their device handle and field-wise CreateInfo envelope are added.
 constexpr uint64_t kMaxShaderCodeBytes = 16u * 1024u * 1024u;
+constexpr uint32_t kMaxPushConstantBytes = 65536;
 
 
 // Implemented on the server, where handles are real driver objects. Resolves
@@ -220,7 +221,7 @@ void write_DescriptorSetAllocateInfo(Writer& w, const VkDescriptorSetAllocateInf
 bool read_DescriptorSetAllocateInfo(Reader& r, Arena& arena, const HandleResolver& hr,
                                      VkDescriptorSetAllocateInfo* out);
 
-void write_WriteDescriptorSet(Writer& w, const VkWriteDescriptorSet& s);
+bool write_WriteDescriptorSet(Writer& w, const VkWriteDescriptorSet& s);
 bool read_WriteDescriptorSet(Reader& r, Arena& arena, const HandleResolver& hr,
                               VkWriteDescriptorSet* out);
 

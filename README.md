@@ -27,8 +27,12 @@ compositor.
 | `wayland/` | the protocol proxy and its own wire format |
 | `tools/offscreen.cpp` | ordinary Vulkan triangle used as an offscreen regression test |
 | `tools/texture_upload.cpp` | staging-uploaded checkerboard sampled and read back offscreen |
+| `tools/indexed_draw.cpp` | deterministic indexed quad with two vertex bindings and nonzero buffer offsets |
 | `tools/compute.cpp` | deterministic storage-buffer compute regression |
+| `tools/push_descriptor_compute.cpp` | deterministic push-constant, multi-set, descriptor-array compute regression |
 | `tools/buffer_ops.cpp` | deterministic fill/update/copy buffer regression |
+| `tools/multi_submit_reuse.cpp` | deterministic queue ordering, command-buffer re-record, and fence reuse regression |
+| `tools/offscreen_reuse.cpp` | deterministic multi-frame graphics reuse across two device epochs |
 | `tools/mipmap.cpp` | deterministic per-level barrier, blit, and mip-chain readback regression |
 | `tools/noncoherent_memory.cpp` | explicit non-coherent mapped-memory flush/invalidate regression |
 | `docs/compatibility-roadmap.md` | tested applications and ordered sample/API milestones |
@@ -243,19 +247,29 @@ kept outside the repository.
 
 ## What works
 
-- `tools/offscreen` renders a triangle and `tools/texture_upload` uploads and
-  samples a single-mip checkerboard; both read back deterministic images whose
-  PPM output is **byte-identical** on the system driver and through this one.
+- `tools/offscreen` renders a triangle, `tools/texture_upload` uploads and
+  samples a single-mip checkerboard, and `tools/indexed_draw` renders an indexed
+  quad from two vertex bindings at distinct nonzero offsets plus a uint16 index
+  buffer at a nonzero offset. All three read back deterministic images whose PPM
+  output is **byte-identical** on the system driver and through this one.
 - `tools/compute` verifies compute dispatch with an exact storage-buffer checksum.
-  `tools/buffer_ops` verifies `vkCmdFillBuffer`, `vkCmdUpdateBuffer`,
+  `tools/push_descriptor_compute` verifies two partial push-constant writes, two
+  descriptor sets, sparse binding numbers, and a three-element storage-buffer
+  descriptor array with split updates and an exact checksum. `tools/buffer_ops`
+  verifies `vkCmdFillBuffer`, `vkCmdUpdateBuffer`,
   `vkCmdCopyBuffer`, a transfer barrier, and mapped readback with another exact
-  checksum. `tools/mipmap` generates four levels with per-level barriers and
-  `vkCmdBlitImage`, then verifies the exact 340-byte chain and checksum.
+  checksum. `tools/multi_submit_reuse` verifies multiple submit infos and command
+  buffers, ordered consecutive submits, command-buffer re-recording, and fence
+  reset/reuse with an exact 64-word checksum. `tools/offscreen_reuse` reuses one
+  graphics resource graph for three frames in each of two recreated-device epochs
+  on one instance, checking every frame and an aggregate checksum. `tools/mipmap`
+  generates four levels with per-level barriers and `vkCmdBlitImage`, then verifies
+  the exact 340-byte chain and checksum.
   `tools/noncoherent_memory` explicitly flushes and invalidates two disjoint,
   nonzero atom-aligned ranges and verifies 128 synchronized bytes; it reports a
   stable skip when no compatible non-coherent host-visible memory type exists.
-  `tests/test_samples.py` runs all six workloads directly and remoted through a
-  fresh server, requiring matching pass or skip results.
+  `tests/test_samples.py` runs all twelve workloads directly and remoted through a
+  fresh server, requiring matching image bytes or pass/skip results.
 - [`docs/compatibility-roadmap.md`](docs/compatibility-roadmap.md) distinguishes
   tested support from planned Vulkan command families and sample applications.
 - `vkcube` and `vkcubepp` each complete 20 frames through the server-owned
@@ -273,8 +287,9 @@ kept outside the repository.
   handshake digest so mixed old/new peers are rejected before decoding messages.
 - CTS results drift as the suite grows and commands get implemented, so the
   pass/fail count is not pinned here. `tests/cts_baseline.txt` is the known-
-  passing set (`dEQP-VK.api.smoke.*` and `dEQP-VK.api.info.*` so far); run
-  `python3 tests/run_cts.py --caselist '<pattern>'` and it reports only the
+  passing set, covering `api.smoke`, reviewed `api.info`, descriptor object
+  lifecycle, monolithic push constants, descriptor updates, and compute descriptor
+  array copies; run `python3 tests/run_cts.py --caselist '<pattern>'` and it reports only the
   delta against that baseline - regressions fail the run, new passes and the
   (expected, still large) set of unimplemented commands do not.
 - Server-side validation is clean against the real driver.

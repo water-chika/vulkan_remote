@@ -10,6 +10,10 @@ cmake_minimum_required(VERSION 3.21)
 #   tools/   a direct client used to measure the link
 project(vulkan_remoting CXX)
 
+if(WIN32)
+    add_compile_definitions(WIN32_LEAN_AND_MEAN NOMINMAX)
+endif()
+
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR CMAKE_CXX_BYTE_ORDER STREQUAL "BIG_ENDIAN" OR
    NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
     message(FATAL_ERROR "vulkan_remoting currently supports only little-endian x86-64 peers")
@@ -169,17 +173,29 @@ file(GENERATE
 add_executable(vulkan_remoting_offscreen tools/offscreen.cpp)
 target_link_libraries(vulkan_remoting_offscreen PRIVATE Vulkan::Vulkan)
 
+add_executable(vulkan_remoting_offscreen_reuse tools/offscreen_reuse.cpp)
+target_link_libraries(vulkan_remoting_offscreen_reuse PRIVATE Vulkan::Vulkan)
+
 add_executable(vulkan_remoting_texture_upload tools/texture_upload.cpp)
 target_link_libraries(vulkan_remoting_texture_upload PRIVATE Vulkan::Vulkan)
 
+add_executable(vulkan_remoting_indexed_draw tools/indexed_draw.cpp)
+target_link_libraries(vulkan_remoting_indexed_draw PRIVATE Vulkan::Vulkan)
+
 add_executable(vulkan_remoting_compute tools/compute.cpp)
 target_link_libraries(vulkan_remoting_compute PRIVATE Vulkan::Vulkan)
+
+add_executable(vulkan_remoting_push_descriptor_compute tools/push_descriptor_compute.cpp)
+target_link_libraries(vulkan_remoting_push_descriptor_compute PRIVATE Vulkan::Vulkan)
 
 add_executable(vulkan_remoting_spirv15_compute tools/spirv15_compute.cpp)
 target_link_libraries(vulkan_remoting_spirv15_compute PRIVATE Vulkan::Vulkan)
 
 add_executable(vulkan_remoting_buffer_ops tools/buffer_ops.cpp)
 target_link_libraries(vulkan_remoting_buffer_ops PRIVATE Vulkan::Vulkan)
+
+add_executable(vulkan_remoting_multi_submit_reuse tools/multi_submit_reuse.cpp)
+target_link_libraries(vulkan_remoting_multi_submit_reuse PRIVATE Vulkan::Vulkan)
 
 add_executable(vulkan_remoting_mipmap tools/mipmap.cpp)
 target_link_libraries(vulkan_remoting_mipmap PRIVATE Vulkan::Vulkan)
@@ -385,7 +401,9 @@ endif()  # NOT WIN32
 # These exercise only the common TCP protocol and ordinary Vulkan samples, so
 # register them on every platform where the server and ICD build.
 add_executable(vulkan_remoting_test_pnext tests/test_pnext.cpp)
+target_include_directories(vulkan_remoting_test_pnext PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
 target_link_libraries(vulkan_remoting_test_pnext PRIVATE vulkan_remoting_wire Vulkan::Headers)
+target_include_directories(vulkan_remoting_test_pnext PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
 add_test(NAME pnext COMMAND vulkan_remoting_test_pnext)
 
 add_test(NAME wire

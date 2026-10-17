@@ -446,7 +446,7 @@ void handle_CreateSwapchainKHR(Session& c) {
     }
     c.writer.u32(static_cast<uint32_t>(Status::Ok));
     c.writer.i32(result);
-    c.writer.handle(result == VK_SUCCESS ? c.tables.swapchains.add(swapchain) : 0);
+    c.writer.handle(result == VK_SUCCESS ? c.tables.swapchains.add(swapchain, device) : 0);
     c.reply();
 }
 
@@ -464,7 +464,11 @@ void handle_DestroySwapchainKHR(Session& c) {
     vkDestroySwapchainKHR(device, swapchain, nullptr);
     c.tables.swapchain_devices.erase(owner);
     c.tables.swapchain_surfaces.erase(swapchain);
-    c.tables.swapchain_image_ids.erase(swp_id);
+    const auto cached = c.tables.swapchain_image_ids.find(swp_id);
+    if (cached != c.tables.swapchain_image_ids.end()) {
+        for (uint64_t image_id : cached->second) c.tables.images.take(image_id);
+        c.tables.swapchain_image_ids.erase(cached);
+    }
 }
 
 void handle_GetSwapchainImagesKHR(Session& c) {
@@ -486,7 +490,7 @@ void handle_GetSwapchainImagesKHR(Session& c) {
     // Idempotent on the real driver, but Table::add is not - see objects.hpp.
     auto& cached = c.tables.swapchain_image_ids[swp_id];
     if (cached.empty()) {
-        for (VkImage img : images) cached.push_back(c.tables.images.add(img));
+        for (VkImage img : images) cached.push_back(c.tables.images.add(img, device));
     }
 
     c.writer.u32(static_cast<uint32_t>(Status::Ok));

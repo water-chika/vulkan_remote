@@ -1,112 +1,128 @@
 #!/usr/bin/env python3
 """CTS regression tracking for the remoting driver.
 
-dEQP-VK.api.info.* alone is 8167 cases, and this project implements a small
-fraction of the Vulkan command set, so most of them are expected to not pass
-and will stay that way for a long time. Comparing the whole 8167-case result
-against a fixed number (as the README used to) tells you nothing about
-whether *this change* broke anything. What matters is the delta against the
-last known-good run, so this script records a set of case names that were
-seen passing and only reports movement relative to that set:
+Results are compared by case name against a reviewed known-pass baseline. Only a
+known pass becoming non-passing is a regression. New passes are reported and are
+adopted only with an explicit, scoped ``--update`` run.
 
-  REGRESSIONS       - baseline said this case passes; it does not now.
-                       This is the only thing that makes the run fail.
-  NEW PASSES        - passing now, not yet in the baseline. Not an error;
-                       run again with --update to adopt them (review the
-                       diff before committing it, the same as any other
-                       change to recorded behaviour).
-  STILL NOT PASSING - neither passing nor in the baseline. Informational.
-                       This is the expected state for most of the suite
-                       until the corresponding command is implemented.
-
-Baseline file format (tests/cts_baseline.txt by default): one fully
-qualified case name per line, sorted, blank lines and lines starting with
-'#' ignored. Regenerate a subset with, e.g.:
-
-    python3 tests/run_cts.py --caselist 'dEQP-VK.api.smoke.*' --update
-    python3 tests/run_cts.py --caselist 'dEQP-VK.api.info.*'  --update
-
-Each --update only touches cases inside --caselist's scope: it drops
-baseline entries in scope that regressed, adds new passes in scope, and
-leaves every baseline entry outside scope untouched. So running smoke.*
-then info.* with --update accumulates a baseline covering both, rather
-than each overwriting the other.
-
-Stdlib only, so it runs anywhere the server and deqp-vk build.
+For attributable runs, this runner selects the remoting ICD through both loader
+overrides, can enable loader diagnostics and server validation, asserts an exact
+matched-case count, reports every dEQP status separately, and can preserve the
+QPA and server logs.
 """
 
 import argparse
+import collections
 import fnmatch
 import os
 import re
+import socket
 import subprocess
 import sys
+import tempfile
 import time
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_wire import Server, Failure  # reuse the same server-lifecycle helper
 
 DEFAULT_DEQP = ('/mnt/worktrees/VK-GL-CTS/build/external/vulkancts/modules/'
                 'vulkan/deqp-vk')
-
-# QualityWarning/CompatibilityWarning are dEQP's way of saying "passed, but
-# noted something" - they are not failures and must not be treated as such.
 PASSING_STATUSES = {'Pass', 'QualityWarning', 'CompatibilityWarning'}
-
 CASE_RESULT_RE = re.compile(
-    r'#beginTestCaseResult (\S+).*?<Result StatusCode="(\w+)"',
-    re.S)
+    r'#beginTestCaseResult (\S+).*?<Result StatusCode="(\w+)"', re.S)
+
+
+class Failure(Exception):
+    pass
 
 
 def parse_qpa(path):
-    """Map case name -> dEQP status code from a TestResults.qpa log."""
+    """Map case name to dEQP status code from a TestResults.qpa log."""
     with open(path) as handle:
         text = handle.read()
-    results = {}
-    for name, status in CASE_RESULT_RE.findall(text):
-        results[name] = status
-    return results
+    return {name: status for name, status in CASE_RESULT_RE.findall(text)}
 
 
 def load_baseline(path):
     if not os.path.exists(path):
         return set()
-    cases = set()
     with open(path) as handle:
-        for line in handle:
-            line = line.strip()
-            if line and not line.startswith('#'):
-                cases.add(line)
-    return cases
+        return {line.strip() for line in handle
+                if line.strip() and not line.lstrip().startswith('#')}
 
 
 def write_baseline(path, cases):
     with open(path, 'w') as handle:
         handle.write('# Cases known to pass dEQP-VK through the remoting driver.\n')
         handle.write('# One fully qualified case name per line, sorted.\n')
-        handle.write('# Regenerate a subset with:\n')
-        handle.write('#   python3 tests/run_cts.py --caselist \'<pattern>\' --update\n')
-        handle.write('# See tests/run_cts.py\'s docstring for what --update does to\n')
-        handle.write('# entries outside the given caselist.\n')
+        handle.write('# Regenerate a reviewed subset with:\n')
+        handle.write("#   python3 tests/run_cts.py --caselist '<pattern>' --update\n")
+        handle.write('# Updates leave entries outside the selected scope untouched.\n')
         for case in sorted(cases):
             handle.write(case + '\n')
 
 
-def run_deqp(deqp_path, caselist, log_path, port, timeout):
-    """Run deqp-vk against the ICD, cwd set to the binary's own directory.
+def free_port():
+    with socket.socket() as probe:
+        probe.bind(('127.0.0.1', 0))
+        return probe.getsockname()[1]
 
-    deqp-vk looks up its data files (shaders, images) relative to its
-    working directory, not its own path, so anywhere else it fails every
-    case with a file-not-found rather than a real result.
-    """
-    deqp_dir = os.path.dirname(os.path.abspath(deqp_path))
+
+class CtsServer:
+    def __init__(self, binary, port, validate, log_path):
+        self.binary = binary
+        self.port = port or free_port()
+        self.validate = validate
+        self.log_path = log_path
+        self.process = None
+        self.log_handle = None
+
+    def start(self):
+        server_env = dict(os.environ)
+        for name in ('VK_DRIVER_FILES', 'VK_ICD_FILENAMES', 'VK_REMOTING_HOST',
+                     'VK_REMOTING_PORT', 'VK_LOADER_DEBUG'):
+            server_env.pop(name, None)
+        argv = [self.binary, '--port', str(self.port)]
+        if self.validate:
+            argv.append('--validate')
+        self.log_handle = open(self.log_path, 'w')
+        self.process = subprocess.Popen(
+            argv, stdout=self.log_handle, stderr=subprocess.STDOUT,
+            text=True, env=server_env)
+        deadline = time.time() + 15.0
+        while time.time() < deadline:
+            if self.process.poll() is not None:
+                self.stop()
+                raise Failure('server exited early; see {}'.format(self.log_path))
+            try:
+                with socket.create_connection(('127.0.0.1', self.port), timeout=0.5):
+                    return
+            except OSError:
+                time.sleep(0.2)
+        self.stop()
+        raise Failure('server did not start listening; see {}'.format(self.log_path))
+
+    def stop(self):
+        if self.process and self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait()
+        if self.log_handle:
+            self.log_handle.close()
+            self.log_handle = None
+
+
+def run_deqp(deqp_path, caselist, log_path, port, timeout, manifest, loader_debug):
+    """Run deqp-vk with its working directory set beside its data files."""
     env = dict(os.environ)
-    env['VK_DRIVER_FILES'] = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        'build', 'vulkan_remoting_icd.json')
+    env['VK_DRIVER_FILES'] = manifest
+    env['VK_ICD_FILENAMES'] = manifest
     env['VK_REMOTING_HOST'] = '127.0.0.1'
     env['VK_REMOTING_PORT'] = str(port)
-
+    if loader_debug:
+        env['VK_LOADER_DEBUG'] = 'all'
+    else:
+        env.pop('VK_LOADER_DEBUG', None)
     cmd = [
         os.path.abspath(deqp_path),
         '--deqp-case=' + caselist,
@@ -114,97 +130,138 @@ def run_deqp(deqp_path, caselist, log_path, port, timeout):
         '--deqp-log-images=disable',
         '--deqp-log-shader-sources=disable',
     ]
-    result = subprocess.run(cmd, cwd=deqp_dir, env=env, capture_output=True,
-                             text=True, timeout=timeout)
-    return result
+    return subprocess.run(
+        cmd, cwd=os.path.dirname(os.path.abspath(deqp_path)), env=env,
+        capture_output=True, text=True, timeout=timeout)
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__,
-                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--caselist', required=True,
-                         help="dEQP case filter, e.g. 'dEQP-VK.api.smoke.*'")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--caselist', required=True)
     parser.add_argument('--baseline', default=os.path.join(
         os.path.dirname(os.path.abspath(__file__)), 'cts_baseline.txt'))
-    parser.add_argument('--deqp', default=DEFAULT_DEQP,
-                         help='path to the deqp-vk binary')
-    parser.add_argument('--update', action='store_true',
-                         help='rewrite the baseline from this run instead of just checking it')
-    parser.add_argument('--server-port', type=int, default=24680)
+    parser.add_argument('--deqp', default=DEFAULT_DEQP)
+    parser.add_argument('--update', action='store_true')
+    parser.add_argument('--server-port', type=int, default=0,
+                        help='server port; zero selects an ephemeral port')
     parser.add_argument('--no-server', action='store_true',
-                         help='do not start a server; one must already be listening on '
-                              '--server-port (useful to run several caselists against one '
-                              'long-lived server and dodge the TIME_WAIT wait between runs)')
-    parser.add_argument('--timeout', type=float, default=1800.0,
-                         help='seconds to allow deqp-vk to run before giving up')
+                        help='use an already-running server on --server-port')
+    parser.add_argument('--validate-server', action='store_true')
+    parser.add_argument('--loader-debug', action='store_true')
+    parser.add_argument('--expected-count', type=int)
+    parser.add_argument('--log', help='preserve the QPA at this path')
+    parser.add_argument('--server-log', help='preserve server output at this path')
+    parser.add_argument('--timeout', type=float, default=1800.0)
     args = parser.parse_args()
 
     if not os.path.exists(args.deqp):
         print('deqp-vk not found at {}'.format(args.deqp))
         return 2
+    if args.expected_count is not None and args.expected_count <= 0:
+        print('--expected-count must be positive')
+        return 2
+    if args.no_server and not args.server_port:
+        print('--no-server requires a nonzero --server-port')
+        return 2
 
-    build_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'build')
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    build_dir = os.path.join(root, 'build')
     server_binary = os.path.join(build_dir, 'vulkan_remoting_server')
+    manifest = os.path.abspath(os.path.join(build_dir, 'vulkan_remoting_icd.json'))
+    if not os.path.exists(manifest):
+        print('ICD manifest not found at {}'.format(manifest))
+        return 2
 
-    log_path = '/tmp/cts_run_{}.qpa'.format(os.getpid())
+    temp_paths = []
+    if args.log:
+        log_path = os.path.abspath(args.log)
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    else:
+        fd, log_path = tempfile.mkstemp(prefix='cts-remoting-', suffix='.qpa')
+        os.close(fd)
+        os.remove(log_path)
+        temp_paths.append(log_path)
+    if args.server_log:
+        server_log = os.path.abspath(args.server_log)
+        os.makedirs(os.path.dirname(server_log), exist_ok=True)
+    else:
+        fd, server_log = tempfile.mkstemp(prefix='cts-server-', suffix='.log')
+        os.close(fd)
+        temp_paths.append(server_log)
 
+    server = None
+    result = None
     try:
         if args.no_server:
-            result = run_deqp(args.deqp, args.caselist, log_path, args.server_port,
-                               args.timeout)
+            port = args.server_port
         else:
             if not os.path.exists(server_binary):
-                print('server binary not found at {}'.format(server_binary))
-                return 2
-            with Server(server_binary, args.server_port) as server:
-                result = run_deqp(args.deqp, args.caselist, log_path, server.port,
-                                   args.timeout)
-    except Failure as error:
-        print('server: {}'.format(error))
+                raise Failure('server binary not found at {}'.format(server_binary))
+            server = CtsServer(server_binary, args.server_port,
+                               args.validate_server, server_log)
+            server.start()
+            port = server.port
+        result = run_deqp(args.deqp, args.caselist, log_path, port, args.timeout,
+                          manifest, args.loader_debug)
+    except (Failure, subprocess.TimeoutExpired) as error:
+        print('CTS infrastructure failure: {}'.format(error))
         return 2
-    except subprocess.TimeoutExpired:
-        print('deqp-vk did not finish within {:.0f}s'.format(args.timeout))
-        return 2
+    finally:
+        if server:
+            server.stop()
 
+    if result.stdout:
+        print(result.stdout, end='')
+    if result.stderr:
+        print(result.stderr, file=sys.stderr, end='')
+    if result.returncode != 0:
+        print('deqp-vk exited {}'.format(result.returncode))
+        return 2
     if not os.path.exists(log_path):
-        print('deqp-vk produced no log; stderr follows:')
-        print(result.stderr)
+        print('deqp-vk produced no QPA log')
         return 2
 
     results = parse_qpa(log_path)
     if not results:
-        print('no cases in {} matched {}'.format(args.deqp, args.caselist))
+        print('no cases matched {}'.format(args.caselist))
+        return 2
+    if args.expected_count is not None and len(results) != args.expected_count:
+        print('case count mismatch: expected {}, got {}'.format(
+            args.expected_count, len(results)))
         return 2
 
+    histogram = collections.Counter(results.values())
+    print('{} cases run'.format(len(results)))
+    print('statuses: ' + ', '.join('{}={}'.format(name, histogram[name])
+                                  for name in sorted(histogram)))
+
+    if args.validate_server:
+        with open(server_log) as handle:
+            server_text = handle.read()
+        if 'VK_LAYER_KHRONOS_validation enabled' not in server_text:
+            print('server validation was requested but not enabled; see {}'.format(server_log))
+            return 2
+        if 'validation:' in server_text:
+            print('server validation diagnostics found; see {}'.format(server_log))
+            return 1
+
     passing = {case for case, status in results.items() if status in PASSING_STATUSES}
-    not_passing = {case for case, status in results.items() if status not in PASSING_STATUSES}
-
+    not_passing = set(results) - passing
     baseline = load_baseline(args.baseline)
-    # "In scope" means the caselist pattern covers the name, not "deqp-vk
-    # happened to produce a result for it" - a baseline case that a rename,
-    # removal or crash upstream makes vanish from the results must still
-    # count as a regression, not be silently dropped from consideration.
     in_scope_baseline = {case for case in baseline
-                          if fnmatch.fnmatchcase(case, args.caselist)}
-
+                         if fnmatch.fnmatchcase(case, args.caselist)}
     regressions = sorted(in_scope_baseline - passing)
     new_passes = sorted(passing - baseline)
     still_not_passing = sorted(not_passing - baseline)
-
-    print('{} cases run ({} passing, {} not passing)'.format(
-        len(results), len(passing), len(not_passing)))
 
     if regressions:
         print('\nREGRESSIONS ({}):'.format(len(regressions)))
         for case in regressions:
             print('  {}  ({})'.format(case, results.get(case, 'missing from run')))
-
     if new_passes:
         print('\nNEW PASSES ({}):'.format(len(new_passes)))
         for case in new_passes:
             print('  ' + case)
-
     if still_not_passing:
         print('\nSTILL NOT PASSING ({}, informational):'.format(len(still_not_passing)))
         for case in still_not_passing[:20]:
@@ -212,13 +269,23 @@ def main():
         if len(still_not_passing) > 20:
             print('  ... and {} more'.format(len(still_not_passing) - 20))
 
-    if args.update:
+    if args.update and regressions:
+        print('\nbaseline not updated because regressions were found')
+    elif args.update:
         updated = (baseline - in_scope_baseline) | passing
         write_baseline(args.baseline, updated)
         print('\nbaseline updated: {} cases ({:+d})'.format(
             len(updated), len(updated) - len(baseline)))
 
-    os.remove(log_path)
+    if args.log:
+        print('QPA: ' + log_path)
+    if args.server_log:
+        print('server log: ' + server_log)
+    for path in temp_paths:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
 
     if regressions:
         print('\n{} regression(s)'.format(len(regressions)))

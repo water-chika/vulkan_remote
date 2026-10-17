@@ -74,6 +74,88 @@ Handler find_handler(Opcode opcode) {
     return it == handler_table().end() ? nullptr : it->second;
 }
 
+bool destroy_device_objects(ObjectTables& t, VkDevice device) {
+    if (device == VK_NULL_HANDLE) return false;
+    vkDeviceWaitIdle(device);
+
+#define DESTROY_OWNED(table, destroy_fn)                                      \
+    do {                                                                       \
+        for (uint64_t id = 1; id <= t.table.size(); ++id) {                   \
+            if (!t.table.owned_by(id, device)) continue;                       \
+            auto object = t.table.take(id);                                    \
+            if (object != VK_NULL_HANDLE) destroy_fn(device, object, nullptr);  \
+        }                                                                      \
+    } while (false)
+
+    // Objects that reference other children go first.
+    DESTROY_OWNED(framebuffers, vkDestroyFramebuffer);
+    DESTROY_OWNED(pipelines, vkDestroyPipeline);
+    DESTROY_OWNED(descriptor_pools, vkDestroyDescriptorPool);
+    DESTROY_OWNED(descriptor_update_templates, vkDestroyDescriptorUpdateTemplate);
+    DESTROY_OWNED(image_views, vkDestroyImageView);
+    DESTROY_OWNED(buffer_views, vkDestroyBufferView);
+    DESTROY_OWNED(samplers, vkDestroySampler);
+    DESTROY_OWNED(shader_modules, vkDestroyShaderModule);
+    DESTROY_OWNED(pipeline_layouts, vkDestroyPipelineLayout);
+    DESTROY_OWNED(descriptor_set_layouts, vkDestroyDescriptorSetLayout);
+    DESTROY_OWNED(render_passes, vkDestroyRenderPass);
+    DESTROY_OWNED(pipeline_caches, vkDestroyPipelineCache);
+    DESTROY_OWNED(query_pools, vkDestroyQueryPool);
+    DESTROY_OWNED(events, vkDestroyEvent);
+    DESTROY_OWNED(fences, vkDestroyFence);
+    DESTROY_OWNED(semaphores, vkDestroySemaphore);
+    DESTROY_OWNED(sampler_ycbcr_conversions, vkDestroySamplerYcbcrConversion);
+    DESTROY_OWNED(command_pools, vkDestroyCommandPool);
+    DESTROY_OWNED(buffers, vkDestroyBuffer);
+    // Swapchain images are borrowed; retire their IDs but never destroy them.
+    for (const auto& cached : t.swapchain_image_ids) {
+        if (t.swapchains.owner(cached.first) != device) continue;
+        for (uint64_t image_id : cached.second) t.images.take(image_id);
+    }
+    DESTROY_OWNED(images, vkDestroyImage);
+    DESTROY_OWNED(swapchains, vkDestroySwapchainKHR);
+    DESTROY_OWNED(memories, vkFreeMemory);
+#undef DESTROY_OWNED
+
+    // Pool-owned and implicit children are invalid once their parents are gone.
+    t.command_buffers.retire_owned(device);
+    t.descriptor_sets.retire_owned(device);
+    t.queues.retire_owned(device);
+    t.device_physical_devices.erase(device);
+    for (auto it = t.command_buffer_devices.begin(); it != t.command_buffer_devices.end();) {
+        if (it->second == device) it = t.command_buffer_devices.erase(it); else ++it;
+    }
+    for (auto it = t.memory_metadata.begin(); it != t.memory_metadata.end();) {
+        if (it->second.owner == device) it = t.memory_metadata.erase(it); else ++it;
+    }
+    for (auto it = t.descriptor_set_owners.begin(); it != t.descriptor_set_owners.end();) {
+        if (it->second.device == device) it = t.descriptor_set_owners.erase(it); else ++it;
+    }
+    for (auto it = t.descriptor_update_template_owners.begin();
+         it != t.descriptor_update_template_owners.end();) {
+        if (it->second == device) {
+            t.descriptor_update_template_entries.erase(it->first);
+            it = t.descriptor_update_template_owners.erase(it);
+        } else ++it;
+    }
+    for (auto it = t.sampler_ycbcr_conversion_owners.begin();
+         it != t.sampler_ycbcr_conversion_owners.end();) {
+        if (it->second == device) it = t.sampler_ycbcr_conversion_owners.erase(it); else ++it;
+    }
+    for (auto it = t.swapchain_devices.begin(); it != t.swapchain_devices.end();) {
+        if (it->second == device) {
+            t.swapchain_surfaces.erase(it->first);
+            it = t.swapchain_devices.erase(it);
+        } else ++it;
+    }
+    for (auto it = t.swapchain_image_ids.begin(); it != t.swapchain_image_ids.end();) {
+        if (t.swapchains.owner(it->first) == VK_NULL_HANDLE) it = t.swapchain_image_ids.erase(it);
+        else ++it;
+    }
+    vkDestroyDevice(device, nullptr);
+    return true;
+}
+
 }  // namespace remoting
 
 bool Server::init_vulkan(bool validate, bool want_wayland) {
@@ -326,25 +408,10 @@ namespace {
 // with fourteen objects still on it.
 void destroy_session_objects(remoting::ObjectTables& tables, Server& server) {
     const VkInstance instance = server.instance();
-    for (size_t i=0;i<tables.descriptor_update_templates.all().size();++i) {
-        auto object=tables.descriptor_update_templates.all()[i];if(!object)continue;
-        auto owner=tables.descriptor_update_template_owners.find(i+1);if(owner==tables.descriptor_update_template_owners.end())continue;
-        auto fn=reinterpret_cast<PFN_vkDestroyDescriptorUpdateTemplate>(vkGetDeviceProcAddr(owner->second,"vkDestroyDescriptorUpdateTemplate"));if(fn)fn(owner->second,object,nullptr);
+    for (uint64_t id = 1; id <= tables.devices.size(); ++id) {
+        VkDevice device = tables.devices.take(id);
+        if (device != VK_NULL_HANDLE) remoting::destroy_device_objects(tables, device);
     }
-    for (size_t i=0;i<tables.sampler_ycbcr_conversions.all().size();++i) {
-        auto object=tables.sampler_ycbcr_conversions.all()[i];if(!object)continue;
-        auto owner=tables.sampler_ycbcr_conversion_owners.find(i+1);if(owner==tables.sampler_ycbcr_conversion_owners.end())continue;
-        auto fn=reinterpret_cast<PFN_vkDestroySamplerYcbcrConversion>(vkGetDeviceProcAddr(owner->second,"vkDestroySamplerYcbcrConversion"));if(fn)fn(owner->second,object,nullptr);
-    }
-    for (VkSwapchainKHR swapchain : tables.swapchains.all()) {
-        if (swapchain == VK_NULL_HANDLE) continue;
-        const auto it = tables.swapchain_devices.find(swapchain);
-        if (it == tables.swapchain_devices.end() || it->second == VK_NULL_HANDLE) continue;
-        vkDeviceWaitIdle(it->second);
-        vkDestroySwapchainKHR(it->second, swapchain, nullptr);
-    }
-    tables.swapchain_devices.clear();
-    tables.swapchain_surfaces.clear();
 
     for (VkSurfaceKHR surface : tables.surfaces.all()) {
         if (surface == VK_NULL_HANDLE) continue;
@@ -479,6 +546,7 @@ void Server::serve(remoting::socket_t fd) {
         // cleanup below, so this preserves that exactly.
         if (session.close_connection) {
             destroy_session_objects(tables, *this);
+            g_current_error_counter = nullptr;
             return;
         }
     }

@@ -211,6 +211,15 @@ VKAPI_ATTR void VKAPI_CALL CmdBindDescriptorSets(
     VkCommandBuffer handle, VkPipelineBindPoint pipelineBindPoint, VkPipelineLayout layout,
     uint32_t firstSet, uint32_t descriptorSetCount, const VkDescriptorSet* pDescriptorSets,
     uint32_t dynamicOffsetCount, const uint32_t* pDynamicOffsets) {
+    if (layout == VK_NULL_HANDLE || descriptorSetCount > kMaxArrayElements ||
+        dynamicOffsetCount > kMaxArrayElements ||
+        (descriptorSetCount != 0 && pDescriptorSets == nullptr) ||
+        (dynamicOffsetCount != 0 && pDynamicOffsets == nullptr)) {
+        return;
+    }
+    for (uint32_t i = 0; i < descriptorSetCount; ++i) {
+        if (pDescriptorSets[i] == VK_NULL_HANDLE) return;
+    }
     RemoteCommandBuffer* cb = to_cmd(handle);
     Writer request;
     request.handle(cb->remote_id);
@@ -229,6 +238,10 @@ VKAPI_ATTR void VKAPI_CALL CmdBindDescriptorSets(
 VKAPI_ATTR void VKAPI_CALL CmdBindVertexBuffers(VkCommandBuffer handle, uint32_t firstBinding,
                                                 uint32_t bindingCount, const VkBuffer* pBuffers,
                                                 const VkDeviceSize* pOffsets) {
+    if (bindingCount > kMaxArrayElements ||
+        (bindingCount != 0 && (pBuffers == nullptr || pOffsets == nullptr))) {
+        return;
+    }
     RemoteCommandBuffer* cb = to_cmd(handle);
     Writer request;
     request.handle(cb->remote_id);
@@ -243,6 +256,7 @@ VKAPI_ATTR void VKAPI_CALL CmdBindVertexBuffers(VkCommandBuffer handle, uint32_t
 
 VKAPI_ATTR void VKAPI_CALL CmdBindIndexBuffer(VkCommandBuffer handle, VkBuffer buffer,
                                               VkDeviceSize offset, VkIndexType indexType) {
+    if (buffer == VK_NULL_HANDLE) return;
     RemoteCommandBuffer* cb = to_cmd(handle);
     Writer request;
     request.handle(cb->remote_id);
@@ -503,6 +517,10 @@ VKAPI_ATTR void VKAPI_CALL CmdWaitEvents(VkCommandBuffer h,uint32_t eventCount,c
 VKAPI_ATTR void VKAPI_CALL CmdPushConstants(VkCommandBuffer handle, VkPipelineLayout layout,
                                             VkShaderStageFlags stageFlags, uint32_t offset,
                                             uint32_t size, const void* pValues) {
+    if (layout == VK_NULL_HANDLE || size == 0 || size > kMaxPushConstantBytes ||
+        (offset & 3) != 0 || (size & 3) != 0 || pValues == nullptr) {
+        return;
+    }
     RemoteCommandBuffer* cb = to_cmd(handle);
     Writer request;
     request.handle(cb->remote_id);

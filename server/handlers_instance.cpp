@@ -424,8 +424,8 @@ void handle_vkEnumerateDeviceExtensionProperties(Session& s) {
             // This implementation may support no more than its reviewed contract,
             // while the real device may advertise no more than its own revision.
             // Advertising either larger value would not be a true intersection.
-            property.specVersion = std::min(find_extension(required.name)->specVersion,
-                                            required.spec_version);
+            property.specVersion = (std::min)(find_extension(required.name)->specVersion,
+                                              required.spec_version);
             supported.push_back(property);
         }
     }

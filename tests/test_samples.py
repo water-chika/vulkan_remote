@@ -14,6 +14,7 @@ SAMPLE_TIMEOUT = 30.0
 GRAPHICS_SAMPLES = (
     "vulkan_remoting_offscreen",
     "vulkan_remoting_texture_upload",
+    "vulkan_remoting_indexed_draw",
 )
 TEXT_SAMPLES = {
     "vulkan_remoting_renderpass2_fsr": (
@@ -26,10 +27,19 @@ TEXT_SAMPLES = {
         "SKIP: real ICD lacks complete renderpass2 fragment-shading-rate extension closure",
     ),
     "vulkan_remoting_compute": ("PASS: compute checksum=ead71172 elements=64",),
+    "vulkan_remoting_push_descriptor_compute": (
+        "PASS: push-descriptor-compute checksum=f2abf38a elements=64",
+    ),
     "vulkan_remoting_spirv15_compute": (
         "PASS: spirv15-compute checksum=ead71172 elements=64",
     ),
     "vulkan_remoting_buffer_ops": ("PASS: buffer-ops checksum=3b5a6394 words=64",),
+    "vulkan_remoting_multi_submit_reuse": (
+        "PASS: multi-submit-reuse checksum=cf2969b4 words=64 submits=4",
+    ),
+    "vulkan_remoting_offscreen_reuse": (
+        "PASS: offscreen-reuse checksum=d622f815 epochs=2 frames=6",
+    ),
     "vulkan_remoting_mipmap": ("PASS: mipmap checksum=82f68ebe bytes=340 levels=4",),
     "vulkan_remoting_noncoherent_memory": (
         "PASS: noncoherent-memory checksum=c7c92645 bytes=128 ranges=2",
@@ -126,8 +136,11 @@ def run_process(command, env, label):
     return result.stdout
 
 
-def run_graphics_sample(binary, output, env, label):
-    run_process([binary, "--no-validate", output], env, label)
+def run_graphics_sample(binary, output, env, label, validate=False):
+    validation_arg = "--validate" if validate else "--no-validate"
+    process_output = run_process([binary, validation_arg, output], env, label)
+    if validate and "validation:" in process_output:
+        raise Failure("{} produced validation output\n{}".format(label, process_output))
     if not os.path.isfile(output):
         raise Failure("{} did not write {}".format(label, output))
     with open(output, "rb") as handle:
@@ -161,7 +174,8 @@ def test_sample(build_dir, sample_name, temporary_dir, loader_data_root):
     else:
         direct_path = os.path.join(temporary_dir, sample_name + "-direct.ppm")
         direct = run_graphics_sample(
-            binary, direct_path, direct_env, sample_name + " direct")
+            binary, direct_path, direct_env, sample_name + " direct",
+            validate=sample_name == "vulkan_remoting_indexed_draw")
 
     port = free_port()
     server = start_server(server_binary, port, loader_data_root)

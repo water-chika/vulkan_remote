@@ -34,7 +34,7 @@ using remoting::mark_oneway_error;
         const VkResult result = VkCreateFn(device, &info, nullptr, &obj);                   \
         c.writer.u32(static_cast<uint32_t>(Status::Ok));                                    \
         c.writer.i32(result);                                                               \
-        c.writer.handle(result == VK_SUCCESS ? c.tables.table.add(obj) : 0);                \
+        c.writer.handle(result == VK_SUCCESS ? c.tables.table.add(obj, device) : 0);                \
         c.reply();                                                                          \
     }
 
@@ -43,11 +43,12 @@ using remoting::mark_oneway_error;
         const uint64_t device_id = c.reader.handle();                       \
         VkDevice device = c.tables.devices.get(device_id);                  \
         const uint64_t id = c.reader.handle();                              \
-        VkType obj = c.tables.table.take(id);                               \
-        if (!c.reader.ok() || device == VK_NULL_HANDLE) {                   \
+        if (!c.reader.ok() || device == VK_NULL_HANDLE ||                  \
+            !c.tables.table.owned_by(id, device)) {                         \
             mark_oneway_error(c);                                           \
             return;                                                         \
         }                                                                   \
+        VkType obj = c.tables.table.take(id);                               \
         VkDestroyFn(device, obj, nullptr);                                  \
     }
 
@@ -74,7 +75,7 @@ void handle_AllocateCommandBuffers(Session& c) {
     c.writer.i32(result);
     c.writer.u32(info.commandBufferCount);
     for (uint32_t i = 0; i < info.commandBufferCount; ++i) {
-        const uint64_t id = result == VK_SUCCESS ? c.tables.command_buffers.add(cbs[i]) : 0;
+        const uint64_t id = result == VK_SUCCESS ? c.tables.command_buffers.add(cbs[i], device) : 0;
         if (id) c.tables.command_buffer_devices[cbs[i]] = device;
         c.writer.handle(id);
     }
@@ -268,20 +269,26 @@ void handle_CmdBindDescriptorSets(Session& c) {
     VkPipelineLayout layout = c.tables.pipeline_layout(c.reader.handle());
     const uint32_t first_set = c.reader.u32();
     const uint32_t count = c.reader.u32();
-    if (!count_fits(c.reader, count, 8)) {
+    if (count > remoting::kMaxArrayElements || !count_fits(c.reader, count, 8)) {
         mark_oneway_error(c);
         return;
     }
     std::vector<VkDescriptorSet> sets(count);
-    for (uint32_t i = 0; i < count; ++i) sets[i] = c.tables.descriptor_set(c.reader.handle());
+    bool valid = cb != VK_NULL_HANDLE && layout != VK_NULL_HANDLE &&
+                 (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS ||
+                  bind_point == VK_PIPELINE_BIND_POINT_COMPUTE);
+    for (uint32_t i = 0; i < count; ++i) {
+        sets[i] = c.tables.descriptor_set(c.reader.handle());
+        valid = valid && sets[i] != VK_NULL_HANDLE;
+    }
     const uint32_t dyn_count = c.reader.u32();
-    if (!count_fits(c.reader, dyn_count, 4)) {
+    if (dyn_count > remoting::kMaxArrayElements || !count_fits(c.reader, dyn_count, 4)) {
         mark_oneway_error(c);
         return;
     }
     std::vector<uint32_t> offsets(dyn_count);
     for (uint32_t i = 0; i < dyn_count; ++i) offsets[i] = c.reader.u32();
-    if (!c.reader.ok() || cb == VK_NULL_HANDLE) {
+    if (!c.reader.ok() || c.reader.remaining() != 0 || !valid) {
         mark_oneway_error(c);
         return;
     }
@@ -293,17 +300,19 @@ void handle_CmdBindVertexBuffers(Session& c) {
     VkCommandBuffer cb = c.tables.command_buffer(c.reader.handle());
     const uint32_t first = c.reader.u32();
     const uint32_t count = c.reader.u32();
-    if (!count_fits(c.reader, count, 16)) {
+    if (count > remoting::kMaxArrayElements || !count_fits(c.reader, count, 16)) {
         mark_oneway_error(c);
         return;
     }
     std::vector<VkBuffer> buffers(count);
     std::vector<VkDeviceSize> offsets(count);
+    bool valid = cb != VK_NULL_HANDLE;
     for (uint32_t i = 0; i < count; ++i) {
         buffers[i] = c.tables.buffer(c.reader.handle());
         offsets[i] = c.reader.u64();
+        valid = valid && buffers[i] != VK_NULL_HANDLE;
     }
-    if (!c.reader.ok() || cb == VK_NULL_HANDLE) {
+    if (!c.reader.ok() || !valid) {
         mark_oneway_error(c);
         return;
     }
@@ -315,7 +324,10 @@ void handle_CmdBindIndexBuffer(Session& c) {
     VkBuffer buffer = c.tables.buffer(c.reader.handle());
     const uint64_t offset = c.reader.u64();
     const int32_t index_type = c.reader.i32();
-    if (!c.reader.ok() || cb == VK_NULL_HANDLE) {
+    const bool valid_index_type = index_type == VK_INDEX_TYPE_UINT16 ||
+                                  index_type == VK_INDEX_TYPE_UINT32;
+    if (!c.reader.ok() || cb == VK_NULL_HANDLE || buffer == VK_NULL_HANDLE ||
+        !valid_index_type) {
         mark_oneway_error(c);
         return;
     }
@@ -659,7 +671,9 @@ void handle_CmdPushConstants(Session& c) {
     const uint32_t stage_flags = c.reader.u32();
     const uint32_t offset = c.reader.u32();
     std::vector<char> values;
-    if (!c.reader.bytes(&values) || !c.reader.ok() || cb == VK_NULL_HANDLE) {
+    if (!c.reader.bytes(&values, remoting::kMaxPushConstantBytes) || !c.reader.ok() ||
+        c.reader.remaining() != 0 || cb == VK_NULL_HANDLE || layout == VK_NULL_HANDLE ||
+        values.empty() || (offset & 3) != 0 || (values.size() & 3) != 0) {
         mark_oneway_error(c);
         return;
     }

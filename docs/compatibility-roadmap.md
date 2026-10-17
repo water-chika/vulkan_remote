@@ -10,14 +10,18 @@ pinned Vulkan registry or the real server driver implements it.
 |---|---|---|
 | `vulkan_remoting_offscreen` | Classic render pass, graphics pipeline, direct draw, image readback | Direct/remoted PPM bytes match |
 | `vulkan_remoting_texture_upload` | Staging upload, image barriers, descriptors, sampler, textured draw | Direct/remoted PPM bytes match |
+| `vulkan_remoting_indexed_draw` | Two vertex bindings at distinct nonzero offsets, uint16 index buffer, indexed draw | Direct/remoted PPM bytes match |
 | `vulkan_remoting_compute` | Storage buffer, compute pipeline, dispatch, mapped readback | Exact checksum |
+| `vulkan_remoting_push_descriptor_compute` | Two partial push writes, two sets, sparse bindings, three-element descriptor array with split updates | Exact words and checksum direct/remoted |
 | `vulkan_remoting_spirv15_compute` | SPIR-V 1.5 Vulkan memory model, storage buffer compute | Exact words and checksum direct/remoted |
 | `vulkan_remoting_buffer_ops` | Buffer fill, update, copy, transfer barrier, mapped readback | Exact checksum |
+| `vulkan_remoting_multi_submit_reuse` | Multiple submit infos/command buffers, ordered consecutive submits, command-buffer re-record, fence status/reset/reuse | Exact 64-word checksum direct/remoted |
+| `vulkan_remoting_offscreen_reuse` | Three reused graphics frames across each of two device epochs on one instance/connection | Exact per-frame pixels and aggregate checksum direct/remoted |
 | `vulkan_remoting_mipmap` | Four mip levels, per-level barriers, same-image blits, multi-region readback | Exact 340-byte chain and checksum |
 | `vulkan_remoting_noncoherent_memory` | Two disjoint nonzero atom-aligned ranges, explicit flush/invalidate, GPU copies | Exact 128 synchronized bytes and checksum, or matching capability skip |
 | `vkcube`, `vkcubepp` | Acquire, submit, present, fences, server-owned native window | Bounded frame completion |
 | `vulkaninfo --summary` | Instance/device enumeration and basic properties | Selected normalized fields |
-| CTS `api.smoke.*`, `api.info.*` | Known passing cases in `tests/cts_baseline.txt` | Baseline regression delta |
+| CTS smoke/info plus focused descriptor/push groups | Known passing cases in `tests/cts_baseline.txt` | Baseline regression delta with exact matched counts and preserved QPA/server logs |
 
 The ICD reports Vulkan 1.2 after completing the registry-derived cumulative
 command gates: 137/137 Vulkan 1.0, 28/28 Vulkan 1.1, and 13/13 Vulkan 1.2.
@@ -52,10 +56,6 @@ and bounded sparse queries/binds.
 These samples mostly use commands already remoted and should land before broader
 API claims:
 
-- Indexed drawing and multiple vertex bindings.
-- Push constants and multiple descriptor bindings/array elements.
-- Multiple command buffers/submits, fence reset/reuse, and queue ordering.
-- Multi-frame offscreen resource reuse and device recreation.
 - Sequential sessions on one server and two simultaneous clients.
 
 ## Milestone 2 — Vulkan 1.0 command families (implemented)

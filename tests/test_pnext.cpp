@@ -1,12 +1,15 @@
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <utility>
+#include <vector>
 
 #include <vulkan/vulkan.h>
 
 #include "extension_contract.hpp"
 #include "marshal.hpp"
+#include "objects.hpp"
 
 namespace {
 
@@ -192,6 +195,33 @@ void test_renderpass2_rejects_hostile_nested_count() {
 struct ViewResolver final : NullResolver {
     VkImageView image_view(uint64_t id) const override {
         return reinterpret_cast<VkImageView>(static_cast<uintptr_t>(id + 100));
+    }
+};
+
+struct DescriptorResolver final : NullResolver {
+    VkBuffer buffer(uint64_t id) const override {
+        return reinterpret_cast<VkBuffer>(static_cast<uintptr_t>(id + 100));
+    }
+    VkBufferView buffer_view(uint64_t id) const override {
+        return reinterpret_cast<VkBufferView>(static_cast<uintptr_t>(id + 200));
+    }
+    VkDescriptorSet descriptor_set(uint64_t id) const override {
+        return reinterpret_cast<VkDescriptorSet>(static_cast<uintptr_t>(id + 300));
+    }
+};
+
+struct GraphicsResolver final : NullResolver {
+    VkShaderModule shader_module(uint64_t id) const override {
+        return reinterpret_cast<VkShaderModule>(static_cast<uintptr_t>(id + 100));
+    }
+    VkPipelineLayout pipeline_layout(uint64_t id) const override {
+        return reinterpret_cast<VkPipelineLayout>(static_cast<uintptr_t>(id + 200));
+    }
+    VkRenderPass render_pass(uint64_t id) const override {
+        return reinterpret_cast<VkRenderPass>(static_cast<uintptr_t>(id + 300));
+    }
+    VkPipeline pipeline(uint64_t id) const override {
+        return reinterpret_cast<VkPipeline>(static_cast<uintptr_t>(id + 400));
     }
 };
 
@@ -381,6 +411,134 @@ void test_shader_module_malformed_wire_is_rejected() {
     rejected(unsupported_pnext);
 }
 
+void test_graphics_pipeline_nested_bounds_and_handles() {
+    VkPipelineShaderStageCreateInfo stage{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    stage.module = reinterpret_cast<VkShaderModule>(7);
+    stage.pName = "main";
+    VkPipelineVertexInputStateCreateInfo vertex{
+        VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineViewportStateCreateInfo viewport{
+        VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    viewport.viewportCount = 1;
+    viewport.scissorCount = 1;
+    VkPipelineMultisampleStateCreateInfo multisample{
+        VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    info.stageCount = 1;
+    info.pStages = &stage;
+    info.pVertexInputState = &vertex;
+    info.pViewportState = &viewport;
+    info.pMultisampleState = &multisample;
+    info.layout = reinterpret_cast<VkPipelineLayout>(11);
+    info.renderPass = reinterpret_cast<VkRenderPass>(13);
+    info.basePipelineHandle = reinterpret_cast<VkPipeline>(17);
+
+    remoting::Writer writer;
+    assert(remoting::write_GraphicsPipelineCreateInfo(writer, info));
+    GraphicsResolver resolver;
+    remoting::Reader reader(writer.data().data(), writer.data().size());
+    remoting::Arena arena;
+    VkGraphicsPipelineCreateInfo decoded{};
+    assert(remoting::read_GraphicsPipelineCreateInfo(reader, arena, resolver, &decoded));
+    assert(reader.remaining() == 0);
+    assert(decoded.pStages[0].module == reinterpret_cast<VkShaderModule>(107));
+    assert(decoded.layout == reinterpret_cast<VkPipelineLayout>(211));
+    assert(decoded.renderPass == reinterpret_cast<VkRenderPass>(313));
+    assert(decoded.basePipelineHandle == reinterpret_cast<VkPipeline>(417));
+
+    NullResolver missing;
+    remoting::Reader missing_reader(writer.data().data(), writer.data().size());
+    remoting::Arena missing_arena;
+    VkGraphicsPipelineCreateInfo missing_decoded{};
+    assert(!remoting::read_GraphicsPipelineCreateInfo(
+        missing_reader, missing_arena, missing, &missing_decoded));
+
+    viewport.viewportCount = remoting::kMaxArrayElements + 1;
+    remoting::Writer excessive_viewports;
+    assert(!remoting::write_GraphicsPipelineCreateInfo(excessive_viewports, info));
+    assert(excessive_viewports.data().empty());
+    viewport.viewportCount = 1;
+
+    multisample.rasterizationSamples = static_cast<VkSampleCountFlagBits>(0xffffffffu);
+    remoting::Writer invalid_samples;
+    assert(!remoting::write_GraphicsPipelineCreateInfo(invalid_samples, info));
+    assert(invalid_samples.data().empty());
+}
+
+void test_write_descriptor_set_round_trip_and_rejections() {
+    VkDescriptorBufferInfo buffer_info{reinterpret_cast<VkBuffer>(7), 16, 64};
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = reinterpret_cast<VkDescriptorSet>(11);
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    write.pBufferInfo = &buffer_info;
+
+    remoting::Writer writer;
+    assert(remoting::write_WriteDescriptorSet(writer, write));
+    DescriptorResolver resolver;
+    remoting::Reader reader(writer.data().data(), writer.data().size());
+    remoting::Arena arena;
+    VkWriteDescriptorSet decoded{};
+    assert(remoting::read_WriteDescriptorSet(reader, arena, resolver, &decoded));
+    assert(reader.remaining() == 0);
+    assert(decoded.dstSet == reinterpret_cast<VkDescriptorSet>(311));
+    assert(decoded.pBufferInfo[0].buffer == reinterpret_cast<VkBuffer>(107));
+    assert(decoded.pBufferInfo[0].offset == 16 && decoded.pBufferInfo[0].range == 64);
+
+    const auto write_rejected = [](const VkWriteDescriptorSet& candidate) {
+        remoting::Writer out;
+        out.u32(0x12345678);
+        const auto before = out.data();
+        assert(!remoting::write_WriteDescriptorSet(out, candidate));
+        assert(out.data() == before);
+    };
+    auto invalid = write;
+    invalid.descriptorCount = remoting::kMaxArrayElements + 1;
+    write_rejected(invalid);
+    invalid = write;
+    invalid.pBufferInfo = nullptr;
+    write_rejected(invalid);
+    invalid = write;
+    invalid.pBufferInfo = &buffer_info;
+    invalid.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    write_rejected(invalid);
+    VkDescriptorBufferInfo null_buffer{};
+    invalid = write;
+    invalid.pBufferInfo = &null_buffer;
+    write_rejected(invalid);
+
+    const auto read_rejected = [&](const std::vector<char>& wire) {
+        remoting::Reader bad_reader(wire.data(), wire.size());
+        remoting::Arena bad_arena;
+        VkWriteDescriptorSet bad{};
+        assert(!remoting::read_WriteDescriptorSet(bad_reader, bad_arena, resolver, &bad));
+    };
+    auto truncated = writer.data();
+    truncated.pop_back();
+    read_rejected(truncated);
+
+    auto wrong_kind = writer.data();
+    const size_t kind_offset = sizeof(uint32_t) + sizeof(VkWriteDescriptorSet);
+    assert(kind_offset + sizeof(uint32_t) <= wrong_kind.size());
+    const uint32_t image_kind = 1;
+    std::memcpy(wrong_kind.data() + kind_offset, &image_kind, sizeof(image_kind));
+    read_rejected(wrong_kind);
+
+    auto invalid_set = writer.data();
+    const uint64_t missing_set = 0;
+    const size_t raw_offset = sizeof(uint32_t);
+    const size_t set_offset = raw_offset + offsetof(VkWriteDescriptorSet, dstSet);
+    std::memcpy(invalid_set.data() + set_offset, &missing_set, sizeof(missing_set));
+    read_rejected(invalid_set);
+
+    auto invalid_buffer = writer.data();
+    const size_t buffer_offset = kind_offset + sizeof(uint32_t);
+    const uint64_t missing_buffer = 0;
+    std::memcpy(invalid_buffer.data() + buffer_offset, &missing_buffer, sizeof(missing_buffer));
+    read_rejected(invalid_buffer);
+}
+
 void test_renderpass_begin_attachment_handles() {
     VkImageView views[]{reinterpret_cast<VkImageView>(7),reinterpret_cast<VkImageView>(9)};
     VkRenderPassAttachmentBeginInfo attachments{VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO};
@@ -519,6 +677,23 @@ void test_vulkan12_policy_and_timeline_round_trip() {
     auto* to=static_cast<const VkTimelineSemaphoreSubmitInfo*>(tchain);assert(to->waitSemaphoreValueCount==2&&to->pWaitSemaphoreValues[1]==4&&to->pSignalSemaphoreValues[0]==8);
 }
 
+void test_owned_table_ids_never_revive() {
+    remoting::Table<VkBuffer> table;
+    const VkDevice first_device = reinterpret_cast<VkDevice>(uintptr_t{0x1000});
+    const VkDevice second_device = reinterpret_cast<VkDevice>(uintptr_t{0x2000});
+    const VkBuffer first = reinterpret_cast<VkBuffer>(uintptr_t{0x3000});
+    const VkBuffer second = reinterpret_cast<VkBuffer>(uintptr_t{0x4000});
+    const uint64_t stale_id = table.add(first, first_device);
+    assert(table.owned_by(stale_id, first_device));
+    table.retire_owned(first_device);
+    assert(table.get(stale_id) == VK_NULL_HANDLE);
+    assert(!table.owned_by(stale_id, first_device));
+    const uint64_t fresh_id = table.add(second, second_device);
+    assert(fresh_id != stale_id);
+    assert(table.get(stale_id) == VK_NULL_HANDLE);
+    assert(table.get(fresh_id) == second);
+}
+
 }  // namespace
 
 int main() {
@@ -534,11 +709,14 @@ int main() {
     test_shader_module_round_trip_preserves_spirv_words();
     test_shader_module_marshal_rejections_are_transactional();
     test_shader_module_malformed_wire_is_rejected();
+    test_graphics_pipeline_nested_bounds_and_handles();
+    test_write_descriptor_set_round_trip_and_rejections();
     test_renderpass_begin_attachment_handles();
     test_proc_address_extension_contract();
     test_device_extension_dependency_contract();
     test_fsr_rate_count_capacity_and_incomplete();
     test_excessive_nested_count_is_rejected();
     test_vulkan12_policy_and_timeline_round_trip();
+    test_owned_table_ids_never_revive();
     return 0;
 }

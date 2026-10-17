@@ -27,8 +27,9 @@ namespace remoting {
 template <typename T>
 class Table {
    public:
-    uint64_t add(T value) {
+    uint64_t add(T value, VkDevice owner = VK_NULL_HANDLE) {
         m_slots.push_back(value);
+        m_owners.push_back(owner);
         return static_cast<uint64_t>(m_slots.size());
     }
 
@@ -43,7 +44,26 @@ class Table {
         if (id == 0 || id > m_slots.size()) return VK_NULL_HANDLE;
         T value = m_slots[id - 1];
         m_slots[id - 1] = VK_NULL_HANDLE;
+        m_owners[id - 1] = VK_NULL_HANDLE;
         return value;
+    }
+
+    VkDevice owner(uint64_t id) const {
+        if (id == 0 || id > m_owners.size()) return VK_NULL_HANDLE;
+        return m_owners[id - 1];
+    }
+
+    bool owned_by(uint64_t id, VkDevice device) const {
+        return get(id) != VK_NULL_HANDLE && owner(id) == device;
+    }
+
+    void retire_owned(VkDevice device) {
+        for (size_t i = 0; i < m_slots.size(); ++i) {
+            if (m_owners[i] == device) {
+                m_slots[i] = VK_NULL_HANDLE;
+                m_owners[i] = VK_NULL_HANDLE;
+            }
+        }
     }
 
     size_t size() const { return m_slots.size(); }
@@ -55,6 +75,7 @@ class Table {
 
    private:
     std::vector<T> m_slots;
+    std::vector<VkDevice> m_owners;
 };
 
 // Everything the server knows about one connected client. A second client
@@ -66,6 +87,11 @@ struct ServerMemory {
     VkMemoryPropertyFlags property_flags = 0;
     VkDeviceSize map_alignment = 1;
     VkDeviceSize non_coherent_atom_size = 1;
+};
+
+struct DescriptorSetOwner {
+    VkDevice device = VK_NULL_HANDLE;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
 };
 
 struct ObjectTables final : public HandleResolver {
@@ -90,6 +116,7 @@ struct ObjectTables final : public HandleResolver {
     Table<VkDescriptorSetLayout> descriptor_set_layouts;
     Table<VkDescriptorPool> descriptor_pools;
     Table<VkDescriptorSet> descriptor_sets;
+    std::unordered_map<uint64_t, DescriptorSetOwner> descriptor_set_owners;
     Table<VkSampler> samplers;
     Table<VkDescriptorUpdateTemplate> descriptor_update_templates;
     Table<VkSamplerYcbcrConversion> sampler_ycbcr_conversions;

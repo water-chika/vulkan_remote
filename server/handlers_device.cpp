@@ -29,7 +29,7 @@ void handle_CreateDevice(Session& c) {
     VkDeviceCreateInfo info{};
     if (!c.reader.ok() || physdev == VK_NULL_HANDLE ||
         !remoting::read_DeviceCreateInfo(c.reader, arena, c.tables, &info)) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        c.reply_status(Status::DecodeError);
         return;
     }
 
@@ -53,30 +53,7 @@ void handle_DestroyDevice(Session& c) {
         mark_oneway_error(c);
         return;
     }
-    bool waited = false;
-    for (size_t i = 0; i < c.tables.swapchains.all().size(); ++i) {
-        const VkSwapchainKHR swapchain = c.tables.swapchains.all()[i];
-        const auto owner = c.tables.swapchain_devices.find(swapchain);
-        if (swapchain == VK_NULL_HANDLE || owner == c.tables.swapchain_devices.end() ||
-            owner->second != device) {
-            continue;
-        }
-        if (!waited) {
-            vkDeviceWaitIdle(device);
-            waited = true;
-        }
-        vkDestroySwapchainKHR(device, swapchain, nullptr);
-        c.tables.swapchains.take(i + 1);
-        c.tables.swapchain_devices.erase(owner);
-        c.tables.swapchain_surfaces.erase(swapchain);
-        c.tables.swapchain_image_ids.erase(i + 1);
-    }
-    c.tables.device_physical_devices.erase(device);
-    for (auto it = c.tables.memory_metadata.begin(); it != c.tables.memory_metadata.end();) {
-        if (it->second.owner == device) it = c.tables.memory_metadata.erase(it);
-        else ++it;
-    }
-    vkDestroyDevice(device, nullptr);
+    remoting::destroy_device_objects(c.tables, device);
 }
 
 void handle_GetDeviceQueue(Session& c) {
@@ -85,17 +62,17 @@ void handle_GetDeviceQueue(Session& c) {
     const uint32_t family = c.reader.u32();
     const uint32_t index = c.reader.u32();
     if (!c.reader.ok() || device == VK_NULL_HANDLE) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        c.reply_status(Status::DecodeError);
         return;
     }
     VkQueue queue = VK_NULL_HANDLE;
     vkGetDeviceQueue(device, family, index, &queue);
     c.writer.u32(static_cast<uint32_t>(Status::Ok));
-    c.writer.handle(c.tables.queues.add(queue));
+    c.writer.handle(c.tables.queues.add(queue, device));
     c.reply();
 }
 
-void handle_GetDeviceQueue2(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());VkDeviceQueueInfo2 info{VK_STRUCTURE_TYPE_DEVICE_QUEUE_INFO_2};info.flags=c.reader.u32();info.queueFamilyIndex=c.reader.u32();info.queueIndex=c.reader.u32();if(!c.reader.ok()||!d){c.reply_status(Status::DecodeError);return;}auto fn=reinterpret_cast<PFN_vkGetDeviceQueue2>(vkGetDeviceProcAddr(d,"vkGetDeviceQueue2"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}VkQueue q=VK_NULL_HANDLE;fn(d,&info,&q);c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.handle(q?c.tables.queues.add(q):0);c.reply();}
+void handle_GetDeviceQueue2(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());VkDeviceQueueInfo2 info{VK_STRUCTURE_TYPE_DEVICE_QUEUE_INFO_2};info.flags=c.reader.u32();info.queueFamilyIndex=c.reader.u32();info.queueIndex=c.reader.u32();if(!c.reader.ok()||!d){c.reply_status(Status::DecodeError);return;}auto fn=reinterpret_cast<PFN_vkGetDeviceQueue2>(vkGetDeviceProcAddr(d,"vkGetDeviceQueue2"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}VkQueue q=VK_NULL_HANDLE;fn(d,&info,&q);c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.handle(q?c.tables.queues.add(q, d):0);c.reply();}
 void handle_GetDeviceGroupPeerMemoryFeatures(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());uint32_t heap=c.reader.u32(),local=c.reader.u32(),remote=c.reader.u32();if(!c.reader.ok()||!d){c.reply_status(Status::DecodeError);return;}auto fn=reinterpret_cast<PFN_vkGetDeviceGroupPeerMemoryFeatures>(vkGetDeviceProcAddr(d,"vkGetDeviceGroupPeerMemoryFeatures"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}VkPeerMemoryFeatureFlags flags=0;fn(d,heap,local,remote,&flags);c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.u32(flags);c.reply();}
 
 void handle_GetSemaphoreCounterValue(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());VkSemaphore sem=c.tables.semaphore(c.reader.handle());if(!c.reader.ok()||!d||!sem){c.reply_status(Status::DecodeError);return;}auto fn=reinterpret_cast<PFN_vkGetSemaphoreCounterValue>(vkGetDeviceProcAddr(d,"vkGetSemaphoreCounterValue"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}uint64_t value=0;VkResult result=fn(d,sem,&value);c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.i32(result);c.writer.u64(value);c.reply();}
@@ -109,9 +86,10 @@ void handle_QueueSubmit(Session& c) {
     const uint64_t fence_id = c.reader.handle();
     VkFence fence = c.tables.fence(fence_id);
     const uint32_t submit_count = c.reader.u32();
-    // Each submit reads at least wait_count+cb_count+signal_count = 12 bytes.
-    if (!count_fits(c.reader, submit_count, 12)) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+    // Each submit has an empty pNext chain plus three array counts.
+    if (submit_count > remoting::kMaxArrayElements ||
+        !count_fits(c.reader, submit_count, 16)) {
+        c.reply_status(Status::DecodeError);
         return;
     }
 
@@ -124,7 +102,8 @@ void handle_QueueSubmit(Session& c) {
     std::vector<std::vector<VkSemaphore>> signal_semaphores(submit_count);
     Arena arena;
 
-    bool ok = c.reader.ok() && queue != VK_NULL_HANDLE;
+    bool ok = c.reader.ok() && queue != VK_NULL_HANDLE &&
+              (fence_id == 0 || fence != VK_NULL_HANDLE);
     for (uint32_t i = 0; ok && i < submit_count; ++i) {
         VkSubmitInfo& s = submits[i];
         s.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -132,7 +111,8 @@ void handle_QueueSubmit(Session& c) {
                                         remoting::PNextContext::Submit, &s.pNext);
 
         const uint32_t wait_count = c.reader.u32();
-        if (ok && !count_fits(c.reader, wait_count, 12)) ok = false;
+        if (ok && (wait_count > remoting::kMaxArrayElements ||
+                   !count_fits(c.reader, wait_count, 12))) ok = false;
         if (ok) {
             wait_semaphores[i].resize(wait_count);
             wait_stages[i].resize(wait_count);
@@ -140,25 +120,30 @@ void handle_QueueSubmit(Session& c) {
         for (uint32_t j = 0; j < wait_count && ok; ++j) {
             wait_semaphores[i][j] = c.tables.semaphore(c.reader.handle());
             wait_stages[i][j] = c.reader.u32();
+            ok = wait_semaphores[i][j] != VK_NULL_HANDLE;
         }
         s.waitSemaphoreCount = wait_count;
         s.pWaitSemaphores = wait_count ? wait_semaphores[i].data() : nullptr;
         s.pWaitDstStageMask = wait_count ? wait_stages[i].data() : nullptr;
 
         const uint32_t cb_count = c.reader.u32();
-        if (ok && !count_fits(c.reader, cb_count, 8)) ok = false;
+        if (ok && (cb_count > remoting::kMaxArrayElements ||
+                   !count_fits(c.reader, cb_count, 8))) ok = false;
         if (ok) command_buffers[i].resize(cb_count);
         for (uint32_t j = 0; j < cb_count && ok; ++j) {
             command_buffers[i][j] = c.tables.command_buffer(c.reader.handle());
+            ok = command_buffers[i][j] != VK_NULL_HANDLE;
         }
         s.commandBufferCount = cb_count;
         s.pCommandBuffers = cb_count ? command_buffers[i].data() : nullptr;
 
         const uint32_t signal_count = c.reader.u32();
-        if (ok && !count_fits(c.reader, signal_count, 8)) ok = false;
+        if (ok && (signal_count > remoting::kMaxArrayElements ||
+                   !count_fits(c.reader, signal_count, 8))) ok = false;
         if (ok) signal_semaphores[i].resize(signal_count);
         for (uint32_t j = 0; j < signal_count && ok; ++j) {
             signal_semaphores[i][j] = c.tables.semaphore(c.reader.handle());
+            ok = signal_semaphores[i][j] != VK_NULL_HANDLE;
         }
         s.signalSemaphoreCount = signal_count;
         s.pSignalSemaphores = signal_count ? signal_semaphores[i].data() : nullptr;
@@ -166,8 +151,9 @@ void handle_QueueSubmit(Session& c) {
         ok = ok && c.reader.ok();
     }
 
+    ok = ok && c.reader.remaining() == 0;
     if (!ok) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        c.reply_status(Status::DecodeError);
         return;
     }
 
@@ -191,7 +177,7 @@ void handle_QueueWaitIdle(Session& c) {
     const uint64_t queue_id = c.reader.handle();
     VkQueue queue = c.tables.queues.get(queue_id);
     if (!c.reader.ok() || queue == VK_NULL_HANDLE) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        c.reply_status(Status::DecodeError);
         return;
     }
     const VkResult result = vkQueueWaitIdle(queue);
@@ -204,7 +190,7 @@ void handle_DeviceWaitIdle(Session& c) {
     const uint64_t device_id = c.reader.handle();
     VkDevice device = c.tables.devices.get(device_id);
     if (!c.reader.ok() || device == VK_NULL_HANDLE) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        c.reply_status(Status::DecodeError);
         return;
     }
     const VkResult result = vkDeviceWaitIdle(device);
@@ -222,14 +208,14 @@ void handle_CreateFence(Session& c) {
     VkFenceCreateInfo info{};
     if (!c.reader.ok() || device == VK_NULL_HANDLE ||
         !remoting::read_FenceCreateInfo(c.reader, arena, c.tables, &info)) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        c.reply_status(Status::DecodeError);
         return;
     }
     VkFence fence = VK_NULL_HANDLE;
     const VkResult result = vkCreateFence(device, &info, nullptr, &fence);
     c.writer.u32(static_cast<uint32_t>(Status::Ok));
     c.writer.i32(result);
-    c.writer.handle(result == VK_SUCCESS ? c.tables.fences.add(fence) : 0);
+    c.writer.handle(result == VK_SUCCESS ? c.tables.fences.add(fence, device) : 0);
     c.reply();
 }
 
@@ -249,17 +235,24 @@ void handle_ResetFences(Session& c) {
     const uint64_t device_id = c.reader.handle();
     VkDevice device = c.tables.devices.get(device_id);
     const uint32_t count = c.reader.u32();
-    if (!count_fits(c.reader, count, 8)) {
-        mark_oneway_error(c);
+    if (count == 0 || count > remoting::kMaxArrayElements ||
+        !count_fits(c.reader, count, 8)) {
+        c.reply_status(Status::DecodeError);
         return;
     }
     std::vector<VkFence> fences(count);
-    for (uint32_t i = 0; i < count; ++i) fences[i] = c.tables.fence(c.reader.handle());
-    if (!c.reader.ok() || device == VK_NULL_HANDLE) {
-        mark_oneway_error(c);
+    bool ok = device != VK_NULL_HANDLE;
+    for (uint32_t i = 0; i < count; ++i) {
+        fences[i] = c.tables.fence(c.reader.handle());
+        ok = ok && fences[i] != VK_NULL_HANDLE;
+    }
+    if (!ok || !c.reader.ok() || c.reader.remaining() != 0) {
+        c.reply_status(Status::DecodeError);
         return;
     }
-    if (vkResetFences(device, count, fences.data()) != VK_SUCCESS) mark_oneway_error(c);
+    c.writer.u32(static_cast<uint32_t>(Status::Ok));
+    c.writer.i32(vkResetFences(device, count, fences.data()));
+    c.reply();
 }
 
 void handle_GetFenceStatus(Session& c) {
@@ -267,8 +260,9 @@ void handle_GetFenceStatus(Session& c) {
     VkDevice device = c.tables.devices.get(device_id);
     const uint64_t fence_id = c.reader.handle();
     VkFence fence = c.tables.fence(fence_id);
-    if (!c.reader.ok() || device == VK_NULL_HANDLE) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+    if (!c.reader.ok() || c.reader.remaining() != 0 ||
+        device == VK_NULL_HANDLE || fence == VK_NULL_HANDLE) {
+        c.reply_status(Status::DecodeError);
         return;
     }
     const VkResult result = vkGetFenceStatus(device, fence);
@@ -282,15 +276,20 @@ void handle_WaitForFences(Session& c) {
     VkDevice device = c.tables.devices.get(device_id);
     const bool wait_all = c.reader.u32() != 0;
     const uint32_t count = c.reader.u32();
-    if (!count_fits(c.reader, count, 8)) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+    if (count == 0 || count > remoting::kMaxArrayElements ||
+        !count_fits(c.reader, count, 8)) {
+        c.reply_status(Status::DecodeError);
         return;
     }
     std::vector<VkFence> fences(count);
-    for (uint32_t i = 0; i < count; ++i) fences[i] = c.tables.fence(c.reader.handle());
+    bool ok = device != VK_NULL_HANDLE;
+    for (uint32_t i = 0; i < count; ++i) {
+        fences[i] = c.tables.fence(c.reader.handle());
+        ok = ok && fences[i] != VK_NULL_HANDLE;
+    }
     const uint64_t timeout = c.reader.u64();
-    if (!c.reader.ok() || device == VK_NULL_HANDLE) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+    if (!ok || !c.reader.ok() || c.reader.remaining() != 0) {
+        c.reply_status(Status::DecodeError);
         return;
     }
     const VkResult result = vkWaitForFences(device, count, fences.data(), wait_all, timeout);
@@ -306,14 +305,14 @@ void handle_CreateSemaphore(Session& c) {
     VkSemaphoreCreateInfo info{};
     if (!c.reader.ok() || device == VK_NULL_HANDLE ||
         !remoting::read_SemaphoreCreateInfo(c.reader, arena, c.tables, &info)) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        c.reply_status(Status::DecodeError);
         return;
     }
     VkSemaphore semaphore = VK_NULL_HANDLE;
     const VkResult result = vkCreateSemaphore(device, &info, nullptr, &semaphore);
     c.writer.u32(static_cast<uint32_t>(Status::Ok));
     c.writer.i32(result);
-    c.writer.handle(result == VK_SUCCESS ? c.tables.semaphores.add(semaphore) : 0);
+    c.writer.handle(result == VK_SUCCESS ? c.tables.semaphores.add(semaphore, device) : 0);
     c.reply();
 }
 
@@ -346,7 +345,7 @@ void handle_DestroySemaphore(Session& c) {
         const VkResult result = VkCreateFn(device, &info, nullptr, &obj);                   \
         c.writer.u32(static_cast<uint32_t>(Status::Ok));                                    \
         c.writer.i32(result);                                                               \
-        c.writer.handle(result == VK_SUCCESS ? c.tables.table.add(obj) : 0);                \
+        c.writer.handle(result == VK_SUCCESS ? c.tables.table.add(obj, device) : 0);                \
         c.reply();                                                                          \
     }
 
@@ -355,8 +354,13 @@ void handle_DestroySemaphore(Session& c) {
         const uint64_t device_id = c.reader.handle();                       \
         VkDevice device = c.tables.devices.get(device_id);                  \
         const uint64_t id = c.reader.handle();                              \
+        if (!c.reader.ok() || device == VK_NULL_HANDLE ||                  \
+            !c.tables.table.owned_by(id, device)) {                         \
+            mark_oneway_error(c);                                           \
+            return;                                                         \
+        }                                                                   \
         VkType obj = c.tables.table.take(id);                               \
-        if (!c.reader.ok() || device == VK_NULL_HANDLE) {                   \
+        if (obj == VK_NULL_HANDLE) {                                        \
             mark_oneway_error(c);                                           \
             return;                                                         \
         }                                                                   \
@@ -407,7 +411,7 @@ void handle_CreateShaderModule(Session& c) {
     const VkResult result = vkCreateShaderModule(device, &info, nullptr, &module);
     c.writer.u32(static_cast<uint32_t>(Status::Ok));
     c.writer.i32(result);
-    c.writer.handle(result == VK_SUCCESS ? c.tables.shader_modules.add(module) : 0);
+    c.writer.handle(result == VK_SUCCESS ? c.tables.shader_modules.add(module, device) : 0);
     c.reply();
 }
 SERVER_DESTROY(ShaderModule, VkShaderModule, vkDestroyShaderModule, shader_modules)
@@ -431,7 +435,7 @@ void handle_CreateRenderPass2(Session& c) {
     auto fn=reinterpret_cast<PFN_vkCreateRenderPass2>(vkGetDeviceProcAddr(device,"vkCreateRenderPass2"));
     if(!fn) fn=reinterpret_cast<PFN_vkCreateRenderPass2>(vkGetDeviceProcAddr(device,"vkCreateRenderPass2KHR"));
     if(!fn){c.reply_status(Status::UnsupportedCommand);return;}
-    VkRenderPass pass=VK_NULL_HANDLE;VkResult result=fn(device,&info,nullptr,&pass);c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.i32(result);c.writer.handle(result==VK_SUCCESS?c.tables.render_passes.add(pass):0);c.reply();
+    VkRenderPass pass=VK_NULL_HANDLE;VkResult result=fn(device,&info,nullptr,&pass);c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.i32(result);c.writer.handle(result==VK_SUCCESS?c.tables.render_passes.add(pass, device):0);c.reply();
 }
 SERVER_DESTROY(RenderPass, VkRenderPass, vkDestroyRenderPass, render_passes)
 
@@ -444,10 +448,31 @@ SERVER_DESTROY(DescriptorSetLayout, VkDescriptorSetLayout, vkDestroyDescriptorSe
 
 SERVER_CREATE(DescriptorPool, VkDescriptorPool, VkDescriptorPoolCreateInfo,
               remoting::read_DescriptorPoolCreateInfo, vkCreateDescriptorPool, descriptor_pools)
-SERVER_DESTROY(DescriptorPool, VkDescriptorPool, vkDestroyDescriptorPool, descriptor_pools)
 
 #undef SERVER_CREATE
 #undef SERVER_DESTROY
+
+void handle_DestroyDescriptorPool(Session& c) {
+    VkDevice device = c.tables.devices.get(c.reader.handle());
+    const uint64_t pool_id = c.reader.handle();
+    VkDescriptorPool pool = c.tables.descriptor_pools.get(pool_id);
+    if (!c.reader.ok() || c.reader.remaining() != 0 || device == VK_NULL_HANDLE ||
+        pool == VK_NULL_HANDLE) {
+        mark_oneway_error(c);
+        return;
+    }
+    c.tables.descriptor_pools.take(pool_id);
+    for (auto it = c.tables.descriptor_set_owners.begin();
+         it != c.tables.descriptor_set_owners.end();) {
+        if (it->second.pool == pool) {
+            c.tables.descriptor_sets.take(it->first);
+            it = c.tables.descriptor_set_owners.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    vkDestroyDescriptorPool(device, pool, nullptr);
+}
 
 
 void handle_CreateDescriptorSetLayout(Session& c) {
@@ -457,14 +482,14 @@ void handle_CreateDescriptorSetLayout(Session& c) {
     VkDescriptorSetLayoutCreateInfo info{};
     if (!c.reader.ok() || device == VK_NULL_HANDLE ||
         !remoting::read_DescriptorSetLayoutCreateInfo(c.reader, arena, c.tables, &info)) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        c.reply_status(Status::DecodeError);
         return;
     }
     VkDescriptorSetLayout layout = VK_NULL_HANDLE;
     const VkResult result = vkCreateDescriptorSetLayout(device, &info, nullptr, &layout);
     c.writer.u32(static_cast<uint32_t>(Status::Ok));
     c.writer.i32(result);
-    c.writer.handle(result == VK_SUCCESS ? c.tables.descriptor_set_layouts.add(layout) : 0);
+    c.writer.handle(result == VK_SUCCESS ? c.tables.descriptor_set_layouts.add(layout, device) : 0);
     c.reply();
 }
 
@@ -477,7 +502,7 @@ void handle_GetImageSubresourceLayout(Session& c) {
     sub.mipLevel = c.reader.u32();
     sub.arrayLayer = c.reader.u32();
     if (!c.reader.ok() || device == VK_NULL_HANDLE) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        c.reply_status(Status::DecodeError);
         return;
     }
     VkSubresourceLayout layout{};
@@ -575,15 +600,27 @@ void handle_FreeDescriptorSets(Session& c) {
     if (count > remoting::kMaxArrayElements || !count_fits(c.reader, count, 8)) {
         c.reply_status(Status::DecodeError); return;
     }
+    std::vector<uint64_t> ids(count);
     std::vector<VkDescriptorSet> sets(count);
-    for (uint32_t i = 0; i < count; ++i) sets[i] = c.tables.descriptor_sets.get(c.reader.handle());
-    if (!c.reader.ok() || device == VK_NULL_HANDLE || pool == VK_NULL_HANDLE) {
+    bool valid = device != VK_NULL_HANDLE && pool != VK_NULL_HANDLE;
+    for (uint32_t i = 0; i < count; ++i) {
+        ids[i] = c.reader.handle();
+        sets[i] = c.tables.descriptor_sets.get(ids[i]);
+        const auto owner = c.tables.descriptor_set_owners.find(ids[i]);
+        valid = valid && sets[i] != VK_NULL_HANDLE &&
+                owner != c.tables.descriptor_set_owners.end() &&
+                owner->second.device == device && owner->second.pool == pool;
+    }
+    if (!c.reader.ok() || c.reader.remaining() != 0 || !valid) {
         c.reply_status(Status::DecodeError); return;
     }
     const VkResult result = vkFreeDescriptorSets(device, pool, count, sets.data());
-    if (result == VK_SUCCESS) for (VkDescriptorSet set : sets)
-        for (size_t i = 0; i < c.tables.descriptor_sets.all().size(); ++i)
-            if (c.tables.descriptor_sets.all()[i] == set) c.tables.descriptor_sets.take(i + 1);
+    if (result == VK_SUCCESS) {
+        for (uint64_t id : ids) {
+            c.tables.descriptor_sets.take(id);
+            c.tables.descriptor_set_owners.erase(id);
+        }
+    }
     c.writer.u32(static_cast<uint32_t>(Status::Ok)); c.writer.i32(result); c.reply();
 }
 
@@ -594,31 +631,46 @@ void handle_ResetDescriptorPool(Session& c) {
     if (!c.reader.ok() || device == VK_NULL_HANDLE || pool == VK_NULL_HANDLE) {
         c.reply_status(Status::DecodeError); return;
     }
+    if (c.reader.remaining() != 0) { c.reply_status(Status::DecodeError); return; }
     const VkResult result = vkResetDescriptorPool(device, pool, flags);
+    if (result == VK_SUCCESS) {
+        for (auto it = c.tables.descriptor_set_owners.begin();
+             it != c.tables.descriptor_set_owners.end();) {
+            if (it->second.pool == pool) {
+                c.tables.descriptor_sets.take(it->first);
+                it = c.tables.descriptor_set_owners.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
     c.writer.u32(static_cast<uint32_t>(Status::Ok)); c.writer.i32(result); c.reply();
 }
 
 void handle_CreateGraphicsPipelines(Session& c) {
     const uint64_t device_id = c.reader.handle();
     VkDevice device = c.tables.devices.get(device_id);
-    VkPipelineCache cache = c.tables.pipeline_cache(c.reader.handle());
+    const uint64_t cache_id = c.reader.handle();
+    VkPipelineCache cache = c.tables.pipeline_cache(cache_id);
     const uint32_t count = c.reader.u32();
     // Each pipeline's read_GraphicsPipelineCreateInfo starts with a
     // read_raw() call, whose bytes() consumes at least a 4-byte length
     // prefix even on immediate failure.
-    if (!count_fits(c.reader, count, 4)) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+    if (count > remoting::kMaxArrayElements || !count_fits(c.reader, count, 4)) {
+        c.reply_status(Status::DecodeError);
         return;
     }
 
     Arena arena;
     std::vector<VkGraphicsPipelineCreateInfo> infos(count);
-    bool ok = c.reader.ok() && device != VK_NULL_HANDLE;
-    for (uint32_t i = 0; ok && i < count; ++i) {
-        ok = remoting::read_GraphicsPipelineCreateInfo(c.reader, arena, c.tables, &infos[i]);
+    bool decoded = c.reader.ok();
+    for (uint32_t i = 0; decoded && i < count; ++i) {
+        decoded = remoting::read_GraphicsPipelineCreateInfo(c.reader, arena, c.tables, &infos[i]);
     }
-    if (!ok) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+    const bool handles_valid = device != VK_NULL_HANDLE &&
+                               (!cache_id || cache != VK_NULL_HANDLE);
+    if (!decoded || !handles_valid) {
+        c.reply_status(Status::DecodeError);
         return;
     }
 
@@ -632,7 +684,7 @@ void handle_CreateGraphicsPipelines(Session& c) {
     c.writer.i32(result);
     c.writer.u32(count);
     for (uint32_t i = 0; i < count; ++i) {
-        c.writer.handle(pipelines[i] != VK_NULL_HANDLE ? c.tables.pipelines.add(pipelines[i]) : 0);
+        c.writer.handle(pipelines[i] != VK_NULL_HANDLE ? c.tables.pipelines.add(pipelines[i], device) : 0);
     }
     c.reply();
 }
@@ -671,7 +723,7 @@ void handle_CreateComputePipelines(Session& c) {
     c.writer.i32(result);
     c.writer.u32(count);
     for (uint32_t i = 0; i < count; ++i) {
-        c.writer.handle(pipelines[i] != VK_NULL_HANDLE ? c.tables.pipelines.add(pipelines[i]) : 0);
+        c.writer.handle(pipelines[i] != VK_NULL_HANDLE ? c.tables.pipelines.add(pipelines[i], device) : 0);
     }
     c.reply();
 }
@@ -683,7 +735,7 @@ void handle_AllocateDescriptorSets(Session& c) {
     VkDescriptorSetAllocateInfo info{};
     if (!c.reader.ok() || device == VK_NULL_HANDLE ||
         !remoting::read_DescriptorSetAllocateInfo(c.reader, arena, c.tables, &info)) {
-        c.writer.u32(static_cast<uint32_t>(Status::DecodeError));
+        c.reply_status(Status::DecodeError);
         return;
     }
     std::vector<VkDescriptorSet> sets(info.descriptorSetCount);
@@ -692,16 +744,21 @@ void handle_AllocateDescriptorSets(Session& c) {
     c.writer.i32(result);
     c.writer.u32(info.descriptorSetCount);
     for (uint32_t i = 0; i < info.descriptorSetCount; ++i) {
-        c.writer.handle(result == VK_SUCCESS ? c.tables.descriptor_sets.add(sets[i]) : 0);
+        uint64_t id = 0;
+        if (result == VK_SUCCESS) {
+            id = c.tables.descriptor_sets.add(sets[i], device);
+            c.tables.descriptor_set_owners[id] = {device, info.descriptorPool};
+        }
+        c.writer.handle(id);
     }
     c.reply();
 }
 
-void handle_CreateDescriptorUpdateTemplate(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());Arena arena;VkDescriptorUpdateTemplateCreateInfo info{};if(!d||!remoting::read_DescriptorUpdateTemplateCreateInfo(c.reader,arena,c.tables,&info)){c.reply_status(Status::DecodeError);return;}auto fn=reinterpret_cast<PFN_vkCreateDescriptorUpdateTemplate>(vkGetDeviceProcAddr(d,"vkCreateDescriptorUpdateTemplate"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}VkDescriptorUpdateTemplate object=VK_NULL_HANDLE;VkResult result=fn(d,&info,nullptr,&object);uint64_t id=result==VK_SUCCESS?c.tables.descriptor_update_templates.add(object):0;if(id){c.tables.descriptor_update_template_owners[id]=d;c.tables.descriptor_update_template_entries[id]=std::vector<VkDescriptorUpdateTemplateEntry>(info.pDescriptorUpdateEntries,info.pDescriptorUpdateEntries+info.descriptorUpdateEntryCount);}c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.i32(result);c.writer.handle(id);c.reply();}
+void handle_CreateDescriptorUpdateTemplate(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());Arena arena;VkDescriptorUpdateTemplateCreateInfo info{};if(!d||!remoting::read_DescriptorUpdateTemplateCreateInfo(c.reader,arena,c.tables,&info)){c.reply_status(Status::DecodeError);return;}auto fn=reinterpret_cast<PFN_vkCreateDescriptorUpdateTemplate>(vkGetDeviceProcAddr(d,"vkCreateDescriptorUpdateTemplate"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}VkDescriptorUpdateTemplate object=VK_NULL_HANDLE;VkResult result=fn(d,&info,nullptr,&object);uint64_t id=result==VK_SUCCESS?c.tables.descriptor_update_templates.add(object, d):0;if(id){c.tables.descriptor_update_template_owners[id]=d;c.tables.descriptor_update_template_entries[id]=std::vector<VkDescriptorUpdateTemplateEntry>(info.pDescriptorUpdateEntries,info.pDescriptorUpdateEntries+info.descriptorUpdateEntryCount);}c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.i32(result);c.writer.handle(id);c.reply();}
 void handle_DestroyDescriptorUpdateTemplate(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());uint64_t id=c.reader.handle();auto owner=c.tables.descriptor_update_template_owners.find(id);if(!c.reader.ok()||!d||owner==c.tables.descriptor_update_template_owners.end()||owner->second!=d){mark_oneway_error(c);return;}auto object=c.tables.descriptor_update_templates.take(id);auto fn=reinterpret_cast<PFN_vkDestroyDescriptorUpdateTemplate>(vkGetDeviceProcAddr(d,"vkDestroyDescriptorUpdateTemplate"));if(!fn||!object){mark_oneway_error(c);return;}fn(d,object,nullptr);c.tables.descriptor_update_template_owners.erase(id);c.tables.descriptor_update_template_entries.erase(id);}
-void handle_UpdateDescriptorSetWithTemplate(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());VkDescriptorSet set=c.tables.descriptor_set(c.reader.handle());uint64_t id=c.reader.handle();auto object=c.tables.descriptor_update_templates.get(id);auto meta=c.tables.descriptor_update_template_entries.find(id);uint32_t n=c.reader.u32();if(!d||!set||!object||meta==c.tables.descriptor_update_template_entries.end()||n!=meta->second.size()){mark_oneway_error(c);return;}size_t size=0;for(const auto&e:meta->second){if(e.descriptorCount>remoting::kMaxArrayElements){mark_oneway_error(c);return;}size_t elem=(e.descriptorType==VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER||e.descriptorType==VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)?sizeof(VkBufferView):(e.descriptorType<=VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT&&e.descriptorType!=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER&&e.descriptorType!=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER&&e.descriptorType!=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC&&e.descriptorType!=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)?sizeof(VkDescriptorImageInfo):sizeof(VkDescriptorBufferInfo);if(e.descriptorCount&&(e.offset>SIZE_MAX-(e.descriptorCount-1)*e.stride||e.offset+(e.descriptorCount-1)*e.stride>SIZE_MAX-elem)){mark_oneway_error(c);return;}size=std::max(size,e.offset+(e.descriptorCount?e.descriptorCount-1:0)*e.stride+(e.descriptorCount?elem:0));}if(size>64u*1024u*1024u){mark_oneway_error(c);return;}std::vector<char>data(size);for(const auto&e:meta->second){uint32_t count=c.reader.u32();auto type=static_cast<VkDescriptorType>(c.reader.i32());if(count!=e.descriptorCount||type!=e.descriptorType){mark_oneway_error(c);return;}for(uint32_t i=0;i<count;++i){char*p=data.data()+e.offset+i*e.stride;if(type==VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER||type==VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER){*reinterpret_cast<VkBufferView*>(p)=c.tables.buffer_view(c.reader.handle());}else if(type==VK_DESCRIPTOR_TYPE_SAMPLER||type==VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER||type==VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE||type==VK_DESCRIPTOR_TYPE_STORAGE_IMAGE||type==VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT){auto*x=reinterpret_cast<VkDescriptorImageInfo*>(p);x->sampler=c.tables.sampler(c.reader.handle());x->imageView=c.tables.image_view(c.reader.handle());x->imageLayout=static_cast<VkImageLayout>(c.reader.i32());}else{auto*x=reinterpret_cast<VkDescriptorBufferInfo*>(p);x->buffer=c.tables.buffer(c.reader.handle());x->offset=c.reader.u64();x->range=c.reader.u64();}}}if(!c.reader.ok()||c.reader.remaining()){mark_oneway_error(c);return;}auto fn=reinterpret_cast<PFN_vkUpdateDescriptorSetWithTemplate>(vkGetDeviceProcAddr(d,"vkUpdateDescriptorSetWithTemplate"));if(!fn){mark_oneway_error(c);return;}fn(d,set,object,data.data());}
+void handle_UpdateDescriptorSetWithTemplate(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());VkDescriptorSet set=c.tables.descriptor_set(c.reader.handle());uint64_t id=c.reader.handle();auto object=c.tables.descriptor_update_templates.get(id);auto meta=c.tables.descriptor_update_template_entries.find(id);uint32_t n=c.reader.u32();if(!d||!set||!object||meta==c.tables.descriptor_update_template_entries.end()||n!=meta->second.size()){mark_oneway_error(c);return;}size_t size=0;for(const auto&e:meta->second){if(e.descriptorCount>remoting::kMaxArrayElements){mark_oneway_error(c);return;}size_t elem=(e.descriptorType==VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER||e.descriptorType==VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)?sizeof(VkBufferView):(e.descriptorType<=VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT&&e.descriptorType!=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER&&e.descriptorType!=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER&&e.descriptorType!=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC&&e.descriptorType!=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)?sizeof(VkDescriptorImageInfo):sizeof(VkDescriptorBufferInfo);if(e.descriptorCount&&(e.offset>SIZE_MAX-(e.descriptorCount-1)*e.stride||e.offset+(e.descriptorCount-1)*e.stride>SIZE_MAX-elem)){mark_oneway_error(c);return;}size=(std::max)(size,e.offset+(e.descriptorCount?e.descriptorCount-1:0)*e.stride+(e.descriptorCount?elem:0));}if(size>64u*1024u*1024u){mark_oneway_error(c);return;}std::vector<char>data(size);for(const auto&e:meta->second){uint32_t count=c.reader.u32();auto type=static_cast<VkDescriptorType>(c.reader.i32());if(count!=e.descriptorCount||type!=e.descriptorType){mark_oneway_error(c);return;}for(uint32_t i=0;i<count;++i){char*p=data.data()+e.offset+i*e.stride;if(type==VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER||type==VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER){*reinterpret_cast<VkBufferView*>(p)=c.tables.buffer_view(c.reader.handle());}else if(type==VK_DESCRIPTOR_TYPE_SAMPLER||type==VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER||type==VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE||type==VK_DESCRIPTOR_TYPE_STORAGE_IMAGE||type==VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT){auto*x=reinterpret_cast<VkDescriptorImageInfo*>(p);x->sampler=c.tables.sampler(c.reader.handle());x->imageView=c.tables.image_view(c.reader.handle());x->imageLayout=static_cast<VkImageLayout>(c.reader.i32());}else{auto*x=reinterpret_cast<VkDescriptorBufferInfo*>(p);x->buffer=c.tables.buffer(c.reader.handle());x->offset=c.reader.u64();x->range=c.reader.u64();}}}if(!c.reader.ok()||c.reader.remaining()){mark_oneway_error(c);return;}auto fn=reinterpret_cast<PFN_vkUpdateDescriptorSetWithTemplate>(vkGetDeviceProcAddr(d,"vkUpdateDescriptorSetWithTemplate"));if(!fn){mark_oneway_error(c);return;}fn(d,set,object,data.data());}
 void handle_GetDescriptorSetLayoutSupport(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());Arena arena;VkDescriptorSetLayoutCreateInfo info{};if(!d||!remoting::read_DescriptorSetLayoutCreateInfo(c.reader,arena,c.tables,&info)){c.reply_status(Status::DecodeError);return;}VkDescriptorSetLayoutSupport out{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_SUPPORT};auto fn=reinterpret_cast<PFN_vkGetDescriptorSetLayoutSupport>(vkGetDeviceProcAddr(d,"vkGetDescriptorSetLayoutSupport"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}fn(d,&info,&out);c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.u32(out.supported);c.reply();}
-void handle_CreateSamplerYcbcrConversion(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());Arena arena;VkSamplerYcbcrConversionCreateInfo info{};if(!d||!remoting::read_SamplerYcbcrConversionCreateInfo(c.reader,arena,c.tables,&info)){c.reply_status(Status::DecodeError);return;}auto fn=reinterpret_cast<PFN_vkCreateSamplerYcbcrConversion>(vkGetDeviceProcAddr(d,"vkCreateSamplerYcbcrConversion"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}VkSamplerYcbcrConversion object=VK_NULL_HANDLE;VkResult result=fn(d,&info,nullptr,&object);uint64_t id=result==VK_SUCCESS?c.tables.sampler_ycbcr_conversions.add(object):0;if(id)c.tables.sampler_ycbcr_conversion_owners[id]=d;c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.i32(result);c.writer.handle(id);c.reply();}
+void handle_CreateSamplerYcbcrConversion(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());Arena arena;VkSamplerYcbcrConversionCreateInfo info{};if(!d||!remoting::read_SamplerYcbcrConversionCreateInfo(c.reader,arena,c.tables,&info)){c.reply_status(Status::DecodeError);return;}auto fn=reinterpret_cast<PFN_vkCreateSamplerYcbcrConversion>(vkGetDeviceProcAddr(d,"vkCreateSamplerYcbcrConversion"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}VkSamplerYcbcrConversion object=VK_NULL_HANDLE;VkResult result=fn(d,&info,nullptr,&object);uint64_t id=result==VK_SUCCESS?c.tables.sampler_ycbcr_conversions.add(object, d):0;if(id)c.tables.sampler_ycbcr_conversion_owners[id]=d;c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.i32(result);c.writer.handle(id);c.reply();}
 void handle_DestroySamplerYcbcrConversion(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());uint64_t id=c.reader.handle();auto owner=c.tables.sampler_ycbcr_conversion_owners.find(id);if(!c.reader.ok()||!d||owner==c.tables.sampler_ycbcr_conversion_owners.end()||owner->second!=d){mark_oneway_error(c);return;}auto object=c.tables.sampler_ycbcr_conversions.take(id);auto fn=reinterpret_cast<PFN_vkDestroySamplerYcbcrConversion>(vkGetDeviceProcAddr(d,"vkDestroySamplerYcbcrConversion"));if(!fn||!object){mark_oneway_error(c);return;}fn(d,object,nullptr);c.tables.sampler_ycbcr_conversion_owners.erase(id);}
 
 void handle_UpdateDescriptorSets(Session& c) {
@@ -710,7 +767,7 @@ void handle_UpdateDescriptorSets(Session& c) {
     const uint32_t write_count = c.reader.u32();
     // read_WriteDescriptorSet starts with read_raw(), whose bytes() call
     // consumes at least a 4-byte length prefix.
-    if (!count_fits(c.reader, write_count, 4)) {
+    if (write_count > remoting::kMaxArrayElements || !count_fits(c.reader, write_count, 4)) {
         mark_oneway_error(c);
         return;
     }
@@ -721,12 +778,13 @@ void handle_UpdateDescriptorSets(Session& c) {
         ok = remoting::read_WriteDescriptorSet(c.reader, arena, c.tables, &writes[i]);
     }
     const uint32_t copy_count = ok ? c.reader.u32() : 0;
-    if (ok && !count_fits(c.reader, copy_count, 4)) ok = false;
+    if (ok && (copy_count > remoting::kMaxArrayElements ||
+               !count_fits(c.reader, copy_count, 4))) ok = false;
     std::vector<VkCopyDescriptorSet> copies(ok ? copy_count : 0);
     for (uint32_t i = 0; ok && i < copy_count; ++i) {
         ok = remoting::read_CopyDescriptorSet(c.reader, arena, c.tables, &copies[i]);
     }
-    if (!ok || !c.reader.ok()) {
+    if (!ok || !c.reader.ok() || c.reader.remaining() != 0) {
         mark_oneway_error(c);
         return;
     }

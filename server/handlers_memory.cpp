@@ -112,7 +112,7 @@ void handle_AllocateMemory(Session& c) {
     const VkDeviceSize map_alignment = properties.limits.minMemoryMapAlignment;
     const VkDeviceSize atom_size = properties.limits.nonCoherentAtomSize;
     if (result == VK_SUCCESS) {
-        id = c.tables.memories.add(memory);
+        id = c.tables.memories.add(memory, device);
         c.tables.memory_metadata[id] = ServerMemory{memory, device, info.allocationSize, flags,
                                                     map_alignment, atom_size};
     }
