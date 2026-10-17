@@ -418,6 +418,17 @@ add_test(NAME samples
 )
 set_tests_properties(samples PROPERTIES TIMEOUT 420)
 
+add_test(NAME sessions
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_sessions.py
+            --build-dir $<TARGET_FILE_DIR:vulkan_remoting_server>
+            --manifest ${CMAKE_CURRENT_BINARY_DIR}/vulkan_remoting_icd.json
+            --no-validate-server
+)
+set_tests_properties(sessions PROPERTIES
+    TIMEOUT 180
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+)
+
 add_test(NAME trace
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_trace.py
 )

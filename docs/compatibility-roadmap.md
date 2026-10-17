@@ -56,7 +56,10 @@ and bounded sparse queries/binds.
 These samples mostly use commands already remoted and should land before broader
 API claims:
 
-- Sequential sessions on one server and two simultaneous clients.
+Milestone 1 deterministic coverage is complete. Persistent-server acceptance now
+runs without requiring an optional validation-layer installation and includes repeated
+sequential clients, two explicitly overlapping initialized clients,
+abrupt loss of one session while its peer completes, and a clean follow-up client.
 
 ## Milestone 2 — Vulkan 1.0 command families (implemented)
 
@@ -105,7 +108,23 @@ exact deterministic checksum directly and remotely, and has a trace word-preserv
 
 ## Milestone 4 — Khronos Vulkan-Samples
 
-After the framework bootstrap works, validate in this order:
+The framework bootstrap records Vulkan-Samples source revision
+`177edebf0cd7d4f669667e49f052cfb56b17e004`. `tests/run_vulkan_samples.py`
+requires the selected source checkout's `HEAD` to match that revision; the external
+executable path remains an explicit harness input. The runner
+runs a selected sample natively and remotely with Release/Wayland/GLSL, fixed
+dimensions, benchmark time, and a bounded frame count. All eight ordered targets
+below have passed at 640x480 for bounded 20-frame runs, and each requires a clean
+follow-up compute client. Process completion and validation/protocol-clean logs
+prove framework and WSI liveness. The checked-in capture-gate patch plus
+`--compare-rgba` holds a fixed frame in isolated 640x480 headless Sway compositors,
+hides UI, and requires exact native/remoted RGBA equality. This passes for the six
+framework-render-context targets from `texture_mipmap_generation` through
+`timestamp_queries`. `hello_triangle` remains liveness-only because it is outside
+the screenshot hook; `swapchain_recreation` intentionally uses a different app path
+that does not trigger that hook.
+
+Validated order:
 
 1. `hello_triangle`
 2. `texture_mipmap_generation`

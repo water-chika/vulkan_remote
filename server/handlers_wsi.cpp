@@ -443,6 +443,10 @@ void handle_CreateSwapchainKHR(Session& c) {
     if (result == VK_SUCCESS) {
         c.tables.swapchain_devices[swapchain] = device;
         c.tables.swapchain_surfaces[swapchain] = info.surface;
+        // Creating against the current surface extent consumes any configure
+        // that led to this swapchain. The real driver remains authoritative for
+        // OUT_OF_DATE/SUBOPTIMAL on subsequent acquires.
+        c.server.poll_window_resized(info.surface);
     }
     c.writer.u32(static_cast<uint32_t>(Status::Ok));
     c.writer.i32(result);
@@ -516,10 +520,11 @@ void handle_AcquireNextImageKHR(Session& c) {
         c.reply_status(Status::DecodeError);
         return;
     }
-    // Detect server-owned window changes before acquiring. If a successful
-    // acquire were rewritten to SUBOPTIMAL or SURFACE_LOST afterwards, its
-    // semaphore would already be signaled even though callers commonly skip
-    // submission for a non-success result and recycle it as unsignaled.
+    // A closed server-owned window is terminal and must be reported before
+    // acquiring. Resize notifications are consumed here, but the real driver
+    // remains authoritative for OUT_OF_DATE/SUBOPTIMAL: synthesizing one would
+    // leave the supplied semaphore unsignaled, while common framework paths
+    // still submit work waiting on it.
     const auto surface_it = c.tables.swapchain_surfaces.find(swapchain);
     const VkSurfaceKHR surface = surface_it == c.tables.swapchain_surfaces.end()
                                      ? VK_NULL_HANDLE
@@ -528,9 +533,8 @@ void handle_AcquireNextImageKHR(Session& c) {
     uint32_t image_index = 0;
     if (c.server.poll_window_closed(surface)) {
         result = VK_ERROR_SURFACE_LOST_KHR;
-    } else if (c.server.poll_window_resized(surface)) {
-        result = VK_ERROR_OUT_OF_DATE_KHR;
     } else {
+        c.server.poll_window_resized(surface);
         result = vkAcquireNextImageKHR(device, swapchain, timeout, semaphore, fence, &image_index);
     }
 

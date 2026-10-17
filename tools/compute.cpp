@@ -102,11 +102,13 @@ static uint32_t checksum(const uint32_t* values) {
 
 int main(int argc, char** argv) {
     bool validate = true;
+    bool readyGate = false;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--no-validate") == 0) validate = false;
         else if (strcmp(argv[i], "--validate") == 0) validate = true;
+        else if (strcmp(argv[i], "--ready-gate") == 0) readyGate = true;
         else {
-            fprintf(stderr, "usage: %s [--no-validate]\n", argv[0]);
+            fprintf(stderr, "usage: %s [--no-validate] [--ready-gate]\n", argv[0]);
             return 2;
         }
     }
@@ -286,6 +288,16 @@ int main(int argc, char** argv) {
     VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     VkFence fence;
     VK_CHECK(vkCreateFence(device, &fenceInfo, nullptr, &fence));
+
+    if (readyGate) {
+        printf("READY\n");
+        fflush(stdout);
+        if (getchar() == EOF) {
+            fprintf(stderr, "FATAL: --ready-gate stdin closed before release\n");
+            return 1;
+        }
+    }
+
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &commandBuffer;

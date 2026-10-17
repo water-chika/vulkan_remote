@@ -1,0 +1,39 @@
+diff --git a/app/plugins/screenshot/screenshot.cpp b/app/plugins/screenshot/screenshot.cpp
+index 0c677d2b..f913661f 100644
+--- a/app/plugins/screenshot/screenshot.cpp
++++ b/app/plugins/screenshot/screenshot.cpp
+@@ -19,7 +19,11 @@
+ #include "screenshot.h"
+
+ #include <chrono>
++#include <cstdlib>
++#include <filesystem>
++#include <fstream>
+ #include <iomanip>
++#include <thread>
+
+ #include "common/utils.h"
+ #include "rendering/render_context.h"
+@@ -100,7 +104,20 @@ void Screenshot::on_post_draw(vkb::rendering::RenderContextC &context)
+ 			output_path = stream.str();
+ 		}
+
+-		vkb::screenshot(context, output_path);
++		const char *ready_path   = std::getenv("VKB_CAPTURE_READY");
++		const char *release_path = std::getenv("VKB_CAPTURE_RELEASE");
++		if (ready_path && release_path)
++		{
++			std::ofstream{ready_path} << "ready\n";
++			while (!std::filesystem::exists(release_path))
++			{
++				std::this_thread::sleep_for(std::chrono::milliseconds(10));
++			}
++		}
++		else
++		{
++			vkb::screenshot(context, output_path);
++		}
+ 	}
+ }
+ }        // namespace plugins
+\ No newline at end of file

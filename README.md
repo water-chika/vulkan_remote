@@ -38,6 +38,7 @@ compositor.
 | `docs/compatibility-roadmap.md` | tested applications and ordered sample/API milestones |
 | `tools/remoting_trace.py` | record, inspect, and exactly replay one headless wire session |
 | `tests/run_matrix.py` | inventory-driven four-mode acceptance runner |
+| `tests/run_vulkan_samples.py` | pinned, bounded Khronos Vulkan-Samples framework bootstrap runner |
 | `tools/probe.cpp` | links no Vulkan; times round trips |
 
 Handlers register themselves by opcode at static initialisation, so adding a
@@ -270,6 +271,23 @@ kept outside the repository.
   stable skip when no compatible non-coherent host-visible memory type exists.
   `tests/test_samples.py` runs all twelve workloads directly and remoted through a
   fresh server, requiring matching image bytes or pass/skip results.
+- `tests/test_sessions.py` keeps one server alive across repeated sequential
+  clients, two explicitly overlapping initialized clients, abrupt loss
+  of one client while its peer completes, and a final clean client.
+- `tests/run_vulkan_samples.py` bootstraps a selected workload from a Khronos
+  Vulkan-Samples checkout whose source `HEAD` matches the recorded revision, with
+  GLSL, fixed dimensions, benchmark time,
+  and a bounded frame count. All eight ordered roadmap targets—`hello_triangle`,
+  `texture_mipmap_generation`, `dynamic_uniform_buffers`, `separate_image_sampler`,
+  `instancing`, `compute_nbody`, `timestamp_queries`, and `swapchain_recreation`—
+  pass native/remoted 20-frame runs at 640x480; the runner requires WSI liveness,
+  clean validation/protocol logs, and a clean follow-up client. With the checked-in
+  capture-gate patch and `--compare-rgba`, the six framework-render-context targets
+  from `texture_mipmap_generation` through `timestamp_queries` also match exact
+  canonical 640x480 RGBA compositor bytes with UI hidden. `hello_triangle` remains
+  a framework-bootstrap-only gate because it is a
+  self-contained application outside the framework screenshot hook and does not
+  create transfer-source swapchain images.
 - [`docs/compatibility-roadmap.md`](docs/compatibility-roadmap.md) distinguishes
   tested support from planned Vulkan command families and sample applications.
 - `vkcube` and `vkcubepp` each complete 20 frames through the server-owned

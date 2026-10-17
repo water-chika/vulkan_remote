@@ -22,6 +22,8 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -30,8 +32,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <exception>
 #include <memory>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -55,6 +59,31 @@ bool accept_was_interrupted() {
 #else
     return errno == EINTR;
 #endif
+}
+
+enum class ListenWaitResult { Ready, Timeout, Error };
+
+ListenWaitResult wait_for_connection(remoting::socket_t listen_fd) {
+    // Periodically return to the main loop so completed workers are joined and
+    // their sockets are closed even when no new client arrives. This also puts
+    // a bound on how long Windows shutdown waits for accept readiness; unlike
+    // POSIX, a console signal does not interrupt Winsock select().
+#if defined(_WIN32)
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(listen_fd, &read_fds);
+    struct timeval timeout {};
+    timeout.tv_usec = 100 * 1000;
+    const int result = ::select(0, &read_fds, nullptr, nullptr, &timeout);
+#else
+    struct pollfd poll_fd {};
+    poll_fd.fd = listen_fd;
+    poll_fd.events = POLLIN;
+    const int result = ::poll(&poll_fd, 1, 100);
+#endif
+    if (result > 0) return ListenWaitResult::Ready;
+    if (result == 0 || accept_was_interrupted()) return ListenWaitResult::Timeout;
+    return ListenWaitResult::Error;
 }
 
 remoting::socket_t listen_on(const std::string& address, uint16_t port) {
@@ -103,6 +132,14 @@ remoting::socket_t listen_on(const std::string& address, uint16_t port) {
         remoting::close_socket(fd);
         return remoting::kInvalidSocket;
     }
+#if !defined(_WIN32)
+    const int flags = ::fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        fprintf(stderr, "server: making listener nonblocking failed: %s\n", strerror(errno));
+        remoting::close_socket(fd);
+        return remoting::kInvalidSocket;
+    }
+#endif
     return fd;
 }
 
@@ -195,54 +232,104 @@ int main(int argc, char** argv) {
         std::thread thread;
         std::shared_ptr<std::atomic<bool>> done;
     };
+    constexpr size_t kMaxConcurrentClients = 64;
     std::vector<ClientThread> clients;
+    clients.reserve(kMaxConcurrentClients);
+    bool listener_failed = false;
 
-    while (!g_stop.load()) {
-        const remoting::socket_t fd = ::accept(listen_fd, nullptr, nullptr);
-        if (fd == remoting::kInvalidSocket) {
-            if (accept_was_interrupted()) continue;
-            break;
-        }
-        const int one = 1;
-        ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&one),
-                     sizeof(one));
-        // One VkInstance is one connection, and a single process can hold
-        // several open at once (CTS's CustomInstanceTest keeps its default
-        // instance alive while asking for a differently-configured one for a
-        // single test). Keep the threads joinable: shutdown must not destroy
-        // Server while a handler is still using its Vulkan instance or maps.
-        auto done = std::make_shared<std::atomic<bool>>(false);
-        clients.push_back({fd, std::thread([&server, fd, done] {
-                               server.serve(fd);
-                               remoting::close_socket(fd);
-                               done->store(true, std::memory_order_release);
-                           }),
-                           done});
-
+    const auto reap_completed = [&clients] {
         for (auto it = clients.begin(); it != clients.end();) {
             if (!it->done->load(std::memory_order_acquire)) {
                 ++it;
                 continue;
             }
             it->thread.join();
+            remoting::close_socket(it->fd);
             it = clients.erase(it);
+        }
+    };
+
+    while (!g_stop.load()) {
+        reap_completed();
+        const ListenWaitResult wait_result = wait_for_connection(listen_fd);
+        if (wait_result == ListenWaitResult::Timeout) continue;
+        if (wait_result == ListenWaitResult::Error) {
+#if defined(_WIN32)
+            fprintf(stderr, "server: listener wait failed: WSA error %d\n", WSAGetLastError());
+#else
+            fprintf(stderr, "server: listener wait failed: %s\n", strerror(errno));
+#endif
+            listener_failed = true;
+            break;
+        }
+
+        const remoting::socket_t fd = ::accept(listen_fd, nullptr, nullptr);
+        if (fd == remoting::kInvalidSocket) {
+            if (accept_was_interrupted()) continue;
+#if !defined(_WIN32)
+            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+#endif
+#if defined(_WIN32)
+            fprintf(stderr, "server: accept failed: WSA error %d\n", WSAGetLastError());
+#else
+            fprintf(stderr, "server: accept failed: %s\n", strerror(errno));
+#endif
+            listener_failed = true;
+            break;
+        }
+        const int one = 1;
+        ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&one),
+                     sizeof(one));
+        if (clients.size() >= kMaxConcurrentClients) {
+            fprintf(stderr, "server: rejecting client: concurrent session limit reached\n");
+            remoting::close_socket(fd);
+            continue;
+        }
+        // One VkInstance is one connection, and a single process can hold
+        // several open at once (CTS's CustomInstanceTest keeps its default
+        // instance alive while asking for a differently-configured one for a
+        // single test). Keep the threads joinable: shutdown must not destroy
+        // Server while a handler is still using its Vulkan instance or maps.
+        // The main thread owns fd throughout. The worker publishes completion
+        // only after its last use; main then joins it before closing fd. This
+        // prevents shutdown from ever targeting a descriptor value the OS has
+        // already recycled for an unrelated socket.
+        auto done = std::make_shared<std::atomic<bool>>(false);
+        try {
+            std::thread worker([&server, fd, done] {
+                try {
+                    server.serve(fd);
+                } catch (const std::exception& error) {
+                    fprintf(stderr, "server: client worker exception: %s\n", error.what());
+                } catch (...) {
+                    fprintf(stderr, "server: client worker exception: unknown error\n");
+                }
+                done->store(true, std::memory_order_release);
+            });
+            clients.push_back({fd, std::move(worker), done});
+        } catch (const std::system_error& error) {
+            fprintf(stderr, "server: starting client worker failed: %s\n", error.what());
+            remoting::close_socket(fd);
+            listener_failed = true;
+            break;
         }
     }
 
     remoting::close_socket(listen_fd);
     for (ClientThread& client : clients) {
-        if (!client.done->load(std::memory_order_acquire)) {
 #if defined(_WIN32)
-            ::shutdown(client.fd, SD_BOTH);
+        ::shutdown(client.fd, SD_BOTH);
 #else
-            ::shutdown(client.fd, SHUT_RDWR);
+        ::shutdown(client.fd, SHUT_RDWR);
 #endif
-        }
     }
-    for (ClientThread& client : clients) client.thread.join();
+    for (ClientThread& client : clients) {
+        client.thread.join();
+        remoting::close_socket(client.fd);
+    }
 #if !defined(_WIN32)
     server.stop_wayland();
 #endif
     fprintf(stderr, "server: stopped\n");
-    return 0;
+    return listener_failed ? 1 : 0;
 }
