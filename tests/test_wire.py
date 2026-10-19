@@ -30,6 +30,11 @@ STATUS_OK = 0
 STATUS_UNSUPPORTED = 1
 STATUS_DECODE_ERROR = 2
 
+VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT = 0x00000002
+VK_MEMORY_PROPERTY_HOST_COHERENT_BIT = 0x00000004
+VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD = 0x00000040
+VK_MEMORY_PROPERTY_DEVICE_UNCACHED_BIT_AMD = 0x00000080
+
 
 class Failure(Exception):
     pass
@@ -183,7 +188,8 @@ class Server:
         return self.process.poll() is None
 
 
-def handshake(sock, digest, build_dir=None, overrides=None):
+def handshake(sock, digest, build_dir=None, overrides=None,
+              supported_capabilities=0, required_capabilities=0):
     values = read_protocol_constants(build_dir) if build_dir else {
         'kWireSchemaRevision': 'wire-v15-vulkan12-internal',
         'kRegistrySha256': '0' * 64,
@@ -194,7 +200,8 @@ def handshake(sock, digest, build_dir=None, overrides=None):
     payload = (encode_string(values['kWireSchemaRevision']) +
                encode_string(values['kRegistrySha256']) +
                encode_string(values['kWireAbi']) +
-               encode_string(digest))
+               encode_string(digest) +
+               struct.pack('<II', supported_capabilities, required_capabilities))
     send_message(sock, OPCODE_HANDSHAKE, payload)
     opcode, payload = recv_message(sock)
     if opcode != OPCODE_HANDSHAKE:
@@ -219,6 +226,15 @@ def assert_handshake_rejected_and_closed(sock, status, build_dir, description):
         opcode = None
     if opcode is not None:
         raise Failure('server kept serving ' + description)
+
+
+def test_handshake_rejects_unknown_required_capability(server, build_dir):
+    with connect(server.port) as sock:
+        status = handshake(sock, read_digest(build_dir), build_dir,
+                           supported_capabilities=0x80000000,
+                           required_capabilities=0x80000000)
+        assert_handshake_rejected_and_closed(
+            sock, status, build_dir, 'an unknown required capability')
 
 
 def test_handshake_rejects_foreign_digest(server, build_dir):
@@ -616,6 +632,59 @@ def test_transfer_command_payloads_are_bounded(server, build_dir):
             raise Failure('server stopped serving after malformed transfer commands')
 
 
+def decode_memory_properties(response):
+    if len(response) < 8 or decode_u32(response) != STATUS_OK:
+        raise Failure('memory-properties reply was malformed')
+    type_count = decode_u32(response, 4)
+    if type_count > 32:
+        raise Failure('memory-properties type count exceeded Vulkan limit')
+    offset = 8
+    types = []
+    for _ in range(type_count):
+        if offset + 8 > len(response):
+            raise Failure('truncated memory type')
+        types.append(struct.unpack_from('<II', response, offset))
+        offset += 8
+    if offset + 4 > len(response):
+        raise Failure('truncated memory heap count')
+    heap_count = decode_u32(response, offset)
+    offset += 4
+    if heap_count > 16 or offset + heap_count * 12 != len(response):
+        raise Failure('malformed memory heap array')
+    heaps = []
+    for _ in range(heap_count):
+        heaps.append(struct.unpack_from('<QI', response, offset))
+        offset += 12
+    return types, heaps
+
+
+def test_memory_properties_hide_host_coherent(server, build_dir):
+    """Legacy and properties2 expose the same non-coherent public memory view."""
+    digest = read_digest(build_dir)
+    replies = []
+    for name in ('vkGetPhysicalDeviceMemoryProperties',
+                 'vkGetPhysicalDeviceMemoryProperties2'):
+        with connect(server.port) as sock:
+            if handshake(sock, digest, build_dir) != STATUS_OK:
+                raise Failure('handshake failed')
+            opcode = read_opcode(build_dir, name)
+            send_message(sock, opcode, struct.pack('<Q', 1))
+            reply_opcode, response = recv_message(sock)
+            if reply_opcode != opcode:
+                raise Failure('{} reply had opcode {}'.format(name, reply_opcode))
+            replies.append(decode_memory_properties(response))
+    if replies[0] != replies[1]:
+        raise Failure('legacy and properties2 memory properties differ')
+    types, _ = replies[0]
+    hidden = (VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+              VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD |
+              VK_MEMORY_PROPERTY_DEVICE_UNCACHED_BIT_AMD)
+    if any(flags & hidden for flags, _ in types):
+        raise Failure('remote memory properties exposed coherence-dependent flags')
+    if not any(flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT for flags, _ in types):
+        raise Failure('remote memory properties lost every HOST_VISIBLE type')
+
+
 def test_device_extension_advertisement_is_real_device_intersection(server, build_dir):
     """The remote list is exactly swapchain plus the closed reviewed contract."""
     with connect(server.port) as sock:
@@ -858,6 +927,7 @@ def test_own_window_surface(server, build_dir):
 
 TESTS = [
     test_handshake_accepts_matching_digest,
+    test_handshake_rejects_unknown_required_capability,
     test_handshake_rejects_foreign_digest,
     test_handshake_rejects_schema_mismatch,
     test_unknown_opcode_is_reported,
@@ -873,6 +943,7 @@ TESTS = [
     test_submit_and_fence_payloads_are_rejected,
     test_vulkan10_family_payloads_are_bounded,
     test_transfer_command_payloads_are_bounded,
+    test_memory_properties_hide_host_coherent,
     test_device_extension_advertisement_is_real_device_intersection,
     test_new_extension_opcode_decode_errors,
     test_vulkan12_payloads_are_bounded,

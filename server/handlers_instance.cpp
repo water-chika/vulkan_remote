@@ -11,6 +11,7 @@
 
 #include "extension_contract.hpp"
 #include "marshal.hpp"
+#include "memory_contract.hpp"
 #include "session.hpp"
 
 namespace {
@@ -27,7 +28,22 @@ void handle_Handshake(Session& s) {
     s.reader.string(&client_registry);
     s.reader.string(&client_abi);
     s.reader.string(&client_digest);
-    const bool match = s.reader.ok() && client_schema == remoting::kWireSchemaRevision &&
+    const uint32_t supported_capabilities = s.reader.u32();
+    const uint32_t required_capabilities = s.reader.u32();
+    const bool coherent_enabled = [] {
+        const char* value = getenv("VK_REMOTING_EXPERIMENTAL_COHERENT");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    const uint32_t server_capabilities = coherent_enabled
+        ? remoting::kCapabilityWholeCopyHostCoherent : 0;
+    const uint32_t selected_capabilities = supported_capabilities & server_capabilities;
+    const bool capabilities_valid =
+        (supported_capabilities & ~remoting::kKnownCapabilities) == 0 &&
+        (required_capabilities & ~remoting::kKnownCapabilities) == 0 &&
+        (required_capabilities & ~supported_capabilities) == 0 &&
+        (required_capabilities & ~selected_capabilities) == 0;
+    const bool match = s.reader.ok() && s.reader.remaining() == 0 && capabilities_valid &&
+                       client_schema == remoting::kWireSchemaRevision &&
                        client_registry == remoting::kRegistrySha256 &&
                        client_abi == remoting::kWireAbi &&
                        client_digest == remoting::kCommandSetDigest;
@@ -44,8 +60,10 @@ void handle_Handshake(Session& s) {
     s.writer.string(remoting::kCommandSetDigest);
     s.writer.u32(static_cast<uint32_t>(s.server.physical_device_count()));
     s.writer.u32(s.server.loader_api_version());
+    s.writer.u32(match ? selected_capabilities : 0);
     s.reply();
-    if (!match) s.close_connection = true;
+    if (match) s.tables.capabilities = selected_capabilities;
+    else s.close_connection = true;
 }
 
 void handle_vkEnumeratePhysicalDevices(Session& s) {
@@ -87,7 +105,8 @@ void handle_vkGetPhysicalDeviceMemoryProperties(Session& s) {
     s.writer.u32(static_cast<uint32_t>(Status::Ok));
     s.writer.u32(props.memoryTypeCount);
     for (uint32_t i = 0; i < props.memoryTypeCount; ++i) {
-        s.writer.u32(props.memoryTypes[i].propertyFlags);
+        s.writer.u32(remoting::public_memory_property_flags(
+            props.memoryTypes[i].propertyFlags, s.tables.capabilities));
         s.writer.u32(props.memoryTypes[i].heapIndex);
     }
     s.writer.u32(props.memoryHeapCount);
@@ -323,6 +342,12 @@ void handle_vkGetPhysicalDeviceMemoryProperties2(Session& s) {
     VkPhysicalDeviceMemoryProperties2 properties{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
     vkGetPhysicalDeviceMemoryProperties2(device, &properties);
+    for (uint32_t i = 0; i < properties.memoryProperties.memoryTypeCount; ++i) {
+        properties.memoryProperties.memoryTypes[i].propertyFlags =
+            remoting::public_memory_property_flags(
+                properties.memoryProperties.memoryTypes[i].propertyFlags,
+                s.tables.capabilities);
+    }
     s.writer.u32(static_cast<uint32_t>(Status::Ok));
     remoting::write_PhysicalDeviceMemoryProperties(s.writer, properties.memoryProperties);
     s.reply();

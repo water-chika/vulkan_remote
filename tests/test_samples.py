@@ -45,8 +45,17 @@ TEXT_SAMPLES = {
         "PASS: noncoherent-memory checksum=c7c92645 bytes=128 ranges=2",
         "SKIP: non-coherent host-visible memory unavailable",
     ),
+    "vulkan_remoting_coherent_memory": (
+        "PASS: coherent-memory checksum=c3349e45 bytes=128 epochs=2",
+        "SKIP: coherent host-visible memory unavailable",
+    ),
 }
 SAMPLES = GRAPHICS_SAMPLES + tuple(TEXT_SAMPLES)
+def experimental_coherent_enabled():
+    value = os.environ.get("VK_REMOTING_EXPERIMENTAL_COHERENT")
+    return value is not None and value != "" and not value.startswith("0")
+
+
 REMOTING_ENV = (
     "VK_DRIVER_FILES",
     "VK_ICD_FILENAMES",
@@ -147,8 +156,8 @@ def run_graphics_sample(binary, output, env, label, validate=False):
         return handle.read()
 
 
-def run_text_sample(binary, env, label, expected):
-    output = run_process([binary, "--no-validate"], env, label)
+def run_text_sample(binary, env, label, expected, extra_args=()):
+    output = run_process([binary, "--no-validate"] + list(extra_args), env, label)
     lines = tuple(line.strip() for line in output.splitlines() if line.strip() in expected)
     if binary.endswith("vulkan_remoting_renderpass2_fsr"):
         valid = lines == expected[:-1] or lines == expected[-1:]
@@ -188,9 +197,38 @@ def test_sample(build_dir, sample_name, temporary_dir, loader_data_root):
         remote_env["VK_REMOTING_HOST"] = "127.0.0.1"
         remote_env["VK_REMOTING_PORT"] = str(port)
         if sample_name in TEXT_SAMPLES:
+            if sample_name == "vulkan_remoting_noncoherent_memory":
+                extra_args = (() if experimental_coherent_enabled()
+                              else ("--verify-remote-contract",))
+            elif sample_name == "vulkan_remoting_coherent_memory":
+                extra_args = (("--require-coherent",)
+                              if experimental_coherent_enabled() else ())
+            else:
+                extra_args = ()
             remote = run_text_sample(binary, remote_env, sample_name + " remoted",
-                                     TEXT_SAMPLES[sample_name])
-            if direct != remote:
+                                     TEXT_SAMPLES[sample_name], extra_args)
+            if sample_name == "vulkan_remoting_noncoherent_memory":
+                if experimental_coherent_enabled():
+                    if remote not in (TEXT_SAMPLES[sample_name][:1], TEXT_SAMPLES[sample_name][1:]):
+                        raise Failure("{} experimental disposition was unexpected: {!r}".format(
+                            sample_name, remote))
+                elif remote != TEXT_SAMPLES[sample_name][:1]:
+                    raise Failure("{} remoted run did not exercise explicit non-coherent memory: {!r}".format(
+                        sample_name, remote))
+                if direct not in (TEXT_SAMPLES[sample_name][:1], TEXT_SAMPLES[sample_name][1:]):
+                    raise Failure("{} direct disposition was unexpected: {!r}".format(
+                        sample_name, direct))
+            elif sample_name == "vulkan_remoting_coherent_memory":
+                expected_remote = (TEXT_SAMPLES[sample_name][:1]
+                                   if experimental_coherent_enabled()
+                                   else TEXT_SAMPLES[sample_name][1:])
+                if remote != expected_remote:
+                    raise Failure("{} remoted coherent disposition was unexpected: {!r}".format(
+                        sample_name, remote))
+                if direct not in (TEXT_SAMPLES[sample_name][:1], TEXT_SAMPLES[sample_name][1:]):
+                    raise Failure("{} direct disposition was unexpected: {!r}".format(
+                        sample_name, direct))
+            elif direct != remote:
                 raise Failure("{} checksum output differs: direct {!r}, remoted {!r}".format(
                     sample_name, direct, remote))
         else:

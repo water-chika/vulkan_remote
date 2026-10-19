@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <mutex>
 #include <type_traits>
@@ -48,6 +49,24 @@ void report_oneway_errors(uint32_t count) {
             "vulkan-remoting: %u fire-and-forget command(s) failed on the server since the last "
             "report; the failures happened during recording or a destroy call, not here\n",
             count);
+}
+
+bool acquire_timeline_writes(RemoteDevice* device, uint64_t semaphore_id, uint64_t value) {
+    std::unordered_set<uint64_t> completed;
+    auto records = device->timeline_writes.find(semaphore_id);
+    if (records == device->timeline_writes.end()) return true;
+    auto& signals = records->second;
+    for (const TimelineSignalWrites& signal : signals) {
+        if (signal.value <= value)
+            completed.insert(signal.memory_ids.begin(), signal.memory_ids.end());
+    }
+    if (!device->acquire_coherent_mapped(&completed)) return false;
+    signals.erase(std::remove_if(signals.begin(), signals.end(),
+                                 [value](const TimelineSignalWrites& signal) {
+                                     return signal.value <= value;
+                                 }),
+                  signals.end());
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -171,6 +190,12 @@ VKAPI_ATTR void VKAPI_CALL GetDeviceQueue(VkDevice handle, uint32_t family, uint
         *pQueue = VK_NULL_HANDLE;
         return;
     }
+    for (RemoteQueue* existing : device->queues) {
+        if (existing->remote_id == id) {
+            *pQueue = reinterpret_cast<VkQueue>(existing);
+            return;
+        }
+    }
     auto* queue = new RemoteQueue();
     set_loader_magic_value(queue);
     queue->device = device;
@@ -180,7 +205,7 @@ VKAPI_ATTR void VKAPI_CALL GetDeviceQueue(VkDevice handle, uint32_t family, uint
 }
 
 VKAPI_ATTR void VKAPI_CALL GetDeviceQueue2(VkDevice handle,const VkDeviceQueueInfo2* info,VkQueue* out){
-    if(!info||!out){return;}RemoteDevice*d=to_device(handle);Writer w;w.handle(d->remote_id);w.u32(info->flags);w.u32(info->queueFamilyIndex);w.u32(info->queueIndex);std::vector<char>reply;if(!d->instance->connection.round_trip(Opcode::vkGetDeviceQueue2,w,&reply)){*out=VK_NULL_HANDLE;return;}Reader r=payload_reader(reply);uint64_t id=r.handle();if(!r.ok()||!id){*out=VK_NULL_HANDLE;return;}auto*q=new RemoteQueue();set_loader_magic_value(q);q->device=d;q->remote_id=id;d->queues.push_back(q);*out=reinterpret_cast<VkQueue>(q);
+    if(!info||!out){return;}RemoteDevice*d=to_device(handle);Writer w;w.handle(d->remote_id);w.u32(info->flags);w.u32(info->queueFamilyIndex);w.u32(info->queueIndex);std::vector<char>reply;if(!d->instance->connection.round_trip(Opcode::vkGetDeviceQueue2,w,&reply)){*out=VK_NULL_HANDLE;return;}Reader r=payload_reader(reply);uint64_t id=r.handle();if(!r.ok()||!id){*out=VK_NULL_HANDLE;return;}for(RemoteQueue*q:d->queues){if(q->remote_id==id){*out=reinterpret_cast<VkQueue>(q);return;}}auto*q=new RemoteQueue();set_loader_magic_value(q);q->device=d;q->remote_id=id;d->queues.push_back(q);*out=reinterpret_cast<VkQueue>(q);
 }
 VKAPI_ATTR void VKAPI_CALL GetDeviceGroupPeerMemoryFeatures(VkDevice handle,uint32_t heap,uint32_t local,uint32_t remote,VkPeerMemoryFeatureFlags* out){if(!out)return;RemoteDevice*d=to_device(handle);Writer w;w.handle(d->remote_id);w.u32(heap);w.u32(local);w.u32(remote);std::vector<char>reply;if(!d->instance->connection.round_trip(Opcode::vkGetDeviceGroupPeerMemoryFeatures,w,&reply)){*out=0;return;}Reader r=payload_reader(reply);*out=r.u32();if(!r.ok())*out=0;}
 
@@ -219,10 +244,6 @@ VKAPI_ATTR VkResult VKAPI_CALL QueueSubmit(VkQueue handle, uint32_t submitCount,
     RemoteQueue* queue = to_queue(handle);
     RemoteDevice* device = queue->device;
 
-    // Host-coherent mappings become visible without an explicit Vulkan flush.
-    // Non-coherent mappings move only through vkFlushMappedMemoryRanges.
-    if (!device->flush_coherent_mapped()) return VK_ERROR_DEVICE_LOST;
-
     Writer request;
     request.handle(queue->remote_id);
     request.handle(id_from_handle(fence));
@@ -248,6 +269,7 @@ VKAPI_ATTR VkResult VKAPI_CALL QueueSubmit(VkQueue handle, uint32_t submitCount,
             request.handle(id_from_handle(s.pSignalSemaphores[j]));
         }
     }
+    if (!device->publish_coherent_mapped()) return VK_ERROR_DEVICE_LOST;
 
     std::vector<char> reply;
     if (!device->instance->connection.round_trip(Opcode::vkQueueSubmit, request, &reply)) {
@@ -258,6 +280,42 @@ VKAPI_ATTR VkResult VKAPI_CALL QueueSubmit(VkQueue handle, uint32_t submitCount,
     const uint32_t oneway_errors = r.u32();
     if (!r.ok() || r.remaining() != 0) return VK_ERROR_DEVICE_LOST;
     report_oneway_errors(oneway_errors);
+    if (result == VK_SUCCESS) {
+        PendingCoherentWrites writes;
+        writes.queue = queue;
+        for (uint32_t i = 0; i < submitCount; ++i) {
+            std::unordered_set<uint64_t> submit_writes;
+            for (uint32_t j = 0; j < pSubmits[i].commandBufferCount; ++j) {
+                RemoteCommandBuffer* cb = to_cmd(pSubmits[i].pCommandBuffers[j]);
+                submit_writes.insert(cb->host_visible_writes.begin(),
+                                     cb->host_visible_writes.end());
+                writes.memory_ids.insert(cb->host_visible_writes.begin(),
+                                         cb->host_visible_writes.end());
+            }
+            queue->host_visible_writes.insert(submit_writes.begin(), submit_writes.end());
+            const auto* timeline = static_cast<const VkTimelineSemaphoreSubmitInfo*>(nullptr);
+            for (const auto* node = static_cast<const VkBaseInStructure*>(pSubmits[i].pNext);
+                 node; node = node->pNext) {
+                if (node->sType == VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO)
+                    timeline = reinterpret_cast<const VkTimelineSemaphoreSubmitInfo*>(node);
+            }
+            if (!timeline || timeline->signalSemaphoreValueCount !=
+                             pSubmits[i].signalSemaphoreCount) continue;
+            for (uint32_t j = 0; j < pSubmits[i].signalSemaphoreCount; ++j) {
+                const uint64_t semaphore_id = id_from_handle(pSubmits[i].pSignalSemaphores[j]);
+                if (!device->timeline_semaphores[semaphore_id]) continue;
+                TimelineSignalWrites signal;
+                signal.value = timeline->pSignalSemaphoreValues[j];
+                signal.memory_ids = submit_writes;
+                device->timeline_writes[semaphore_id].push_back(std::move(signal));
+            }
+        }
+        if (fence != VK_NULL_HANDLE) {
+            writes.memory_ids.insert(queue->host_visible_writes.begin(),
+                                     queue->host_visible_writes.end());
+            device->fence_writes[id_from_handle(fence)] = std::move(writes);
+        }
+    }
     return result;
 }
 
@@ -267,7 +325,6 @@ VKAPI_ATTR VkResult VKAPI_CALL QueueBindSparse(VkQueue handle, uint32_t bindInfo
     RemoteQueue* queue = to_queue(handle); RemoteDevice* device = queue->device;
     if (bindInfoCount > kMaxArrayElements || (bindInfoCount && !pBindInfo))
         return VK_ERROR_INITIALIZATION_FAILED;
-    if (!device->flush_coherent_mapped()) return VK_ERROR_DEVICE_LOST;
     Writer w; w.handle(queue->remote_id); w.handle(id_from_handle(fence)); w.u32(bindInfoCount);
     for (uint32_t i=0;i<bindInfoCount;++i) {
         const auto& x=pBindInfo[i];
@@ -278,6 +335,7 @@ VKAPI_ATTR VkResult VKAPI_CALL QueueBindSparse(VkQueue handle, uint32_t bindInfo
         w.u32(x.imageBindCount); for(uint32_t j=0;j<x.imageBindCount;++j){const auto& bi=x.pImageBinds[j];w.handle(id_from_handle(bi.image));w.u32(bi.bindCount);for(uint32_t k=0;k<bi.bindCount;++k){const auto& b=bi.pBinds[k];w.u32(b.subresource.aspectMask);w.u32(b.subresource.mipLevel);w.u32(b.subresource.arrayLayer);w.i32(b.offset.x);w.i32(b.offset.y);w.i32(b.offset.z);w.u32(b.extent.width);w.u32(b.extent.height);w.u32(b.extent.depth);w.handle(id_from_handle(b.memory));w.u64(b.memoryOffset);w.u32(b.flags);}}
         w.u32(x.signalSemaphoreCount); for(uint32_t j=0;j<x.signalSemaphoreCount;++j)w.handle(id_from_handle(x.pSignalSemaphores[j]));
     }
+    if (!device->publish_coherent_mapped()) return VK_ERROR_DEVICE_LOST;
     std::vector<char> reply; if(!device->instance->connection.round_trip(Opcode::vkQueueBindSparse,w,&reply))return VK_ERROR_DEVICE_LOST;
     Reader r=payload_reader(reply);VkResult result=static_cast<VkResult>(r.i32());uint32_t errors=r.u32();report_oneway_errors(errors);return r.ok()?result:VK_ERROR_DEVICE_LOST;
 }
@@ -293,6 +351,11 @@ VKAPI_ATTR VkResult VKAPI_CALL QueueWaitIdle(VkQueue handle) {
     Reader r = payload_reader(reply);
     const VkResult result = static_cast<VkResult>(r.i32());
     if (!r.ok()) return VK_ERROR_DEVICE_LOST;
+    if (result == VK_SUCCESS) {
+        if (!queue->device->acquire_coherent_mapped(&queue->host_visible_writes))
+            return VK_ERROR_DEVICE_LOST;
+        queue->host_visible_writes.clear();
+    }
     return result;
 }
 
@@ -309,6 +372,8 @@ VKAPI_ATTR VkResult VKAPI_CALL DeviceWaitIdle(VkDevice handle) {
     const uint32_t oneway_errors = r.u32();
     report_oneway_errors(oneway_errors);
     if (!r.ok()) return VK_ERROR_DEVICE_LOST;
+    if (result == VK_SUCCESS && !device->acquire_coherent_mapped())
+        return VK_ERROR_DEVICE_LOST;
     return result;
 }
 
@@ -339,7 +404,9 @@ VKAPI_ATTR void VKAPI_CALL DestroyFence(VkDevice handle, VkFence fence,
     RemoteDevice* device = to_device(handle);
     Writer request;
     request.handle(device->remote_id);
-    request.handle(id_from_handle(fence));
+    const uint64_t fence_id = id_from_handle(fence);
+    request.handle(fence_id);
+    device->fence_writes.erase(fence_id);
     device->instance->connection.send_oneway(Opcode::vkDestroyFence, request);
 }
 
@@ -380,6 +447,12 @@ VKAPI_ATTR VkResult VKAPI_CALL GetFenceStatus(VkDevice handle, VkFence fence) {
     Reader r = payload_reader(reply);
     const VkResult result = static_cast<VkResult>(r.i32());
     if (!r.ok()) return VK_ERROR_DEVICE_LOST;
+    if (result == VK_SUCCESS) {
+        const auto writes = device->fence_writes.find(id_from_handle(fence));
+        if (writes != device->fence_writes.end() &&
+            !device->acquire_coherent_mapped(&writes->second.memory_ids))
+            return VK_ERROR_DEVICE_LOST;
+    }
     return result;
 }
 
@@ -407,6 +480,16 @@ VKAPI_ATTR VkResult VKAPI_CALL WaitForFences(VkDevice handle, uint32_t count,
     Reader r = payload_reader(reply);
     const VkResult result = static_cast<VkResult>(r.i32());
     if (!r.ok()) return VK_ERROR_DEVICE_LOST;
+    if (result == VK_SUCCESS) {
+        std::unordered_set<uint64_t> completed;
+        for (uint32_t i = 0; i < count; ++i) {
+            if (!waitAll && GetFenceStatus(handle, pFences[i]) != VK_SUCCESS) continue;
+            const auto writes = device->fence_writes.find(id_from_handle(pFences[i]));
+            if (writes != device->fence_writes.end())
+                completed.insert(writes->second.memory_ids.begin(), writes->second.memory_ids.end());
+        }
+        if (!device->acquire_coherent_mapped(&completed)) return VK_ERROR_DEVICE_LOST;
+    }
     return result;
 }
 
@@ -425,7 +508,17 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateSemaphore(VkDevice handle,
     Reader r = payload_reader(reply);
     const VkResult result = static_cast<VkResult>(r.i32());
     const uint64_t id = r.handle();
-    if (result == VK_SUCCESS) *pSemaphore = handle_from_id<VkSemaphore>(id);
+    if (result == VK_SUCCESS) {
+        *pSemaphore = handle_from_id<VkSemaphore>(id);
+        bool timeline = false;
+        for (const auto* node = static_cast<const VkBaseInStructure*>(pCreateInfo->pNext);
+             node; node = node->pNext) {
+            if (node->sType == VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO)
+                timeline = reinterpret_cast<const VkSemaphoreTypeCreateInfo*>(node)->semaphoreType ==
+                           VK_SEMAPHORE_TYPE_TIMELINE;
+        }
+        device->timeline_semaphores[id] = timeline;
+    }
     return result;
 }
 
@@ -435,12 +528,15 @@ VKAPI_ATTR void VKAPI_CALL DestroySemaphore(VkDevice handle, VkSemaphore semapho
     RemoteDevice* device = to_device(handle);
     Writer request;
     request.handle(device->remote_id);
-    request.handle(id_from_handle(semaphore));
+    const uint64_t id = id_from_handle(semaphore);
+    request.handle(id);
+    device->timeline_semaphores.erase(id);
+    device->timeline_writes.erase(id);
     device->instance->connection.send_oneway(Opcode::vkDestroySemaphore, request);
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL GetSemaphoreCounterValue(VkDevice handle,VkSemaphore semaphore,uint64_t*value){if(!value)return VK_ERROR_INITIALIZATION_FAILED;auto*d=to_device(handle);Writer w;w.handle(d->remote_id);w.handle(id_from_handle(semaphore));std::vector<char>reply;if(!d->instance->connection.round_trip(Opcode::vkGetSemaphoreCounterValue,w,&reply))return VK_ERROR_DEVICE_LOST;Reader r=payload_reader(reply);VkResult result=static_cast<VkResult>(r.i32());uint64_t v=r.u64();if(!r.ok())return VK_ERROR_DEVICE_LOST;if(result==VK_SUCCESS)*value=v;return result;}
-VKAPI_ATTR VkResult VKAPI_CALL WaitSemaphores(VkDevice handle,const VkSemaphoreWaitInfo*info,uint64_t timeout){if(!info||info->pNext||info->semaphoreCount>kMaxArrayElements||(info->semaphoreCount&&(!info->pSemaphores||!info->pValues)))return VK_ERROR_INITIALIZATION_FAILED;auto*d=to_device(handle);Writer w;w.handle(d->remote_id);w.u32(info->flags);w.u32(info->semaphoreCount);for(uint32_t i=0;i<info->semaphoreCount;++i){w.handle(id_from_handle(info->pSemaphores[i]));w.u64(info->pValues[i]);}w.u64(timeout);std::vector<char>reply;if(!d->instance->connection.round_trip(Opcode::vkWaitSemaphores,w,&reply))return VK_ERROR_DEVICE_LOST;Reader r=payload_reader(reply);auto result=static_cast<VkResult>(r.i32());return r.ok()?result:VK_ERROR_DEVICE_LOST;}
+VKAPI_ATTR VkResult VKAPI_CALL GetSemaphoreCounterValue(VkDevice handle,VkSemaphore semaphore,uint64_t*value){if(!value)return VK_ERROR_INITIALIZATION_FAILED;auto*d=to_device(handle);uint64_t id=id_from_handle(semaphore);Writer w;w.handle(d->remote_id);w.handle(id);std::vector<char>reply;if(!d->instance->connection.round_trip(Opcode::vkGetSemaphoreCounterValue,w,&reply))return VK_ERROR_DEVICE_LOST;Reader r=payload_reader(reply);VkResult result=static_cast<VkResult>(r.i32());uint64_t v=r.u64();if(!r.ok())return VK_ERROR_DEVICE_LOST;if(result==VK_SUCCESS){*value=v;if(!acquire_timeline_writes(d,id,v))return VK_ERROR_DEVICE_LOST;}return result;}
+VKAPI_ATTR VkResult VKAPI_CALL WaitSemaphores(VkDevice handle,const VkSemaphoreWaitInfo*info,uint64_t timeout){if(!info||info->pNext||info->semaphoreCount>kMaxArrayElements||(info->semaphoreCount&&(!info->pSemaphores||!info->pValues)))return VK_ERROR_INITIALIZATION_FAILED;auto*d=to_device(handle);Writer w;w.handle(d->remote_id);w.u32(info->flags);w.u32(info->semaphoreCount);for(uint32_t i=0;i<info->semaphoreCount;++i){w.handle(id_from_handle(info->pSemaphores[i]));w.u64(info->pValues[i]);}w.u64(timeout);std::vector<char>reply;if(!d->instance->connection.round_trip(Opcode::vkWaitSemaphores,w,&reply))return VK_ERROR_DEVICE_LOST;Reader r=payload_reader(reply);auto result=static_cast<VkResult>(r.i32());if(!r.ok())return VK_ERROR_DEVICE_LOST;if(result==VK_SUCCESS){for(uint32_t i=0;i<info->semaphoreCount;++i){uint64_t id=id_from_handle(info->pSemaphores[i]);uint64_t reached=info->pValues[i];if(info->flags&VK_SEMAPHORE_WAIT_ANY_BIT){VkResult query=GetSemaphoreCounterValue(handle,info->pSemaphores[i],&reached);if(query!=VK_SUCCESS||reached<info->pValues[i])continue;}if(!acquire_timeline_writes(d,id,reached))return VK_ERROR_DEVICE_LOST;}}return result;}
 VKAPI_ATTR VkResult VKAPI_CALL SignalSemaphore(VkDevice handle,const VkSemaphoreSignalInfo*info){if(!info||info->pNext)return VK_ERROR_INITIALIZATION_FAILED;auto*d=to_device(handle);Writer w;w.handle(d->remote_id);w.handle(id_from_handle(info->semaphore));w.u64(info->value);std::vector<char>reply;if(!d->instance->connection.round_trip(Opcode::vkSignalSemaphore,w,&reply))return VK_ERROR_DEVICE_LOST;Reader r=payload_reader(reply);auto result=static_cast<VkResult>(r.i32());return r.ok()?result:VK_ERROR_DEVICE_LOST;}
 VKAPI_ATTR void VKAPI_CALL ResetQueryPool(VkDevice handle,VkQueryPool pool,uint32_t first,uint32_t count){auto*d=to_device(handle);Writer w;w.handle(d->remote_id);w.handle(id_from_handle(pool));w.u32(first);w.u32(count);d->instance->connection.send_oneway(Opcode::vkResetQueryPool,w);}
 VKAPI_ATTR VkDeviceAddress VKAPI_CALL GetBufferDeviceAddress(VkDevice,VkBufferDeviceAddressInfo const*){return 0;}
@@ -481,14 +577,13 @@ VKAPI_ATTR uint64_t VKAPI_CALL GetDeviceMemoryOpaqueCaptureAddress(VkDevice,VkDe
     }
 
 SIMPLE_CREATE(CreateBuffer, VkBuffer, VkBufferCreateInfo, write_BufferCreateInfo, vkCreateBuffer)
-SIMPLE_DESTROY(DestroyBuffer, VkBuffer, vkDestroyBuffer)
+VKAPI_ATTR void VKAPI_CALL DestroyBuffer(VkDevice handle,VkBuffer buffer,const VkAllocationCallbacks*){if(buffer==VK_NULL_HANDLE)return;RemoteDevice*device=to_device(handle);const uint64_t id=id_from_handle(buffer);{std::lock_guard<std::mutex>lock(device->mapped_mutex);device->buffer_bindings.erase(id);}Writer request;request.handle(device->remote_id);request.handle(id);device->instance->connection.send_oneway(Opcode::vkDestroyBuffer,request);}
 
 SIMPLE_CREATE(CreateImage, VkImage, VkImageCreateInfo, write_ImageCreateInfo, vkCreateImage)
-SIMPLE_DESTROY(DestroyImage, VkImage, vkDestroyImage)
+VKAPI_ATTR void VKAPI_CALL DestroyImage(VkDevice handle,VkImage image,const VkAllocationCallbacks*){if(image==VK_NULL_HANDLE)return;RemoteDevice*device=to_device(handle);const uint64_t id=id_from_handle(image);{std::lock_guard<std::mutex>lock(device->mapped_mutex);device->image_bindings.erase(id);}Writer request;request.handle(device->remote_id);request.handle(id);device->instance->connection.send_oneway(Opcode::vkDestroyImage,request);}
 
-SIMPLE_CREATE(CreateBufferView, VkBufferView, VkBufferViewCreateInfo, write_BufferViewCreateInfo,
-              vkCreateBufferView)
-SIMPLE_DESTROY(DestroyBufferView, VkBufferView, vkDestroyBufferView)
+VKAPI_ATTR VkResult VKAPI_CALL CreateBufferView(VkDevice handle,const VkBufferViewCreateInfo*info,const VkAllocationCallbacks*,VkBufferView*out){if(!info||!out)return VK_ERROR_INITIALIZATION_FAILED;RemoteDevice*device=to_device(handle);Writer request;request.handle(device->remote_id);write_BufferViewCreateInfo(request,*info);std::vector<char>reply;if(!device->instance->connection.round_trip(Opcode::vkCreateBufferView,request,&reply))return VK_ERROR_INITIALIZATION_FAILED;Reader r=payload_reader(reply);VkResult result=static_cast<VkResult>(r.i32());uint64_t id=r.handle();if(result==VK_SUCCESS&&r.ok()){*out=handle_from_id<VkBufferView>(id);std::lock_guard<std::mutex>lock(device->mapped_mutex);device->buffer_view_buffers[id]=id_from_handle(info->buffer);}return r.ok()?result:VK_ERROR_INITIALIZATION_FAILED;}
+VKAPI_ATTR void VKAPI_CALL DestroyBufferView(VkDevice handle,VkBufferView view,const VkAllocationCallbacks*){if(view==VK_NULL_HANDLE)return;RemoteDevice*device=to_device(handle);uint64_t id=id_from_handle(view);{std::lock_guard<std::mutex>lock(device->mapped_mutex);device->buffer_view_buffers.erase(id);}Writer request;request.handle(device->remote_id);request.handle(id);device->instance->connection.send_oneway(Opcode::vkDestroyBufferView,request);}
 
 SIMPLE_CREATE(CreateEvent, VkEvent, VkEventCreateInfo, write_EventCreateInfo, vkCreateEvent)
 SIMPLE_DESTROY(DestroyEvent, VkEvent, vkDestroyEvent)
@@ -580,16 +675,25 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateImageView(VkDevice handle,
     Reader r = payload_reader(reply);
     const VkResult result = static_cast<VkResult>(r.i32());
     const uint64_t id = r.handle();
-    if (result == VK_SUCCESS) *pView = handle_from_id<VkImageView>(id);
+    if (result == VK_SUCCESS) {
+        *pView = handle_from_id<VkImageView>(id);
+        std::lock_guard<std::mutex> lock(device->mapped_mutex);
+        device->image_view_images[id] = id_from_handle(pCreateInfo->image);
+    }
     return result;
 }
 VKAPI_ATTR void VKAPI_CALL DestroyImageView(VkDevice handle, VkImageView view,
                                             const VkAllocationCallbacks*) {
     if (view == VK_NULL_HANDLE) return;
     RemoteDevice* device = to_device(handle);
+    const uint64_t id = id_from_handle(view);
+    {
+        std::lock_guard<std::mutex> lock(device->mapped_mutex);
+        device->image_view_images.erase(id);
+    }
     Writer request;
     request.handle(device->remote_id);
-    request.handle(id_from_handle(view));
+    request.handle(id);
     device->instance->connection.send_oneway(Opcode::vkDestroyImageView, request);
 }
 
@@ -608,7 +712,17 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateFramebuffer(VkDevice handle,
     Reader r = payload_reader(reply);
     const VkResult result = static_cast<VkResult>(r.i32());
     const uint64_t id = r.handle();
-    if (result == VK_SUCCESS) *pFramebuffer = handle_from_id<VkFramebuffer>(id);
+    if (result == VK_SUCCESS) {
+        *pFramebuffer = handle_from_id<VkFramebuffer>(id);
+        FramebufferMetadata metadata;
+        metadata.imageless = (pCreateInfo->flags & VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT) != 0;
+        if (!metadata.imageless) {
+            for (uint32_t i = 0; i < pCreateInfo->attachmentCount; ++i)
+                metadata.image_views.push_back(id_from_handle(pCreateInfo->pAttachments[i]));
+        }
+        std::lock_guard<std::mutex> lock(device->mapped_mutex);
+        device->framebuffers[id] = std::move(metadata);
+    }
     return result;
 }
 
@@ -616,9 +730,14 @@ VKAPI_ATTR void VKAPI_CALL DestroyFramebuffer(VkDevice handle, VkFramebuffer fra
                                               const VkAllocationCallbacks*) {
     if (framebuffer == VK_NULL_HANDLE) return;
     RemoteDevice* device = to_device(handle);
+    const uint64_t id = id_from_handle(framebuffer);
+    {
+        std::lock_guard<std::mutex> lock(device->mapped_mutex);
+        device->framebuffers.erase(id);
+    }
     Writer request;
     request.handle(device->remote_id);
-    request.handle(id_from_handle(framebuffer));
+    request.handle(id);
     device->instance->connection.send_oneway(Opcode::vkDestroyFramebuffer, request);
 }
 
@@ -857,7 +976,12 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateDescriptorSetLayout(
     Reader r = payload_reader(reply);
     const VkResult result = static_cast<VkResult>(r.i32());
     const uint64_t id = r.handle();
-    if (result == VK_SUCCESS) *pLayout = handle_from_id<VkDescriptorSetLayout>(id);
+    if (result == VK_SUCCESS) {
+        *pLayout = handle_from_id<VkDescriptorSetLayout>(id);
+        std::lock_guard<std::mutex> lock(device->mapped_mutex);
+        device->descriptor_layouts[id] = std::vector<VkDescriptorSetLayoutBinding>(
+            pCreateInfo->pBindings, pCreateInfo->pBindings + pCreateInfo->bindingCount);
+    }
     return result;
 }
 
@@ -898,7 +1022,7 @@ VKAPI_ATTR VkResult VKAPI_CALL AllocateDescriptorSets(VkDevice handle,
 
 VKAPI_ATTR VkResult VKAPI_CALL CreateDescriptorUpdateTemplate(VkDevice handle,const VkDescriptorUpdateTemplateCreateInfo* info,const VkAllocationCallbacks*,VkDescriptorUpdateTemplate* out){if(!info||!out)return VK_ERROR_INITIALIZATION_FAILED;RemoteDevice*d=to_device(handle);Writer w;w.handle(d->remote_id);if(!write_DescriptorUpdateTemplateCreateInfo(w,*info))return VK_ERROR_INITIALIZATION_FAILED;std::vector<char>reply;if(!d->instance->connection.round_trip(Opcode::vkCreateDescriptorUpdateTemplate,w,&reply))return VK_ERROR_INITIALIZATION_FAILED;Reader r=payload_reader(reply);VkResult result=static_cast<VkResult>(r.i32());uint64_t id=r.handle();if(result==VK_SUCCESS&&r.ok()){*out=handle_from_id<VkDescriptorUpdateTemplate>(id);d->descriptor_templates[id]={info->templateType,std::vector<VkDescriptorUpdateTemplateEntry>(info->pDescriptorUpdateEntries,info->pDescriptorUpdateEntries+info->descriptorUpdateEntryCount)};}return result;}
 VKAPI_ATTR void VKAPI_CALL DestroyDescriptorUpdateTemplate(VkDevice handle,VkDescriptorUpdateTemplate object,const VkAllocationCallbacks*){if(!object)return;RemoteDevice*d=to_device(handle);uint64_t id=id_from_handle(object);d->descriptor_templates.erase(id);Writer w;w.handle(d->remote_id);w.handle(id);d->instance->connection.send_oneway(Opcode::vkDestroyDescriptorUpdateTemplate,w);}
-VKAPI_ATTR void VKAPI_CALL UpdateDescriptorSetWithTemplate(VkDevice handle,VkDescriptorSet set,VkDescriptorUpdateTemplate object,const void* data){RemoteDevice*d=to_device(handle);auto it=d->descriptor_templates.find(id_from_handle(object));if(it==d->descriptor_templates.end()||!data)return;Writer w;w.handle(d->remote_id);w.handle(id_from_handle(set));w.handle(id_from_handle(object));w.u32(static_cast<uint32_t>(it->second.entries.size()));for(const auto&e:it->second.entries){w.u32(e.descriptorCount);w.i32(e.descriptorType);for(uint32_t i=0;i<e.descriptorCount;++i){const char*p=static_cast<const char*>(data)+e.offset+i*e.stride;switch(e.descriptorType){case VK_DESCRIPTOR_TYPE_SAMPLER:case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:{auto*x=reinterpret_cast<const VkDescriptorImageInfo*>(p);w.handle(id_from_handle(x->sampler));w.handle(id_from_handle(x->imageView));w.i32(x->imageLayout);break;}case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:w.handle(id_from_handle(*reinterpret_cast<const VkBufferView*>(p)));break;default:{auto*x=reinterpret_cast<const VkDescriptorBufferInfo*>(p);w.handle(id_from_handle(x->buffer));w.u64(x->offset);w.u64(x->range);break;}}}}d->instance->connection.send_oneway(Opcode::vkUpdateDescriptorSetWithTemplate,w);}
+VKAPI_ATTR void VKAPI_CALL UpdateDescriptorSetWithTemplate(VkDevice handle,VkDescriptorSet set,VkDescriptorUpdateTemplate object,const void* data){RemoteDevice*d=to_device(handle);auto it=d->descriptor_templates.find(id_from_handle(object));if(it==d->descriptor_templates.end()||!data)return;Writer w;w.handle(d->remote_id);uint64_t set_id=id_from_handle(set);w.handle(set_id);w.handle(id_from_handle(object));w.u32(static_cast<uint32_t>(it->second.entries.size()));for(const auto&e:it->second.entries){w.u32(e.descriptorCount);w.i32(e.descriptorType);for(uint32_t i=0;i<e.descriptorCount;++i){const char*p=static_cast<const char*>(data)+e.offset+i*e.stride;DescriptorResource resource;resource.type=e.descriptorType;switch(e.descriptorType){case VK_DESCRIPTOR_TYPE_SAMPLER:case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:{auto*x=reinterpret_cast<const VkDescriptorImageInfo*>(p);w.handle(id_from_handle(x->sampler));w.handle(id_from_handle(x->imageView));w.i32(x->imageLayout);if(e.descriptorType==VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)resource.resource_id=id_from_handle(x->imageView);break;}case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:{auto view=*reinterpret_cast<const VkBufferView*>(p);w.handle(id_from_handle(view));if(e.descriptorType==VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)resource.resource_id=id_from_handle(view);break;}default:{auto*x=reinterpret_cast<const VkDescriptorBufferInfo*>(p);w.handle(id_from_handle(x->buffer));w.u64(x->offset);w.u64(x->range);if(e.descriptorType==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER||e.descriptorType==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)resource.resource_id=id_from_handle(x->buffer);break;}}uint64_t key=descriptor_slot_key(e.dstBinding,e.dstArrayElement+i);if(resource.resource_id)d->descriptor_resources[set_id][key]=resource;else d->descriptor_resources[set_id].erase(key);}}d->instance->connection.send_oneway(Opcode::vkUpdateDescriptorSetWithTemplate,w);}
 VKAPI_ATTR void VKAPI_CALL GetDescriptorSetLayoutSupport(VkDevice handle,const VkDescriptorSetLayoutCreateInfo* info,VkDescriptorSetLayoutSupport* out){if(!info||!out)return;RemoteDevice*d=to_device(handle);Writer w;w.handle(d->remote_id);write_DescriptorSetLayoutCreateInfo(w,*info);std::vector<char>reply;if(!d->instance->connection.round_trip(Opcode::vkGetDescriptorSetLayoutSupport,w,&reply)){out->supported=VK_FALSE;return;}Reader r=payload_reader(reply);out->supported=r.u32();if(!r.ok())out->supported=VK_FALSE;}
 VKAPI_ATTR VkResult VKAPI_CALL CreateSamplerYcbcrConversion(VkDevice handle,const VkSamplerYcbcrConversionCreateInfo* info,const VkAllocationCallbacks*,VkSamplerYcbcrConversion*out){if(!info||!out||info->pNext)return VK_ERROR_INITIALIZATION_FAILED;RemoteDevice*d=to_device(handle);Writer w;w.handle(d->remote_id);write_SamplerYcbcrConversionCreateInfo(w,*info);std::vector<char>reply;if(!d->instance->connection.round_trip(Opcode::vkCreateSamplerYcbcrConversion,w,&reply))return VK_ERROR_INITIALIZATION_FAILED;Reader r=payload_reader(reply);auto result=static_cast<VkResult>(r.i32());uint64_t id=r.handle();if(result==VK_SUCCESS)*out=handle_from_id<VkSamplerYcbcrConversion>(id);return r.ok()?result:VK_ERROR_INITIALIZATION_FAILED;}
 VKAPI_ATTR void VKAPI_CALL DestroySamplerYcbcrConversion(VkDevice handle,VkSamplerYcbcrConversion object,const VkAllocationCallbacks*){if(!object)return;RemoteDevice*d=to_device(handle);Writer w;w.handle(d->remote_id);w.handle(id_from_handle(object));d->instance->connection.send_oneway(Opcode::vkDestroySamplerYcbcrConversion,w);}
@@ -918,11 +1042,46 @@ VKAPI_ATTR void VKAPI_CALL UpdateDescriptorSets(VkDevice handle, uint32_t writeC
     request.u32(writeCount);
     for (uint32_t i = 0; i < writeCount; ++i) {
         if (!write_WriteDescriptorSet(request, pWrites[i])) return;
+        const VkWriteDescriptorSet& write = pWrites[i];
+        auto& resources = device->descriptor_resources[id_from_handle(write.dstSet)];
+        for (uint32_t j = 0; j < write.descriptorCount; ++j) {
+            DescriptorResource resource;
+            resource.type = write.descriptorType;
+            if (write.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ||
+                write.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)
+                resource.resource_id = id_from_handle(write.pBufferInfo[j].buffer);
+            else if (write.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+                resource.resource_id = id_from_handle(write.pImageInfo[j].imageView);
+            else if (write.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)
+                resource.resource_id = id_from_handle(write.pTexelBufferView[j]);
+            const uint64_t key = descriptor_slot_key(write.dstBinding,
+                                                     write.dstArrayElement + j);
+            if (resource.resource_id) resources[key] = resource;
+            else resources.erase(key);
+        }
     }
     request.u32(copyCount);
     for (uint32_t i = 0; i < copyCount; ++i) {
         if (pCopies[i].srcSet == VK_NULL_HANDLE || pCopies[i].dstSet == VK_NULL_HANDLE) return;
         write_CopyDescriptorSet(request, pCopies[i]);
+        const VkCopyDescriptorSet& copy = pCopies[i];
+        const auto source = device->descriptor_resources.find(id_from_handle(copy.srcSet));
+        if (source == device->descriptor_resources.end()) continue;
+        std::vector<DescriptorResource> snapshot;
+        snapshot.reserve(copy.descriptorCount);
+        for (uint32_t j = 0; j < copy.descriptorCount; ++j) {
+            const auto resource = source->second.find(
+                descriptor_slot_key(copy.srcBinding, copy.srcArrayElement + j));
+            snapshot.push_back(resource == source->second.end() ? DescriptorResource{}
+                                                                : resource->second);
+        }
+        auto& destination = device->descriptor_resources[id_from_handle(copy.dstSet)];
+        for (uint32_t j = 0; j < copy.descriptorCount; ++j) {
+            const uint64_t key = descriptor_slot_key(copy.dstBinding,
+                                                     copy.dstArrayElement + j);
+            if (snapshot[j].resource_id) destination[key] = snapshot[j];
+            else destination.erase(key);
+        }
     }
     device->instance->connection.send_oneway(Opcode::vkUpdateDescriptorSets, request);
 }

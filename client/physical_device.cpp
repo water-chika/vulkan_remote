@@ -13,6 +13,7 @@
 #include "entry_table.hpp"
 #include "extension_contract.hpp"
 #include "marshal.hpp"
+#include "memory_contract.hpp"
 #include "remote_objects.hpp"
 #include "remoting_commands.inl"
 #include "wire.hpp"
@@ -156,7 +157,8 @@ VKAPI_ATTR void VKAPI_CALL GetPhysicalDeviceMemoryProperties(
     pProperties->memoryTypeCount = type_count > VK_MAX_MEMORY_TYPES ? VK_MAX_MEMORY_TYPES : type_count;
     device->memory_type_flags.assign(pProperties->memoryTypeCount, 0);
     for (uint32_t i = 0; i < type_count; ++i) {
-        const uint32_t flags = reader.u32();
+        const VkMemoryPropertyFlags flags = remoting::public_memory_property_flags(
+            reader.u32(), device->instance->capabilities);
         const uint32_t heap = reader.u32();
         if (i < pProperties->memoryTypeCount) {
             pProperties->memoryTypes[i].propertyFlags = flags;
@@ -447,8 +449,11 @@ VKAPI_ATTR void VKAPI_CALL GetPhysicalDeviceMemoryProperties2(
     if (reader.u32() != static_cast<uint32_t>(remoting::Status::Ok) ||
         !read_PhysicalDeviceMemoryProperties(reader, &out)) return;
     device->memory_type_flags.resize(out.memoryTypeCount);
-    for (uint32_t i = 0; i < out.memoryTypeCount; ++i)
+    for (uint32_t i = 0; i < out.memoryTypeCount; ++i) {
+        out.memoryTypes[i].propertyFlags = remoting::public_memory_property_flags(
+            out.memoryTypes[i].propertyFlags, device->instance->capabilities);
         device->memory_type_flags[i] = out.memoryTypes[i].propertyFlags;
+    }
 }
 
 VKAPI_ATTR void VKAPI_CALL GetPhysicalDeviceSparseImageFormatProperties2(

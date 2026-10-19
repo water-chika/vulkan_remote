@@ -38,6 +38,7 @@
 #include "entry_table.hpp"
 #include "extension_contract.hpp"
 #include "marshal.hpp"
+#include "memory_contract.hpp"
 #include "remote_objects.hpp"
 #include "remoting_commands.inl"
 #include "wire.hpp"
@@ -210,6 +211,14 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo* pCreat
         request.string(remoting::kRegistrySha256);
         request.string(remoting::kWireAbi);
         request.string(remoting::kCommandSetDigest);
+        const bool coherent_requested = [] {
+            const char* value = getenv("VK_REMOTING_EXPERIMENTAL_COHERENT");
+            return value != nullptr && value[0] != '\0' && value[0] != '0';
+        }();
+        const uint32_t supported_capabilities = coherent_requested
+            ? remoting::kCapabilityWholeCopyHostCoherent : 0;
+        request.u32(supported_capabilities);
+        request.u32(0);
         std::vector<char> reply;
         if (!round_trip(instance, Opcode::Handshake, request, &reply)) {
             fprintf(stderr,
@@ -227,7 +236,10 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo* pCreat
         negotiated.string(&digest);
         negotiated.u32();
         instance->server_loader_api_version = negotiated.u32();
-        if (!negotiated.ok() || digest != remoting::kCommandSetDigest) {
+        instance->capabilities = negotiated.u32();
+        if (!negotiated.ok() || negotiated.remaining() != 0 ||
+            digest != remoting::kCommandSetDigest ||
+            (instance->capabilities & ~supported_capabilities) != 0) {
             remoting::close_socket(instance->connection.fd);
             delete instance;
             return VK_ERROR_INCOMPATIBLE_DRIVER;

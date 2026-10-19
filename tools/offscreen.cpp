@@ -179,6 +179,29 @@ static uint32_t findMemoryType(VkPhysicalDevice phys, uint32_t typeBits,
     exit(1);
 }
 
+static uint32_t findHostMemoryType(VkPhysicalDevice phys, uint32_t typeBits,
+                                   bool* coherent) {
+    VkPhysicalDeviceMemoryProperties memProps{};
+    vkGetPhysicalDeviceMemoryProperties(phys, &memProps);
+    const VkMemoryPropertyFlags choices[] = {
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+    };
+    for (VkMemoryPropertyFlags required : choices) {
+        for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+            if ((typeBits & (1u << i)) &&
+                (memProps.memoryTypes[i].propertyFlags & required) == required) {
+                *coherent = (memProps.memoryTypes[i].propertyFlags &
+                             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+                return i;
+            }
+        }
+    }
+    fprintf(stderr, "FATAL: no host-visible memory type found (typeBits=0x%x)\n",
+            typeBits);
+    exit(1);
+}
+
 static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT severity, VkDebugUtilsMessageTypeFlagsEXT,
     const VkDebugUtilsMessengerCallbackDataEXT* data, void*) {
@@ -529,10 +552,9 @@ int main(int argc, char** argv) {
 
     VkMemoryRequirements bufMemReq;
     vkGetBufferMemoryRequirements(device, readbackBuffer, &bufMemReq);
-    uint32_t bufMemType = findMemoryType(
-        phys, bufMemReq.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        true);
+    bool bufferMemoryCoherent = false;
+    uint32_t bufMemType = findHostMemoryType(
+        phys, bufMemReq.memoryTypeBits, &bufferMemoryCoherent);
 
     VkMemoryAllocateInfo bufAllocInfo{};
     bufAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
@@ -617,7 +639,16 @@ int main(int argc, char** argv) {
 
     // Readback.
     void* mapped = nullptr;
-    VK_CHECK(vkMapMemory(device, bufferMemory, 0, VK_WHOLE_SIZE, 0, &mapped));
+    VK_CHECK(vkMapMemory(device, bufferMemory, 0, bufMemReq.size, 0, &mapped));
+    if (!bufferMemoryCoherent) {
+        VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+        range.memory = bufferMemory;
+        range.offset = 0;
+        const VkDeviceSize atom = physProps.limits.nonCoherentAtomSize;
+        const VkDeviceSize aligned = (bufSize + atom - 1) / atom * atom;
+        range.size = aligned <= bufMemReq.size ? aligned : VK_WHOLE_SIZE;
+        VK_CHECK(vkInvalidateMappedMemoryRanges(device, 1, &range));
+    }
     const uint8_t* pixels = reinterpret_cast<const uint8_t*>(mapped);
 
     fprintf(stderr, "readback done, writing %s\n", outPath);

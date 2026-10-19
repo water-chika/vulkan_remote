@@ -95,6 +95,7 @@ struct DescriptorSetOwner {
 };
 
 struct ObjectTables final : public HandleResolver {
+    uint32_t capabilities = 0;
     Table<VkDevice> devices;
     Table<VkQueue> queues;
     Table<VkCommandPool> command_pools;

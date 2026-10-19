@@ -18,7 +18,8 @@ pinned Vulkan registry or the real server driver implements it.
 | `vulkan_remoting_multi_submit_reuse` | Multiple submit infos/command buffers, ordered consecutive submits, command-buffer re-record, fence status/reset/reuse | Exact 64-word checksum direct/remoted |
 | `vulkan_remoting_offscreen_reuse` | Three reused graphics frames across each of two device epochs on one instance/connection | Exact per-frame pixels and aggregate checksum direct/remoted |
 | `vulkan_remoting_mipmap` | Four mip levels, per-level barriers, same-image blits, multi-region readback | Exact 340-byte chain and checksum |
-| `vulkan_remoting_noncoherent_memory` | Two disjoint nonzero atom-aligned ranges, explicit flush/invalidate, GPU copies | Exact 128 synchronized bytes and checksum, or matching capability skip |
+| `vulkan_remoting_noncoherent_memory` | Two disjoint nonzero atom-aligned ranges, explicit flush/invalidate, GPU copies | Exact 128 synchronized bytes and checksum remotely; native may skip if every host-visible type is coherent |
+| `vulkan_remoting_coherent_memory` | Experimental persistent coherent mappings, two no-flush/no-invalidate epochs | Exact 128 bytes and checksum when coherent negotiation is enabled |
 | `vkcube`, `vkcubepp` | Acquire, submit, present, fences, server-owned native window | Bounded frame completion |
 | `vulkaninfo --summary` | Instance/device enumeration and basic properties | Selected normalized fields |
 | CTS smoke/info plus focused descriptor/push groups | Known passing cases in `tests/cts_baseline.txt` | Baseline regression delta with exact matched counts and preserved QPA/server logs |
@@ -147,9 +148,17 @@ indexing, and shader objects—remain later milestones driven by concrete tests.
 - Arbitrary `pNext` chains are unsupported; only the reviewed bounded
   call-site-specific allowlists are encoded.
 - Only one active shadow mapping is supported per memory allocation.
-- Coherent mapped writes become visible at remoting synchronization points rather
-  than continuously, and GPU writes do not automatically refresh an existing
-  coherent shadow after host waits.
+- The default facade hides `HOST_COHERENT`; host-visible memory requires
+  explicit atom-valid flush/invalidate and applications with no fallback may
+  fail memory-type selection. When both peers set
+  `VK_REMOTING_EXPERIMENTAL_COHERENT=1`, negotiation enables whole-mapping
+  publication before submit and refresh after successful fence/idle completion.
+  This is compatibility coverage for synchronized transfer paths, not a general
+  strict-coherence claim: ordinary non-sparse storage descriptors,
+  classic/render-pass-2 attachments including imageless, secondary command
+  buffers, and GPU timeline signals are conservatively attributed, while sparse
+  aliasing remains unsupported. Arbitrary concurrent pointer writes still
+  require future OS dirty tracking or KMD-managed shared memory.
 - No X11, `VK_KHR_display`, dmabuf/data-device/subsurface Wayland proxy support.
 - The Windows local-display input bridge posts ordinary HWND messages; Raw Input,
   DirectInput, global keyboard-state APIs, true focus transfer, IME, and complete

@@ -42,7 +42,7 @@ struct MemoryAllocation {
     uint32_t memory_type_index = 0;
     VkMemoryPropertyFlags property_flags = 0;
     VkDeviceSize non_coherent_atom_size = 1;
-    bool coherent = false;
+    bool emulated_coherent = false;
 };
 
 // Vulkan permits only one active mapping per allocation. The allocation_base
@@ -53,7 +53,9 @@ struct MappedRange {
     VkDeviceSize size = 0;
     void* allocation_base = nullptr;
     void* shadow = nullptr;
-    bool coherent = false;
+    bool emulated_coherent = false;
+    bool transfer_ready = true;
+    std::vector<char> baseline;
 };
 
 struct RemoteInstance {
@@ -66,6 +68,7 @@ struct RemoteInstance {
     uint32_t requested_api_version = VK_API_VERSION_1_0;
     uint32_t server_loader_api_version = VK_API_VERSION_1_0;
     uint32_t negotiated_api_version = VK_API_VERSION_1_0;
+    uint32_t capabilities = 0;
 #if defined(_WIN32)
     std::mutex surface_input_mutex;
     std::unordered_map<uint64_t, uintptr_t> surface_windows;
@@ -89,6 +92,35 @@ struct DescriptorTemplateMetadata {
     std::vector<VkDescriptorUpdateTemplateEntry> entries;
 };
 
+struct DescriptorResource {
+    VkDescriptorType type = VK_DESCRIPTOR_TYPE_MAX_ENUM;
+    uint64_t resource_id = 0;
+};
+
+inline uint64_t descriptor_slot_key(uint32_t binding, uint32_t element) {
+    return (static_cast<uint64_t>(binding) << 32) | element;
+}
+
+struct ResourceBinding {
+    uint64_t memory_id = 0;
+    VkDeviceSize offset = 0;
+};
+
+struct PendingCoherentWrites {
+    struct RemoteQueue* queue = nullptr;
+    std::unordered_set<uint64_t> memory_ids;
+};
+
+struct FramebufferMetadata {
+    bool imageless = false;
+    std::vector<uint64_t> image_views;
+};
+
+struct TimelineSignalWrites {
+    uint64_t value = 0;
+    std::unordered_set<uint64_t> memory_ids;
+};
+
 struct RemoteDevice {
     VK_LOADER_DATA loader_data;
     RemoteInstance* instance = nullptr;
@@ -100,28 +132,45 @@ struct RemoteDevice {
     std::vector<MappedRange> mapped;
     std::mutex mapped_mutex;
     std::unordered_map<uint64_t, MemoryAllocation> memories;
+    std::unordered_map<uint64_t, ResourceBinding> buffer_bindings;
+    std::unordered_map<uint64_t, ResourceBinding> image_bindings;
+    std::unordered_map<uint64_t, std::vector<VkDescriptorSetLayoutBinding>> descriptor_layouts;
+    std::unordered_map<uint64_t, std::unordered_map<uint64_t, DescriptorResource>> descriptor_resources;
+    std::unordered_map<uint64_t, uint64_t> image_view_images;
+    std::unordered_map<uint64_t, uint64_t> buffer_view_buffers;
+    std::unordered_map<uint64_t, FramebufferMetadata> framebuffers;
+    std::unordered_map<uint64_t, bool> timeline_semaphores;
+    std::unordered_map<uint64_t, std::vector<TimelineSignalWrites>> timeline_writes;
+    std::unordered_map<uint64_t, PendingCoherentWrites> fence_writes;
     std::unordered_map<uint64_t, DescriptorTemplateMetadata> descriptor_templates;
     VkDeviceSize map_alignment = 1;
     std::vector<VkMemoryPropertyFlags> memory_type_flags;
 
-    // Upload all coherent mappings at implicit visibility points.
-    bool flush_coherent_mapped();
     // Upload or download exactly the named ranges. Both operations are
     // synchronous and split transfers into bounded wire messages.
     VkResult flush_mapped(const VkMappedMemoryRange* ranges, uint32_t count);
     VkResult download_mapped(const VkMappedMemoryRange* ranges, uint32_t count);
+    bool publish_coherent_mapped();
+    bool acquire_coherent_mapped(const std::unordered_set<uint64_t>* memory_ids = nullptr);
 };
 
 struct RemoteQueue {
     VK_LOADER_DATA loader_data;
     RemoteDevice* device = nullptr;
     uint64_t remote_id = 0;
+    std::unordered_set<uint64_t> host_visible_writes;
 };
 
 struct RemoteCommandBuffer {
     VK_LOADER_DATA loader_data;
     RemoteDevice* device = nullptr;
     uint64_t remote_id = 0;
+    uint64_t command_pool_id = 0;
+    std::unordered_map<uint32_t, uint64_t> bound_graphics_sets;
+    std::unordered_map<uint32_t, uint64_t> bound_compute_sets;
+    std::unordered_set<uint64_t> bound_writable_memories;
+    std::unordered_set<uint64_t> host_visible_writes;
+    std::unordered_set<uint64_t> pending_writes;
 };
 
 struct DeviceEntry {

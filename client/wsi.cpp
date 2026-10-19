@@ -677,10 +677,6 @@ VKAPI_ATTR VkResult VKAPI_CALL QueuePresentKHR(VkQueue handle,
     RemoteQueue* queue = to_queue(handle);
     RemoteDevice* device = queue->device;
 
-    // Host-coherent mappings become visible without an explicit Vulkan flush.
-    // Non-coherent mappings move only through vkFlushMappedMemoryRanges.
-    if (!device->flush_coherent_mapped()) return VK_ERROR_DEVICE_LOST;
-
     Writer request;
     request.handle(queue->remote_id);
     request.u32(pPresentInfo->waitSemaphoreCount);

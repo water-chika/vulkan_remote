@@ -58,11 +58,16 @@ Buffer create_buffer(VkDevice device, VkDeviceSize size) {
 
 int main(int argc, char** argv) {
     bool validate = true;
+    bool verify_remote_contract = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--no-validate") == 0) validate = false;
         else if (std::strcmp(argv[i], "--validate") == 0) validate = true;
+        else if (std::strcmp(argv[i], "--verify-remote-contract") == 0)
+            verify_remote_contract = true;
         else {
-            std::fprintf(stderr, "usage: %s [--no-validate]\n", argv[0]);
+            std::fprintf(stderr,
+                         "usage: %s [--no-validate] [--verify-remote-contract]\n",
+                         argv[0]);
             return 2;
         }
     }
@@ -168,6 +173,15 @@ int main(int argc, char** argv) {
             break;
         }
     }
+    if (verify_remote_contract && memory_type == UINT32_MAX) {
+        std::fprintf(stderr,
+                     "FAIL: remote facade did not expose host-visible non-coherent memory\n");
+        vkDestroyBuffer(device, destination.handle, nullptr);
+        vkDestroyBuffer(device, source.handle, nullptr);
+        vkDestroyDevice(device, nullptr);
+        vkDestroyInstance(instance, nullptr);
+        return 1;
+    }
     if (memory_type == UINT32_MAX) {
         vkDestroyBuffer(device, destination.handle, nullptr);
         vkDestroyBuffer(device, source.handle, nullptr);
@@ -196,6 +210,20 @@ int main(int argc, char** argv) {
                          &source_mapping));
     VK_CHECK(vkMapMemory(device, destination.memory, 0,
                          destination.allocation_size, 0, &destination_mapping));
+    if (verify_remote_contract) {
+        VkMappedMemoryRange misaligned{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+        misaligned.memory = source.memory;
+        misaligned.offset = 1;
+        misaligned.size = 1;
+        const VkResult rejected = vkFlushMappedMemoryRanges(device, 1, &misaligned);
+        if (rejected != VK_ERROR_MEMORY_MAP_FAILED) {
+            std::fprintf(stderr,
+                         "FAIL: remote allocation exposed coherent flags (misaligned flush=%d)\n",
+                         int(rejected));
+            return 1;
+        }
+    }
+
     auto* source_bytes = static_cast<uint8_t*>(source_mapping);
     for (size_t range = 0; range < 2; ++range) {
         for (size_t i = 0; i < kRangeBytes; ++i) {

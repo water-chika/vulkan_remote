@@ -119,9 +119,33 @@ static uint32_t findMemoryType(VkPhysicalDevice phys, uint32_t typeBits,
     exit(1);
 }
 
+static uint32_t hostMemoryType(VkPhysicalDevice physical, uint32_t bits,
+                               bool& coherent) {
+    VkPhysicalDeviceMemoryProperties properties{};
+    vkGetPhysicalDeviceMemoryProperties(physical, &properties);
+    const VkMemoryPropertyFlags choices[] = {
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+    };
+    for (VkMemoryPropertyFlags required : choices) {
+        for (uint32_t i = 0; i < properties.memoryTypeCount; ++i) {
+            if ((bits & (1u << i)) &&
+                (properties.memoryTypes[i].propertyFlags & required) == required) {
+                coherent = (properties.memoryTypes[i].propertyFlags &
+                            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+                return i;
+            }
+        }
+    }
+    fprintf(stderr, "FATAL: no host-visible memory type\n");
+    exit(1);
+}
+
 struct Buffer {
     VkBuffer handle = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkDeviceSize allocationSize = 0;
+    bool coherent = false;
 };
 
 static Buffer makeBuffer(VkDevice device, VkPhysicalDevice physical, VkDeviceSize size,
@@ -137,19 +161,39 @@ static Buffer makeBuffer(VkDevice device, VkPhysicalDevice physical, VkDeviceSiz
     vkGetBufferMemoryRequirements(device, result.handle, &requirements);
     VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     allocation.allocationSize = requirements.size;
-    allocation.memoryTypeIndex = findMemoryType(
-        physical, requirements.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, false);
+    allocation.memoryTypeIndex = hostMemoryType(
+        physical, requirements.memoryTypeBits, result.coherent);
+    result.allocationSize = allocation.allocationSize;
     VK_CHECK(vkAllocateMemory(device, &allocation, nullptr, &result.memory));
     VK_CHECK(vkBindBufferMemory(device, result.handle, result.memory, 0));
     return result;
 }
 
-static void upload(VkDevice device, const Buffer& buffer, VkDeviceSize offset,
-                   const void* source, size_t size) {
+static VkMappedMemoryRange wholeMappedRange(VkPhysicalDevice physical,
+                                             VkDeviceMemory memory,
+                                             VkDeviceSize allocationSize,
+                                             VkDeviceSize usedSize) {
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(physical, &properties);
+    const VkDeviceSize atom = properties.limits.nonCoherentAtomSize;
+    const VkDeviceSize aligned = (usedSize + atom - 1) / atom * atom;
+    VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+    range.memory = memory;
+    range.offset = 0;
+    range.size = aligned <= allocationSize ? aligned : VK_WHOLE_SIZE;
+    return range;
+}
+
+static void upload(VkDevice device, VkPhysicalDevice physical, const Buffer& buffer,
+                   VkDeviceSize offset, const void* source, size_t size) {
     void* mapped = nullptr;
-    VK_CHECK(vkMapMemory(device, buffer.memory, 0, VK_WHOLE_SIZE, 0, &mapped));
+    VK_CHECK(vkMapMemory(device, buffer.memory, 0, buffer.allocationSize, 0, &mapped));
     memcpy(static_cast<uint8_t*>(mapped) + offset, source, size);
+    if (!buffer.coherent) {
+        VkMappedMemoryRange range = wholeMappedRange(
+            physical, buffer.memory, buffer.allocationSize, offset + size);
+        VK_CHECK(vkFlushMappedMemoryRanges(device, 1, &range));
+    }
     vkUnmapMemory(device, buffer.memory);
 }
 
@@ -518,9 +562,9 @@ int main(int argc, char** argv) {
                                     VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
     Buffer indexBuffer = makeBuffer(device, phys, indexOffset + sizeof(indices),
                                     VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-    upload(device, positionBuffer, positionOffset, positions, sizeof(positions));
-    upload(device, colorBuffer, colorOffset, colors, sizeof(colors));
-    upload(device, indexBuffer, indexOffset, indices, sizeof(indices));
+    upload(device, phys, positionBuffer, positionOffset, positions, sizeof(positions));
+    upload(device, phys, colorBuffer, colorOffset, colors, sizeof(colors));
+    upload(device, phys, indexBuffer, indexOffset, indices, sizeof(indices));
 
     // Command pool/buffer.
     VkCommandPoolCreateInfo poolInfo{};
@@ -549,10 +593,9 @@ int main(int argc, char** argv) {
 
     VkMemoryRequirements bufMemReq;
     vkGetBufferMemoryRequirements(device, readbackBuffer, &bufMemReq);
-    uint32_t bufMemType = findMemoryType(
-        phys, bufMemReq.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        false);
+    bool readbackCoherent = false;
+    uint32_t bufMemType = hostMemoryType(
+        phys, bufMemReq.memoryTypeBits, readbackCoherent);
 
     VkMemoryAllocateInfo bufAllocInfo{};
     bufAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
@@ -641,7 +684,12 @@ int main(int argc, char** argv) {
 
     // Readback.
     void* mapped = nullptr;
-    VK_CHECK(vkMapMemory(device, bufferMemory, 0, VK_WHOLE_SIZE, 0, &mapped));
+    VK_CHECK(vkMapMemory(device, bufferMemory, 0, bufAllocInfo.allocationSize, 0, &mapped));
+    if (!readbackCoherent) {
+        VkMappedMemoryRange range = wholeMappedRange(
+            phys, bufferMemory, bufAllocInfo.allocationSize, bufSize);
+        VK_CHECK(vkInvalidateMappedMemoryRanges(device, 1, &range));
+    }
     const uint8_t* pixels = reinterpret_cast<const uint8_t*>(mapped);
 
     fprintf(stderr, "readback done, writing %s\n", outPath);

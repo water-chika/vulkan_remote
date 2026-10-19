@@ -35,6 +35,7 @@ compositor.
 | `tools/offscreen_reuse.cpp` | deterministic multi-frame graphics reuse across two device epochs |
 | `tools/mipmap.cpp` | deterministic per-level barrier, blit, and mip-chain readback regression |
 | `tools/noncoherent_memory.cpp` | explicit non-coherent mapped-memory flush/invalidate regression |
+| `tools/coherent_memory.cpp` | experimental coherent boundary-copy regression without flush/invalidate |
 | `docs/compatibility-roadmap.md` | tested applications and ordered sample/API milestones |
 | `tools/remoting_trace.py` | record, inspect, and exactly replay one headless wire session |
 | `tests/run_matrix.py` | inventory-driven four-mode acceptance runner |
@@ -267,10 +268,12 @@ kept outside the repository.
   generates four levels with per-level barriers and `vkCmdBlitImage`, then verifies
   the exact 340-byte chain and checksum.
   `tools/noncoherent_memory` explicitly flushes and invalidates two disjoint,
-  nonzero atom-aligned ranges and verifies 128 synchronized bytes; it reports a
-  stable skip when no compatible non-coherent host-visible memory type exists.
-  `tests/test_samples.py` runs all twelve workloads directly and remoted through a
-  fresh server, requiring matching image bytes or pass/skip results.
+  nonzero atom-aligned ranges and verifies 128 synchronized bytes. A native run
+  may skip when no compatible non-coherent host-visible type exists, while the
+  remoted run must pass because the remote memory facade intentionally hides
+  `HOST_COHERENT`. `tests/test_samples.py` runs all twelve workloads directly and
+  remoted through a fresh server, requiring matching image bytes or pass results
+  except for that intentional native-skip/remoted-pass capability asymmetry.
 - `tests/test_sessions.py` keeps one server alive across repeated sequential
   clients, two explicitly overlapping initialized clients, abrupt loss
   of one client while its peer completes, and a final clean client.
@@ -316,13 +319,25 @@ kept outside the repository.
 
 **Mapped memory.** `vkMapMemory` must return a pointer the caller can
 dereference, which a socket cannot deliver. The client hands back an aligned
-shadow allocation. Explicit non-coherent flush/invalidate calls transfer only
-the requested ranges; coherent writes are conservatively uploaded before
-submit and present and on unmap. Two opcodes outside the Vulkan command set
-exist for those transfers, and they are in the handshake digest because both
-peers must agree on them. Coherent memory is therefore not coherent in the
-strict sense: writes land at remoting synchronization points, and GPU writes do
-not refresh an already-mapped coherent shadow automatically.
+shadow allocation. By default no client-visible memory type advertises
+`VK_MEMORY_PROPERTY_HOST_COHERENT_BIT`; every remoted host-visible allocation
+requires explicit atom-valid flush/invalidate. The server retains real native
+flags internally for KMD cache maintenance.
+
+Setting `VK_REMOTING_EXPERIMENTAL_COHERENT=1` on both peers negotiates an
+experimental whole-copy backend. It preserves native `HOST_COHERENT` while
+continuing to hide the stronger AMD coherence flags, publishes complete active
+coherent mappings before supported queue submissions, and refreshes them after
+successful fence/idle completion observations. This compatibility mode is not
+yet a general strict-coherence claim: whole-range refresh can race arbitrary
+application pointer stores and broader shader/render-target write-set tracking
+is incomplete. Ordinary non-sparse storage descriptors, classic/render-pass-2
+attachments (including imageless), secondary command-buffer write propagation,
+and GPU-signaled timeline values are tracked conservatively. Sparse resources
+remain outside coherent attribution because interval/subresource alias maps are
+not implemented and sparse feature bits remain hidden. Linux `userfaultfd`,
+Windows Write Watch, or KMD-managed shared memory is required before enabling
+coherent advertisement by default.
 
 **Recording.** Every `vkCmd*` is sent without waiting for a reply, so a
 40-call command buffer costs one round trip instead of forty. The server
@@ -379,9 +394,11 @@ a way to measure that conclusion rather than assume it.
 - Arbitrary `pNext` chains remain unsupported. Reviewed bounded allowlists cover
   properties2 feature/property queries, device creation, renderpass2, graphics
   pipelines, images/views, imageless framebuffers, and render-pass begin.
-- A memory allocation can have only one active shadow mapping. GPU writes do not
-  automatically refresh an already-mapped coherent shadow after host waits;
-  explicit invalidate remains the reliable remoting readback point.
+- A memory allocation can have only one active shadow mapping. The remote facade
+  exposes host-visible memory as non-coherent, so applications that require
+  coherent memory without a host-visible fallback may fail memory-type
+  selection. Explicit atom-aligned flush/invalidate is required; future strict
+  coherence depends on KMD-managed shared memory.
 - Roughly a third of cross-machine `vkcube` runs drop with
   `event on unknown object N` during registry binding in the proxy. Not
   isolated.

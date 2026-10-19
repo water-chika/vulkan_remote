@@ -6,6 +6,8 @@
 #include <cstdlib>
 #include <limits>
 #include <mutex>
+#include <new>
+#include <utility>
 #include <vector>
 
 #include <vulkan/vk_icd.h>
@@ -13,6 +15,7 @@
 
 #include "entry_table.hpp"
 #include "marshal.hpp"
+#include "memory_contract.hpp"
 #include "remote_objects.hpp"
 #include "wire.hpp"
 
@@ -49,7 +52,7 @@ bool validate_explicit_ranges(RemoteDevice* device, const VkMappedMemoryRange* r
         VkDeviceSize size = 0;
         if (!resolve_allocation_range(allocation->second.size, ranges[i].offset,
                                       ranges[i].size, &size)) return false;
-        if (allocation->second.coherent) continue;
+        if (allocation->second.emulated_coherent) continue;
         const VkDeviceSize atom = allocation->second.non_coherent_atom_size;
         if (atom == 0 || ranges[i].offset % atom != 0) return false;
         const VkDeviceSize end = ranges[i].offset + size;
@@ -74,7 +77,8 @@ VKAPI_ATTR VkResult VKAPI_CALL AllocateMemory(VkDevice handle,
     Reader r = payload_reader(reply);
     const VkResult result = static_cast<VkResult>(r.i32());
     const uint64_t id = r.handle();
-    const VkMemoryPropertyFlags server_flags = r.u32();
+    const VkMemoryPropertyFlags server_flags =
+        public_memory_property_flags(r.u32(), device->instance->capabilities);
     const VkDeviceSize server_alignment = r.u64();
     const VkDeviceSize atom_size = r.u64();
     if (!r.ok() || atom_size == 0) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
@@ -118,7 +122,7 @@ VKAPI_ATTR VkResult VKAPI_CALL MapMemory(VkDevice handle, VkDeviceMemory memory,
     RemoteDevice* device = to_device(handle);
     const uint64_t memory_id = id_from_handle(memory);
     VkDeviceSize real_size = 0;
-    bool coherent = false;
+    bool emulated_coherent = false;
     {
         std::lock_guard<std::mutex> lock(device->mapped_mutex);
         const auto allocation = device->memories.find(memory_id);
@@ -130,7 +134,7 @@ VKAPI_ATTR VkResult VKAPI_CALL MapMemory(VkDevice handle, VkDeviceMemory memory,
         for (const MappedRange& mapping : device->mapped) {
             if (mapping.memory_id == memory_id) return VK_ERROR_MEMORY_MAP_FAILED;
         }
-        coherent = allocation->second.coherent;
+        emulated_coherent = allocation->second.emulated_coherent;
     }
 
     const size_t alignment = static_cast<size_t>(device->map_alignment > alignof(void*)
@@ -148,14 +152,25 @@ VKAPI_ATTR VkResult VKAPI_CALL MapMemory(VkDevice handle, VkDeviceMemory memory,
 
     {
         std::lock_guard<std::mutex> lock(device->mapped_mutex);
-        device->mapped.push_back(MappedRange{memory_id, offset, real_size, base, shadow, coherent});
+        MappedRange mapping{memory_id, offset, real_size, base, shadow};
+        mapping.emulated_coherent = emulated_coherent;
+        mapping.transfer_ready = !emulated_coherent;
+        if (emulated_coherent) {
+            try {
+                mapping.baseline.resize(static_cast<size_t>(real_size));
+            } catch (const std::bad_alloc&) {
+                std::free(base);
+                return VK_ERROR_OUT_OF_HOST_MEMORY;
+            }
+        }
+        device->mapped.push_back(std::move(mapping));
     }
 
-    VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
-    range.memory = memory;
-    range.offset = offset;
-    range.size = real_size;
-    if (coherent && device->download_mapped(&range, 1) != VK_SUCCESS) {
+    VkMappedMemoryRange initial{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+    initial.memory = memory;
+    initial.offset = offset;
+    initial.size = real_size;
+    if (emulated_coherent && device->download_mapped(&initial, 1) != VK_SUCCESS) {
         std::lock_guard<std::mutex> lock(device->mapped_mutex);
         for (auto it = device->mapped.begin(); it != device->mapped.end(); ++it) {
             if (it->memory_id == memory_id) {
@@ -166,6 +181,17 @@ VKAPI_ATTR VkResult VKAPI_CALL MapMemory(VkDevice handle, VkDeviceMemory memory,
         }
         return VK_ERROR_MEMORY_MAP_FAILED;
     }
+    if (emulated_coherent) {
+        std::lock_guard<std::mutex> lock(device->mapped_mutex);
+        for (MappedRange& mapping : device->mapped) {
+            if (mapping.memory_id == memory_id) {
+                std::memcpy(mapping.baseline.data(), mapping.shadow,
+                            static_cast<size_t>(mapping.size));
+                mapping.transfer_ready = true;
+                break;
+            }
+        }
+    }
 
     *ppData = shadow;
     return VK_SUCCESS;
@@ -174,22 +200,20 @@ VKAPI_ATTR VkResult VKAPI_CALL MapMemory(VkDevice handle, VkDeviceMemory memory,
 VKAPI_ATTR void VKAPI_CALL UnmapMemory(VkDevice handle, VkDeviceMemory memory) {
     RemoteDevice* device = to_device(handle);
     const uint64_t memory_id = id_from_handle(memory);
-    VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
-    bool coherent = false;
+    VkMappedMemoryRange coherent_range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
     {
         std::lock_guard<std::mutex> lock(device->mapped_mutex);
         for (const MappedRange& mapping : device->mapped) {
-            if (mapping.memory_id == memory_id) {
-                range.memory = memory;
-                range.offset = mapping.offset;
-                range.size = mapping.size;
-                coherent = mapping.coherent;
+            if (mapping.memory_id == memory_id && mapping.emulated_coherent) {
+                coherent_range.memory = memory;
+                coherent_range.offset = mapping.offset;
+                coherent_range.size = mapping.size;
                 break;
             }
         }
     }
-    if (coherent) device->flush_mapped(&range, 1);
-
+    if (coherent_range.memory != VK_NULL_HANDLE)
+        (void)device->flush_mapped(&coherent_range, 1);
     std::lock_guard<std::mutex> lock(device->mapped_mutex);
     for (auto it = device->mapped.begin(); it != device->mapped.end(); ++it) {
         if (it->memory_id == memory_id) {
@@ -227,7 +251,12 @@ VKAPI_ATTR VkResult VKAPI_CALL BindBufferMemory(VkDevice handle, VkBuffer buffer
     std::vector<char> reply;
     if (!device->instance->connection.round_trip(Opcode::vkBindBufferMemory, request, &reply)) return VK_ERROR_DEVICE_LOST;
     Reader r = payload_reader(reply);
-    return static_cast<VkResult>(r.i32());
+    const VkResult result = static_cast<VkResult>(r.i32());
+    if (r.ok() && result == VK_SUCCESS) {
+        std::lock_guard<std::mutex> lock(device->mapped_mutex);
+        device->buffer_bindings[id_from_handle(buffer)] = {id_from_handle(memory), offset};
+    }
+    return r.ok() ? result : VK_ERROR_DEVICE_LOST;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL BindImageMemory(VkDevice handle, VkImage image,
@@ -241,7 +270,12 @@ VKAPI_ATTR VkResult VKAPI_CALL BindImageMemory(VkDevice handle, VkImage image,
     std::vector<char> reply;
     if (!device->instance->connection.round_trip(Opcode::vkBindImageMemory, request, &reply)) return VK_ERROR_DEVICE_LOST;
     Reader r = payload_reader(reply);
-    return static_cast<VkResult>(r.i32());
+    const VkResult result = static_cast<VkResult>(r.i32());
+    if (r.ok() && result == VK_SUCCESS) {
+        std::lock_guard<std::mutex> lock(device->mapped_mutex);
+        device->image_bindings[id_from_handle(image)] = {id_from_handle(memory), offset};
+    }
+    return r.ok() ? result : VK_ERROR_DEVICE_LOST;
 }
 
 void read_memory_requirements(Reader& r, VkMemoryRequirements* out) {
@@ -267,12 +301,12 @@ VKAPI_ATTR void VKAPI_CALL GetImageMemoryRequirements(VkDevice handle, VkImage i
 VKAPI_ATTR VkResult VKAPI_CALL BindBufferMemory2(VkDevice handle,uint32_t count,const VkBindBufferMemoryInfo* infos){
     if(count>kMaxArrayElements||(count&&!infos))return VK_ERROR_INITIALIZATION_FAILED;RemoteDevice* d=to_device(handle);Writer w;w.handle(d->remote_id);w.u32(count);
     for(uint32_t i=0;i<count;++i){if(infos[i].sType!=VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO||infos[i].pNext)return VK_ERROR_FEATURE_NOT_PRESENT;w.handle(id_from_handle(infos[i].buffer));w.handle(id_from_handle(infos[i].memory));w.u64(infos[i].memoryOffset);}
-    std::vector<char> reply;if(!d->instance->connection.round_trip(Opcode::vkBindBufferMemory2,w,&reply))return VK_ERROR_DEVICE_LOST;Reader r=payload_reader(reply);auto result=static_cast<VkResult>(r.i32());return r.ok()?result:VK_ERROR_DEVICE_LOST;
+    std::vector<char> reply;if(!d->instance->connection.round_trip(Opcode::vkBindBufferMemory2,w,&reply))return VK_ERROR_DEVICE_LOST;Reader r=payload_reader(reply);auto result=static_cast<VkResult>(r.i32());if(r.ok()&&result==VK_SUCCESS){std::lock_guard<std::mutex>lock(d->mapped_mutex);for(uint32_t i=0;i<count;++i)d->buffer_bindings[id_from_handle(infos[i].buffer)]={id_from_handle(infos[i].memory),infos[i].memoryOffset};}return r.ok()?result:VK_ERROR_DEVICE_LOST;
 }
 VKAPI_ATTR VkResult VKAPI_CALL BindImageMemory2(VkDevice handle,uint32_t count,const VkBindImageMemoryInfo* infos){
     if(count>kMaxArrayElements||(count&&!infos))return VK_ERROR_INITIALIZATION_FAILED;RemoteDevice* d=to_device(handle);Writer w;w.handle(d->remote_id);w.u32(count);
     for(uint32_t i=0;i<count;++i){if(infos[i].sType!=VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO)return VK_ERROR_INITIALIZATION_FAILED;w.handle(id_from_handle(infos[i].image));w.handle(id_from_handle(infos[i].memory));w.u64(infos[i].memoryOffset);if(!write_pnext_chain(w,PNextContext::BindImageMemory2,infos[i].pNext))return VK_ERROR_FEATURE_NOT_PRESENT;}
-    std::vector<char> reply;if(!d->instance->connection.round_trip(Opcode::vkBindImageMemory2,w,&reply))return VK_ERROR_DEVICE_LOST;Reader r=payload_reader(reply);auto result=static_cast<VkResult>(r.i32());return r.ok()?result:VK_ERROR_DEVICE_LOST;
+    std::vector<char> reply;if(!d->instance->connection.round_trip(Opcode::vkBindImageMemory2,w,&reply))return VK_ERROR_DEVICE_LOST;Reader r=payload_reader(reply);auto result=static_cast<VkResult>(r.i32());if(r.ok()&&result==VK_SUCCESS){std::lock_guard<std::mutex>lock(d->mapped_mutex);for(uint32_t i=0;i<count;++i)d->image_bindings[id_from_handle(infos[i].image)]={id_from_handle(infos[i].memory),infos[i].memoryOffset};}return r.ok()?result:VK_ERROR_DEVICE_LOST;
 }
 VKAPI_ATTR void VKAPI_CALL GetBufferMemoryRequirements2(VkDevice handle,const VkBufferMemoryRequirementsInfo2* info,VkMemoryRequirements2* out){
     if(!info||!out)return;RemoteDevice*d=to_device(handle);Writer w;w.handle(d->remote_id);w.handle(id_from_handle(info->buffer));if(!write_pnext_output_topology(w,PNextContext::MemoryRequirements2,out->pNext))return;std::vector<char>reply;if(!d->instance->connection.round_trip(Opcode::vkGetBufferMemoryRequirements2,w,&reply))return;Reader r=payload_reader(reply);read_memory_requirements(r,&out->memoryRequirements);apply_pnext_output_values(r,PNextContext::MemoryRequirements2,out->pNext);

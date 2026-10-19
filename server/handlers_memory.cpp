@@ -7,6 +7,7 @@
 #include <vulkan/vulkan.h>
 
 #include "marshal.hpp"
+#include "memory_contract.hpp"
 #include "session.hpp"
 
 namespace {
@@ -31,11 +32,6 @@ bool validate_transfer(Session& c, uint64_t device_id, uint64_t memory_id,
         !(it->second.property_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) || size == 0 ||
         size > kMaxMappedChunk || offset > it->second.size || size > it->second.size - offset) {
         return false;
-    }
-    if (!(it->second.property_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
-        const VkDeviceSize atom = it->second.non_coherent_atom_size;
-        if (atom == 0 || offset % atom != 0) return false;
-        if (offset + size != it->second.size && size % atom != 0) return false;
     }
     *metadata = &it->second;
     return true;
@@ -108,7 +104,10 @@ void handle_AllocateMemory(Session& c) {
     VkDeviceMemory memory = VK_NULL_HANDLE;
     const VkResult result = vkAllocateMemory(device, &info, nullptr, &memory);
     uint64_t id = 0;
-    const VkMemoryPropertyFlags flags = memory_properties.memoryTypes[info.memoryTypeIndex].propertyFlags;
+    const VkMemoryPropertyFlags flags =
+        memory_properties.memoryTypes[info.memoryTypeIndex].propertyFlags;
+    const VkMemoryPropertyFlags public_flags =
+        remoting::public_memory_property_flags(flags, c.tables.capabilities);
     const VkDeviceSize map_alignment = properties.limits.minMemoryMapAlignment;
     const VkDeviceSize atom_size = properties.limits.nonCoherentAtomSize;
     if (result == VK_SUCCESS) {
@@ -119,7 +118,7 @@ void handle_AllocateMemory(Session& c) {
     c.writer.u32(static_cast<uint32_t>(Status::Ok));
     c.writer.i32(result);
     c.writer.handle(id);
-    c.writer.u32(flags);
+    c.writer.u32(public_flags);
     c.writer.u64(map_alignment);
     c.writer.u64(atom_size);
     c.reply();
