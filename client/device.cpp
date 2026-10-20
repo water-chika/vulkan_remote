@@ -114,12 +114,30 @@ bool acquire_timeline_writes(RemoteDevice* device, uint64_t semaphore_id, uint64
         std::lock_guard<std::mutex> lock(device->metadata_mutex);
         const auto records = device->semaphores.find(semaphore_id);
         if (records == device->semaphores.end()) return true;
-        for (const TimelineSignalWrites& signal : records->second.timeline_writes) {
+        SemaphoreProvenance& semaphore = records->second;
+        completed = semaphore.acquired_timeline_writes;
+        for (const TimelineSignalWrites& signal : semaphore.timeline_writes) {
             if (signal.value <= value)
                 completed.insert(signal.memory_ids.begin(), signal.memory_ids.end());
         }
     }
-    return device->acquire_coherent_mapped(&completed);
+    if (!device->acquire_coherent_mapped(&completed)) return false;
+    {
+        std::lock_guard<std::mutex> lock(device->metadata_mutex);
+        const auto records = device->semaphores.find(semaphore_id);
+        if (records == device->semaphores.end()) return true;
+        SemaphoreProvenance& semaphore = records->second;
+        semaphore.acquired_timeline_value =
+            (std::max)(semaphore.acquired_timeline_value, value);
+        semaphore.acquired_timeline_writes.insert(completed.begin(), completed.end());
+        semaphore.timeline_writes.erase(
+            std::remove_if(semaphore.timeline_writes.begin(), semaphore.timeline_writes.end(),
+                           [value](const TimelineSignalWrites& signal) {
+                               return signal.value <= value;
+                           }),
+            semaphore.timeline_writes.end());
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -387,8 +405,13 @@ VKAPI_ATTR VkResult VKAPI_CALL QueueSubmit(VkQueue handle, uint32_t submitCount,
             if (semaphore == device->semaphores.end()) continue;
             bool resolved_wait = false;
             if (semaphore->second.timeline && timeline && j < timeline->waitSemaphoreValueCount) {
+                const uint64_t wait_value = timeline->pWaitSemaphoreValues[j];
+                submit_writes.insert(semaphore->second.acquired_timeline_writes.begin(),
+                                     semaphore->second.acquired_timeline_writes.end());
+                if (semaphore->second.acquired_timeline_value >= wait_value)
+                    resolved_wait = true;
                 for (const TimelineSignalWrites& signal : semaphore->second.timeline_writes)
-                    if (signal.value >= timeline->pWaitSemaphoreValues[j]) {
+                    if (!resolved_wait && signal.value >= wait_value) {
                         submit_writes.insert(signal.memory_ids.begin(), signal.memory_ids.end());
                         resolved_wait = true;
                         break;
@@ -535,8 +558,13 @@ VKAPI_ATTR VkResult VKAPI_CALL QueueBindSparse(VkQueue handle, uint32_t bindInfo
             bool resolved = false;
             if (semaphore->second.timeline && timeline &&
                 j < timeline->waitSemaphoreValueCount) {
+                const uint64_t wait_value = timeline->pWaitSemaphoreValues[j];
+                writes.insert(semaphore->second.acquired_timeline_writes.begin(),
+                              semaphore->second.acquired_timeline_writes.end());
+                if (semaphore->second.acquired_timeline_value >= wait_value)
+                    resolved = true;
                 for (const auto& signal : semaphore->second.timeline_writes) {
-                    if (signal.value < timeline->pWaitSemaphoreValues[j]) continue;
+                    if (resolved || signal.value < wait_value) continue;
                     writes.insert(signal.memory_ids.begin(), signal.memory_ids.end());
                     resolved = true;
                     break;

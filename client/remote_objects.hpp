@@ -176,6 +176,8 @@ struct SemaphoreProvenance {
     uint64_t binary_submission_serial = 0;
     std::unordered_set<uint64_t> binary_writes;
     std::vector<TimelineSignalWrites> timeline_writes;
+    uint64_t acquired_timeline_value = 0;
+    std::unordered_set<uint64_t> acquired_timeline_writes;
     std::vector<PendingSemaphoreWait> pending_waits;
 };
 
