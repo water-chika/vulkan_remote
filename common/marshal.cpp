@@ -1979,6 +1979,64 @@ bool read_MemoryBarrier(Reader& r, Arena&, const HandleResolver&, VkMemoryBarrie
     return read_raw(r, out);
 }
 
+namespace {
+#pragma pack(push, 1)
+struct MemoryBarrier2Wire {
+    uint64_t src_stage_mask;
+    uint64_t src_access_mask;
+    uint64_t dst_stage_mask;
+    uint64_t dst_access_mask;
+};
+
+struct BufferMemoryBarrier2Wire {
+    uint64_t src_stage_mask;
+    uint64_t src_access_mask;
+    uint64_t dst_stage_mask;
+    uint64_t dst_access_mask;
+    uint32_t src_queue_family_index;
+    uint32_t dst_queue_family_index;
+    uint64_t buffer;
+    uint64_t offset;
+    uint64_t size;
+};
+
+struct ImageMemoryBarrier2Wire {
+    uint64_t src_stage_mask;
+    uint64_t src_access_mask;
+    uint64_t dst_stage_mask;
+    uint64_t dst_access_mask;
+    int32_t old_layout;
+    int32_t new_layout;
+    uint32_t src_queue_family_index;
+    uint32_t dst_queue_family_index;
+    uint64_t image;
+    uint32_t aspect_mask;
+    uint32_t base_mip_level;
+    uint32_t level_count;
+    uint32_t base_array_layer;
+    uint32_t layer_count;
+};
+
+struct SemaphoreSubmitInfoWire {
+    uint64_t semaphore;
+    uint64_t value;
+    uint64_t stage_mask;
+    uint32_t device_index;
+};
+
+struct CommandBufferSubmitInfoWire {
+    uint64_t command_buffer;
+    uint32_t device_mask;
+};
+#pragma pack(pop)
+
+constexpr size_t kMemoryBarrier2WireBytes = sizeof(MemoryBarrier2Wire);
+constexpr size_t kBufferMemoryBarrier2WireBytes = sizeof(BufferMemoryBarrier2Wire);
+constexpr size_t kImageMemoryBarrier2WireBytes = sizeof(ImageMemoryBarrier2Wire);
+constexpr size_t kSemaphoreSubmitInfoWireBytes = sizeof(SemaphoreSubmitInfoWire);
+constexpr size_t kCommandBufferSubmitInfoWireBytes = sizeof(CommandBufferSubmitInfoWire);
+}  // namespace
+
 bool write_DependencyInfo(Writer& w, const VkDependencyInfo& s) {
     if (s.sType != VK_STRUCTURE_TYPE_DEPENDENCY_INFO || s.pNext ||
         s.memoryBarrierCount > kMaxArrayElements ||
@@ -1997,11 +2055,11 @@ bool write_DependencyInfo(Writer& w, const VkDependencyInfo& s) {
     return true;
 }
 
-bool read_DependencyInfo(Reader& r,Arena& arena,const HandleResolver&hr,VkDependencyInfo*out){*out={VK_STRUCTURE_TYPE_DEPENDENCY_INFO};out->dependencyFlags=r.u32();uint32_t mn=r.u32();if(mn>kMaxArrayElements||mn>r.remaining()/32)return false;auto*m=arena.array<VkMemoryBarrier2>(mn);for(uint32_t i=0;i<mn;++i){m[i]={VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};m[i].srcStageMask=r.u64();m[i].srcAccessMask=r.u64();m[i].dstStageMask=r.u64();m[i].dstAccessMask=r.u64();}out->memoryBarrierCount=mn;out->pMemoryBarriers=m;uint32_t bn=r.u32();if(bn>kMaxArrayElements||bn>r.remaining()/72)return false;auto*b=arena.array<VkBufferMemoryBarrier2>(bn);for(uint32_t i=0;i<bn;++i){b[i]={VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};b[i].srcStageMask=r.u64();b[i].srcAccessMask=r.u64();b[i].dstStageMask=r.u64();b[i].dstAccessMask=r.u64();b[i].srcQueueFamilyIndex=r.u32();b[i].dstQueueFamilyIndex=r.u32();uint64_t id=r.handle();b[i].buffer=hr.buffer(id);b[i].offset=r.u64();b[i].size=r.u64();if(id&&!b[i].buffer)return false;}out->bufferMemoryBarrierCount=bn;out->pBufferMemoryBarriers=b;uint32_t in=r.u32();if(in>kMaxArrayElements||in>r.remaining()/88)return false;auto*im=arena.array<VkImageMemoryBarrier2>(in);for(uint32_t i=0;i<in;++i){im[i]={VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};im[i].srcStageMask=r.u64();im[i].srcAccessMask=r.u64();im[i].dstStageMask=r.u64();im[i].dstAccessMask=r.u64();im[i].oldLayout=static_cast<VkImageLayout>(r.i32());im[i].newLayout=static_cast<VkImageLayout>(r.i32());im[i].srcQueueFamilyIndex=r.u32();im[i].dstQueueFamilyIndex=r.u32();uint64_t id=r.handle();im[i].image=hr.image(id);im[i].subresourceRange.aspectMask=r.u32();im[i].subresourceRange.baseMipLevel=r.u32();im[i].subresourceRange.levelCount=r.u32();im[i].subresourceRange.baseArrayLayer=r.u32();im[i].subresourceRange.layerCount=r.u32();if(id&&!im[i].image)return false;}out->imageMemoryBarrierCount=in;out->pImageMemoryBarriers=im;return r.ok();}
+bool read_DependencyInfo(Reader& r,Arena& arena,const HandleResolver&hr,VkDependencyInfo*out){*out={VK_STRUCTURE_TYPE_DEPENDENCY_INFO};out->dependencyFlags=r.u32();uint32_t mn=r.u32();if(mn>kMaxArrayElements||mn>r.remaining()/kMemoryBarrier2WireBytes)return false;auto*m=arena.array<VkMemoryBarrier2>(mn);for(uint32_t i=0;i<mn;++i){m[i]={VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};m[i].srcStageMask=r.u64();m[i].srcAccessMask=r.u64();m[i].dstStageMask=r.u64();m[i].dstAccessMask=r.u64();}out->memoryBarrierCount=mn;out->pMemoryBarriers=m;uint32_t bn=r.u32();if(bn>kMaxArrayElements||bn>r.remaining()/kBufferMemoryBarrier2WireBytes)return false;auto*b=arena.array<VkBufferMemoryBarrier2>(bn);for(uint32_t i=0;i<bn;++i){b[i]={VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};b[i].srcStageMask=r.u64();b[i].srcAccessMask=r.u64();b[i].dstStageMask=r.u64();b[i].dstAccessMask=r.u64();b[i].srcQueueFamilyIndex=r.u32();b[i].dstQueueFamilyIndex=r.u32();uint64_t id=r.handle();b[i].buffer=hr.buffer(id);b[i].offset=r.u64();b[i].size=r.u64();if(id&&!b[i].buffer)return false;}out->bufferMemoryBarrierCount=bn;out->pBufferMemoryBarriers=b;uint32_t in=r.u32();if(in>kMaxArrayElements||in>r.remaining()/kImageMemoryBarrier2WireBytes)return false;auto*im=arena.array<VkImageMemoryBarrier2>(in);for(uint32_t i=0;i<in;++i){im[i]={VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};im[i].srcStageMask=r.u64();im[i].srcAccessMask=r.u64();im[i].dstStageMask=r.u64();im[i].dstAccessMask=r.u64();im[i].oldLayout=static_cast<VkImageLayout>(r.i32());im[i].newLayout=static_cast<VkImageLayout>(r.i32());im[i].srcQueueFamilyIndex=r.u32();im[i].dstQueueFamilyIndex=r.u32();uint64_t id=r.handle();im[i].image=hr.image(id);im[i].subresourceRange.aspectMask=r.u32();im[i].subresourceRange.baseMipLevel=r.u32();im[i].subresourceRange.levelCount=r.u32();im[i].subresourceRange.baseArrayLayer=r.u32();im[i].subresourceRange.layerCount=r.u32();if(id&&!im[i].image)return false;}out->imageMemoryBarrierCount=in;out->pImageMemoryBarriers=im;return r.ok();}
 
 bool write_SubmitInfo2(Writer&w,const VkSubmitInfo2&s,uint64_t(*command_buffer_id)(VkCommandBuffer)){if(s.sType!=VK_STRUCTURE_TYPE_SUBMIT_INFO_2||s.pNext||s.waitSemaphoreInfoCount>kMaxArrayElements||s.commandBufferInfoCount>kMaxArrayElements||s.signalSemaphoreInfoCount>kMaxArrayElements||(s.waitSemaphoreInfoCount&&!s.pWaitSemaphoreInfos)||(s.commandBufferInfoCount&&!s.pCommandBufferInfos)||(s.signalSemaphoreInfoCount&&!s.pSignalSemaphoreInfos))return false;w.u32(s.flags);w.u32(s.waitSemaphoreInfoCount);for(uint32_t i=0;i<s.waitSemaphoreInfoCount;++i){const auto&x=s.pWaitSemaphoreInfos[i];if(x.sType!=VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO||x.pNext)return false;w.handle(id_of(x.semaphore));w.u64(x.value);w.u64(x.stageMask);w.u32(x.deviceIndex);}w.u32(s.commandBufferInfoCount);for(uint32_t i=0;i<s.commandBufferInfoCount;++i){const auto&x=s.pCommandBufferInfos[i];if(x.sType!=VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO||x.pNext)return false;w.handle(command_buffer_id?command_buffer_id(x.commandBuffer):id_of(x.commandBuffer));w.u32(x.deviceMask);}w.u32(s.signalSemaphoreInfoCount);for(uint32_t i=0;i<s.signalSemaphoreInfoCount;++i){const auto&x=s.pSignalSemaphoreInfos[i];if(x.sType!=VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO||x.pNext)return false;w.handle(id_of(x.semaphore));w.u64(x.value);w.u64(x.stageMask);w.u32(x.deviceIndex);}return true;}
 
-bool read_SubmitInfo2(Reader&r,Arena&arena,const HandleResolver&hr,VkSubmitInfo2*out){*out={VK_STRUCTURE_TYPE_SUBMIT_INFO_2};out->flags=r.u32();uint32_t wn=r.u32();if(wn>kMaxArrayElements||wn>r.remaining()/28)return false;auto*w=arena.array<VkSemaphoreSubmitInfo>(wn);for(uint32_t i=0;i<wn;++i){w[i]={VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};uint64_t id=r.handle();w[i].semaphore=hr.semaphore(id);w[i].value=r.u64();w[i].stageMask=r.u64();w[i].deviceIndex=r.u32();if(id&&!w[i].semaphore)return false;}out->waitSemaphoreInfoCount=wn;out->pWaitSemaphoreInfos=w;uint32_t cn=r.u32();if(cn>kMaxArrayElements||cn>r.remaining()/12)return false;auto*c=arena.array<VkCommandBufferSubmitInfo>(cn);for(uint32_t i=0;i<cn;++i){c[i]={VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};uint64_t id=r.handle();c[i].commandBuffer=hr.command_buffer(id);c[i].deviceMask=r.u32();if(id&&!c[i].commandBuffer)return false;}out->commandBufferInfoCount=cn;out->pCommandBufferInfos=c;uint32_t sn=r.u32();if(sn>kMaxArrayElements||sn>r.remaining()/28)return false;auto*s=arena.array<VkSemaphoreSubmitInfo>(sn);for(uint32_t i=0;i<sn;++i){s[i]={VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};uint64_t id=r.handle();s[i].semaphore=hr.semaphore(id);s[i].value=r.u64();s[i].stageMask=r.u64();s[i].deviceIndex=r.u32();if(id&&!s[i].semaphore)return false;}out->signalSemaphoreInfoCount=sn;out->pSignalSemaphoreInfos=s;return r.ok();}
+bool read_SubmitInfo2(Reader&r,Arena&arena,const HandleResolver&hr,VkSubmitInfo2*out){*out={VK_STRUCTURE_TYPE_SUBMIT_INFO_2};out->flags=r.u32();uint32_t wn=r.u32();if(wn>kMaxArrayElements||wn>r.remaining()/kSemaphoreSubmitInfoWireBytes)return false;auto*w=arena.array<VkSemaphoreSubmitInfo>(wn);for(uint32_t i=0;i<wn;++i){w[i]={VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};uint64_t id=r.handle();w[i].semaphore=hr.semaphore(id);w[i].value=r.u64();w[i].stageMask=r.u64();w[i].deviceIndex=r.u32();if(id&&!w[i].semaphore)return false;}out->waitSemaphoreInfoCount=wn;out->pWaitSemaphoreInfos=w;uint32_t cn=r.u32();if(cn>kMaxArrayElements||cn>r.remaining()/kCommandBufferSubmitInfoWireBytes)return false;auto*c=arena.array<VkCommandBufferSubmitInfo>(cn);for(uint32_t i=0;i<cn;++i){c[i]={VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};uint64_t id=r.handle();c[i].commandBuffer=hr.command_buffer(id);c[i].deviceMask=r.u32();if(id&&!c[i].commandBuffer)return false;}out->commandBufferInfoCount=cn;out->pCommandBufferInfos=c;uint32_t sn=r.u32();if(sn>kMaxArrayElements||sn>r.remaining()/kSemaphoreSubmitInfoWireBytes)return false;auto*s=arena.array<VkSemaphoreSubmitInfo>(sn);for(uint32_t i=0;i<sn;++i){s[i]={VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};uint64_t id=r.handle();s[i].semaphore=hr.semaphore(id);s[i].value=r.u64();s[i].stageMask=r.u64();s[i].deviceIndex=r.u32();if(id&&!s[i].semaphore)return false;}out->signalSemaphoreInfoCount=sn;out->pSignalSemaphoreInfos=s;return r.ok();}
 
 // ---------------------------------------------------------------------------
 // Group B
