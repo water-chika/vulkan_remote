@@ -78,6 +78,9 @@ def main() -> int:
     # server-owned window path instead; the standalone proxy tests cover the
     # protocol-replay path.
     server_env["VK_REMOTING_FORCE_OWN_WINDOW"] = "1"
+    # Stock vkcube unconditionally requires HOST_VISIBLE | HOST_COHERENT for
+    # its linear texture upload and dereferences the failed mapping otherwise.
+    server_env["VK_REMOTING_EXPERIMENTAL_COHERENT"] = "1"
     server_process = subprocess.Popen(
         [server, "--address", "127.0.0.1", "--port", str(port),
          "--wayland", "--wayland-port", str(wayland_port)],
@@ -114,6 +117,7 @@ def main() -> int:
     env["VK_DRIVER_FILES"] = manifest
     env["VK_REMOTING_HOST"] = "127.0.0.1"
     env["VK_REMOTING_PORT"] = str(port)
+    env["VK_REMOTING_EXPERIMENTAL_COHERENT"] = "1"
 
     started = time.monotonic()
     failure = ""

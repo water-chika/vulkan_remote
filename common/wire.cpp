@@ -127,8 +127,9 @@ bool read_all(socket_t fd, void* data, size_t size) {
 
 }  // namespace
 
-bool send_message(socket_t fd, uint32_t opcode, const std::vector<char>& payload) {
-    MessageHeader header{opcode, static_cast<uint32_t>(payload.size())};
+bool send_message(socket_t fd, uint32_t opcode, const std::vector<char>& payload,
+                  uint64_t request_id) {
+    MessageHeader header{opcode, static_cast<uint32_t>(payload.size()), request_id};
     if (!write_all(fd, &header, sizeof(header))) return false;
     if (payload.empty()) return true;
     return write_all(fd, payload.data(), payload.size());
@@ -215,26 +216,10 @@ socket_t connect_to(const std::string& host, uint16_t port) {
     // POSIX and required on Windows, so it is applied unconditionally.
     ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&one), sizeof(one));
 
-    // Only the client connects out (the server accepts), so this is the client's
-    // socket. Without a receive timeout, a dead or wedged server leaves the
-    // client blocked in recv() forever - every Vulkan call becomes an
-    // unkillable hang instead of a reported error. 30s is generous enough that
-    // a legitimately slow call over a real network still completes.
-#if defined(_WIN32)
-    // SO_RCVTIMEO is the same option number on Windows, but it does NOT take a
-    // struct timeval there: it takes a DWORD of milliseconds. Passing a
-    // timeval on Windows does not fail to compile, it just misreads the
-    // wrong bytes as the timeout, so the two branches must be kept at the
-    // same 30-second value by hand rather than sharing one struct.
-    const DWORD timeout_ms = 30 * 1000;
-    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout_ms),
-                 sizeof(timeout_ms));
-#else
-    struct timeval timeout;
-    timeout.tv_sec = 30;
-    timeout.tv_usec = 0;
-    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-#endif
+    // The multiplexed client has one receiver thread for the connection's
+    // lifetime. A socket receive timeout would incorrectly poison a healthy
+    // but idle connection; explicit shutdown wakes recv() when the instance is
+    // destroyed, and transport failure wakes every pending request.
     return fd;
 }
 

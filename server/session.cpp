@@ -13,6 +13,9 @@
 
 #include <errno.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <sys/socket.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -20,9 +23,12 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
+#include <functional>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "own_window.hpp"
 #if !defined(_WIN32)
@@ -448,12 +454,16 @@ public:
     }
 
     void enter(remoting::Opcode opcode) {
+        std::lock_guard<std::mutex> lock(mutex_);
         start_ = Clock::now();
-        opcode_.store(static_cast<uint32_t>(opcode), std::memory_order_relaxed);
-        running_.store(true, std::memory_order_release);
+        opcode_ = opcode;
+        running_ = true;
     }
 
-    void leave() { running_.store(false, std::memory_order_release); }
+    void leave() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        running_ = false;
+    }
 
 private:
     using Clock = std::chrono::steady_clock;
@@ -472,7 +482,7 @@ private:
             cv_.wait_for(lock, std::chrono::duration<double>(interval),
                          [this] { return stop_; });
             if (stop_) break;
-            if (!running_.load(std::memory_order_acquire)) {
+            if (!running_) {
                 reported = 0;
                 continue;
             }
@@ -481,8 +491,7 @@ private:
             const unsigned overdue = static_cast<unsigned>(elapsed / deadline_);
             if (overdue > reported) {
                 reported = overdue;
-                const auto opcode =
-                    static_cast<remoting::Opcode>(opcode_.load(std::memory_order_relaxed));
+                const auto opcode = opcode_;
                 fprintf(stderr,
                         "server: STALL: %s has not returned after %.2fs; the server is not "
                         "reading the connection while this runs\n",
@@ -493,14 +502,22 @@ private:
     }
 
     const double deadline_;
-    std::atomic<uint32_t> opcode_{0};
-    std::atomic<bool> running_{false};
+    remoting::Opcode opcode_ = remoting::Opcode::Invalid;
+    bool running_ = false;
     Clock::time_point start_{};
     std::mutex mutex_;
     std::condition_variable cv_;
     bool stop_ = false;
     std::thread thread_;
 };
+
+void interrupt_socket(remoting::socket_t fd) {
+#if defined(_WIN32)
+    ::shutdown(fd, SD_BOTH);
+#else
+    ::shutdown(fd, SHUT_RDWR);
+#endif
+}
 
 double stall_deadline_seconds() {
     if (const char* env = getenv("VK_REMOTING_STALL_SECONDS")) {
@@ -510,6 +527,90 @@ double stall_deadline_seconds() {
     return 5.0;
 }
 
+class RequestWorkers {
+public:
+    explicit RequestWorkers(size_t count) {
+        threads_.reserve(count);
+        for (size_t i = 0; i < count; ++i)
+            threads_.emplace_back([this] { run(); });
+    }
+
+    ~RequestWorkers() { stop(); }
+
+    bool submit(uint64_t request_id, std::function<void()> job, uint64_t lane = 0) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (stopping_ || active_ids_.count(request_id) ||
+            active_ids_.size() >= kMaxJobs) return false;
+        active_ids_.insert(request_id);
+        if (lane == 0 || !active_lanes_.count(lane)) {
+            if (lane) active_lanes_.insert(lane);
+            jobs_.push_back({request_id, lane, std::move(job)});
+            cv_.notify_one();
+        } else {
+            lane_jobs_[lane].push_back({request_id, lane, std::move(job)});
+        }
+        return true;
+    }
+
+    void stop() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (stopping_) return;
+            stopping_ = true;
+            jobs_.clear();
+            lane_jobs_.clear();
+        }
+        cv_.notify_all();
+        for (auto& thread : threads_) if (thread.joinable()) thread.join();
+        threads_.clear();
+    }
+
+private:
+    struct Job { uint64_t request_id; uint64_t lane; std::function<void()> run; };
+    static constexpr size_t kMaxJobs = 64;
+
+    void run() {
+        for (;;) {
+            Job job{};
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cv_.wait(lock, [this] { return stopping_ || !jobs_.empty(); });
+                if (stopping_) return;
+                if (jobs_.empty()) {
+                    continue;
+                }
+                job = std::move(jobs_.front());
+                jobs_.pop_front();
+            }
+            job.run();
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                active_ids_.erase(job.request_id);
+                if (job.lane) {
+                    auto lane = lane_jobs_.find(job.lane);
+                    if (lane != lane_jobs_.end() && !lane->second.empty()) {
+                        jobs_.push_back(std::move(lane->second.front()));
+                        lane->second.pop_front();
+                        if (lane->second.empty()) lane_jobs_.erase(lane);
+                        cv_.notify_one();
+                    } else {
+                        active_lanes_.erase(job.lane);
+                    }
+                }
+            }
+        }
+    }
+
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::deque<Job> jobs_;
+    std::unordered_map<uint64_t, std::deque<Job>> lane_jobs_;
+    std::unordered_set<uint64_t> active_lanes_;
+    std::unordered_set<uint64_t> active_ids_;
+    std::vector<std::thread> threads_;
+    bool stopping_ = false;
+};
+
 }  // namespace
 
 void Server::serve(remoting::socket_t fd) {
@@ -518,40 +619,293 @@ void Server::serve(remoting::socket_t fd) {
     uint32_t oneway_errors = 0;
     g_current_error_counter = &oneway_errors;
     StallWatchdog watchdog(stall_deadline_seconds());
+    std::mutex reply_mutex;
+    std::atomic<bool> closing{false};
+    RequestWorkers workers(8);
 
+    bool close_connection = false;
+    bool handshake_complete = false;
     for (;;) {
         remoting::MessageHeader header{};
         std::vector<char> payload;
         if (!remoting::recv_message(fd, &header, &payload)) break;
 
         const remoting::Opcode opcode = static_cast<remoting::Opcode>(header.opcode);
-        remoting::Reader reader(payload.data(), payload.size());
-        remoting::Writer writer;
-        remoting::Session session{fd, *this, reader, writer, tables, oneway_errors, opcode};
-
+        if (!handshake_complete && opcode != remoting::Opcode::Handshake) break;
+        if (handshake_complete && opcode == remoting::Opcode::Handshake) break;
+        if (opcode == remoting::Opcode::Handshake && header.request_id == 0) break;
+        if (opcode == remoting::Opcode::Ping) {
+            remoting::Writer writer;
+            writer.u32(static_cast<uint32_t>(
+                header.request_id != 0 && payload.empty()
+                    ? remoting::Status::Ok : remoting::Status::DecodeError));
+            if (header.request_id != 0) {
+                std::lock_guard<std::mutex> lock(reply_mutex);
+                remoting::send_message(fd, header.opcode, writer.data(), header.request_id);
+            }
+            continue;
+        }
         remoting::Handler handler = remoting::find_handler(opcode);
         if (handler == nullptr) {
+            remoting::Reader reader(payload.data(), payload.size());
+            remoting::Writer writer;
+            remoting::Session session{fd, *this, reader, writer, tables, oneway_errors, opcode,
+                                      header.request_id, &reply_mutex, &closing};
             fprintf(stderr, "server: unsupported command %s (%u)\n", remoting::opcode_name(opcode),
                     header.opcode);
             session.reply_status(remoting::Status::UnsupportedCommand);
             continue;
         }
 
+        if (opcode == remoting::Opcode::vkQueueWaitIdle ||
+            opcode == remoting::Opcode::vkDeviceWaitIdle) {
+            remoting::Reader reader(payload.data(), payload.size());
+            const uint64_t object_id = reader.handle();
+            VkQueue queue = opcode == remoting::Opcode::vkQueueWaitIdle
+                ? tables.queues.get(object_id) : VK_NULL_HANDLE;
+            VkDevice device = opcode == remoting::Opcode::vkDeviceWaitIdle
+                ? tables.devices.get(object_id) : VK_NULL_HANDLE;
+            const bool valid = header.request_id != 0 && reader.ok() &&
+                reader.remaining() == 0 &&
+                (queue != VK_NULL_HANDLE || device != VK_NULL_HANDLE);
+            if (!valid) {
+                remoting::Writer writer;
+                remoting::Session session{fd, *this, reader, writer, tables, oneway_errors, opcode,
+                                          header.request_id, &reply_mutex, &closing};
+                session.reply_status(remoting::Status::DecodeError);
+                continue;
+            }
+            const uint32_t errors = opcode == remoting::Opcode::vkDeviceWaitIdle
+                ? oneway_errors : 0;
+            if (opcode == remoting::Opcode::vkDeviceWaitIdle) oneway_errors = 0;
+            const uint64_t lane = queue != VK_NULL_HANDLE
+                ? reinterpret_cast<uintptr_t>(queue) : 0;
+            const bool submitted = workers.submit(header.request_id, [
+                fd, opcode, request_id = header.request_id, queue, device, errors,
+                &reply_mutex, &closing
+            ] {
+                try {
+                    const VkResult result = queue != VK_NULL_HANDLE
+                        ? vkQueueWaitIdle(queue) : vkDeviceWaitIdle(device);
+                    remoting::Writer writer;
+                    writer.u32(static_cast<uint32_t>(remoting::Status::Ok));
+                    writer.i32(result);
+                    if (opcode == remoting::Opcode::vkDeviceWaitIdle) writer.u32(errors);
+                    std::lock_guard<std::mutex> lock(reply_mutex);
+                    remoting::send_message(fd, static_cast<uint32_t>(opcode), writer.data(),
+                                           request_id);
+                } catch (const std::exception& error) {
+                    fprintf(stderr, "server: asynchronous idle exception: %s\n", error.what());
+                    closing.store(true, std::memory_order_release);
+                    interrupt_socket(fd);
+                } catch (...) {
+                    fprintf(stderr, "server: asynchronous idle exception: unknown error\n");
+                    closing.store(true, std::memory_order_release);
+                    interrupt_socket(fd);
+                }
+            }, lane);
+            if (!submitted) {
+                remoting::Writer writer;
+                writer.u32(static_cast<uint32_t>(remoting::Status::DecodeError));
+                std::lock_guard<std::mutex> lock(reply_mutex);
+                remoting::send_message(fd, static_cast<uint32_t>(opcode), writer.data(),
+                                       header.request_id);
+            }
+            continue;
+        }
+
+        if (opcode == remoting::Opcode::vkWaitForFences) {
+            remoting::Reader reader(payload.data(), payload.size());
+            VkDevice device = tables.devices.get(reader.handle());
+            const bool wait_all = reader.u32() != 0;
+            const uint32_t count = reader.u32();
+            bool valid = header.request_id != 0 && device != VK_NULL_HANDLE && count != 0 &&
+                count <= remoting::kMaxArrayElements && remoting::count_fits(reader, count, 8);
+            std::vector<VkFence> fences(valid ? count : 0);
+            for (uint32_t i = 0; valid && i < count; ++i) {
+                fences[i] = tables.fence(reader.handle());
+                valid = fences[i] != VK_NULL_HANDLE;
+            }
+            const uint64_t timeout = valid ? reader.u64() : 0;
+            valid = valid && reader.ok() && reader.remaining() == 0;
+            if (!valid) {
+                remoting::Writer writer;
+                remoting::Session session{fd, *this, reader, writer, tables, oneway_errors, opcode,
+                                          header.request_id, &reply_mutex, &closing};
+                session.reply_status(remoting::Status::DecodeError);
+                continue;
+            }
+            const bool submitted = workers.submit(header.request_id, [
+                fd, request_id = header.request_id, device, wait_all, timeout,
+                fences = std::move(fences), &reply_mutex, &closing
+            ]() mutable {
+                try {
+                    constexpr uint64_t kSliceNs = 100000000;
+                    const auto start = std::chrono::steady_clock::now();
+                    VkResult result = VK_TIMEOUT;
+                    bool first = true;
+                    for (;;) {
+                        if (closing.load(std::memory_order_acquire)) {
+                            result = VK_ERROR_DEVICE_LOST;
+                            break;
+                        }
+                        uint64_t slice = kSliceNs;
+                        if (timeout != UINT64_MAX) {
+                            const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now() - start).count();
+                            const uint64_t spent = elapsed > 0 ? static_cast<uint64_t>(elapsed) : 0;
+                            if (!first && spent >= timeout) break;
+                            slice = spent >= timeout ? 0 : (std::min)(slice, timeout - spent);
+                        }
+                        first = false;
+                        result = vkWaitForFences(device, static_cast<uint32_t>(fences.size()),
+                                                 fences.data(), wait_all, slice);
+                        if (result != VK_TIMEOUT) break;
+                    }
+                    remoting::Writer writer;
+                    writer.u32(static_cast<uint32_t>(remoting::Status::Ok));
+                    writer.i32(result);
+                    std::lock_guard<std::mutex> lock(reply_mutex);
+                    remoting::send_message(fd,
+                        static_cast<uint32_t>(remoting::Opcode::vkWaitForFences),
+                        writer.data(), request_id);
+                } catch (const std::exception& error) {
+                    fprintf(stderr, "server: asynchronous fence wait exception: %s\n", error.what());
+                    closing.store(true, std::memory_order_release);
+                    interrupt_socket(fd);
+                } catch (...) {
+                    fprintf(stderr, "server: asynchronous fence wait exception: unknown error\n");
+                    closing.store(true, std::memory_order_release);
+                }
+            });
+            if (!submitted) {
+                remoting::Writer writer;
+                writer.u32(static_cast<uint32_t>(remoting::Status::DecodeError));
+                std::lock_guard<std::mutex> lock(reply_mutex);
+                remoting::send_message(fd, static_cast<uint32_t>(opcode), writer.data(),
+                                       header.request_id);
+            }
+            continue;
+        }
+
+        if (opcode == remoting::Opcode::vkWaitSemaphores) {
+            if (header.request_id == 0) {
+                remoting::Reader reader(payload.data(), payload.size());
+                remoting::Writer writer;
+                remoting::Session session{fd, *this, reader, writer, tables, oneway_errors, opcode,
+                                          header.request_id, &reply_mutex, &closing};
+                session.reply_status(remoting::Status::DecodeError);
+                continue;
+            }
+            // Resolve every table ID on the control lane. The worker owns only
+            // native handles and values, so object-table containers are never
+            // read concurrently with ordinary create/destroy handlers.
+            remoting::Reader reader(payload.data(), payload.size());
+            VkDevice device = tables.devices.get(reader.handle());
+            const VkSemaphoreWaitFlags flags = reader.u32();
+            const uint32_t count = reader.u32();
+            bool valid = device != VK_NULL_HANDLE && count <= remoting::kMaxArrayElements &&
+                         remoting::count_fits(reader, count, 16);
+            std::vector<VkSemaphore> semaphores(valid ? count : 0);
+            std::vector<uint64_t> values(valid ? count : 0);
+            for (uint32_t i = 0; valid && i < count; ++i) {
+                semaphores[i] = tables.semaphore(reader.handle());
+                values[i] = reader.u64();
+                valid = semaphores[i] != VK_NULL_HANDLE;
+            }
+            const uint64_t timeout = valid ? reader.u64() : 0;
+            valid = valid && reader.ok() && reader.remaining() == 0;
+            auto fn = valid ? reinterpret_cast<PFN_vkWaitSemaphores>(
+                                  vkGetDeviceProcAddr(device, "vkWaitSemaphores"))
+                            : nullptr;
+            if (!valid || !fn) {
+                remoting::Writer writer;
+                remoting::Session session{fd, *this, reader, writer, tables, oneway_errors, opcode,
+                                          header.request_id, &reply_mutex, &closing};
+                session.reply_status(valid ? remoting::Status::UnsupportedCommand
+                                           : remoting::Status::DecodeError);
+                continue;
+            }
+
+            const bool submitted = workers.submit(header.request_id, [
+                fd, request_id = header.request_id, flags, timeout, device, fn,
+                semaphores = std::move(semaphores), values = std::move(values),
+                &reply_mutex, &closing
+            ]() mutable {
+                try {
+                VkSemaphoreWaitInfo info{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
+                info.flags = flags;
+                info.semaphoreCount = static_cast<uint32_t>(semaphores.size());
+                info.pSemaphores = semaphores.data();
+                info.pValues = values.data();
+                constexpr uint64_t kSliceNs = 100000000;
+                const auto start = std::chrono::steady_clock::now();
+                VkResult result = VK_TIMEOUT;
+                bool first = true;
+                for (;;) {
+                    if (closing.load(std::memory_order_acquire)) {
+                        result = VK_ERROR_DEVICE_LOST;
+                        break;
+                    }
+                    uint64_t slice = kSliceNs;
+                    if (timeout != UINT64_MAX) {
+                        const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - start).count();
+                        const uint64_t spent = elapsed > 0 ? static_cast<uint64_t>(elapsed) : 0;
+                        if (!first && spent >= timeout) break;
+                        slice = spent >= timeout ? 0 : (std::min)(slice, timeout - spent);
+                    }
+                    first = false;
+                    result = fn(device, &info, slice);
+                    if (result != VK_TIMEOUT) break;
+                }
+                remoting::Writer writer;
+                writer.u32(static_cast<uint32_t>(remoting::Status::Ok));
+                writer.i32(result);
+                {
+                    std::lock_guard<std::mutex> lock(reply_mutex);
+                    remoting::send_message(
+                        fd, static_cast<uint32_t>(remoting::Opcode::vkWaitSemaphores),
+                        writer.data(), request_id);
+                }
+                } catch (const std::exception& error) {
+                    fprintf(stderr, "server: asynchronous wait exception: %s\n", error.what());
+                    closing.store(true, std::memory_order_release);
+                    interrupt_socket(fd);
+                } catch (...) {
+                    fprintf(stderr, "server: asynchronous wait exception: unknown error\n");
+                    closing.store(true, std::memory_order_release);
+                }
+            });
+            if (!submitted) {
+                remoting::Writer writer;
+                writer.u32(static_cast<uint32_t>(remoting::Status::DecodeError));
+                std::lock_guard<std::mutex> lock(reply_mutex);
+                remoting::send_message(fd, static_cast<uint32_t>(opcode), writer.data(),
+                                       header.request_id);
+            }
+            continue;
+        }
+
+        remoting::Reader reader(payload.data(), payload.size());
+        remoting::Writer writer;
+        remoting::Session session{fd, *this, reader, writer, tables, oneway_errors, opcode,
+                                  header.request_id, &reply_mutex, &closing};
         watchdog.enter(opcode);
         handler(session);
         watchdog.leave();
-        // Only the Handshake handler ever sets this, on a command-set digest
-        // mismatch; the original code returned from Server::serve() right
-        // there, skipping the "client disconnected" log and the error-counter
-        // cleanup below, so this preserves that exactly.
+        if (opcode == remoting::Opcode::Handshake && !session.close_connection)
+            handshake_complete = true;
         if (session.close_connection) {
-            destroy_session_objects(tables, *this);
-            g_current_error_counter = nullptr;
-            return;
+            close_connection = true;
+            break;
         }
     }
 
+    closing.store(true, std::memory_order_release);
+    workers.stop();
     destroy_session_objects(tables, *this);
     g_current_error_counter = nullptr;
+    if (close_connection) return;
     fprintf(stderr, "server: client disconnected\n");
 }

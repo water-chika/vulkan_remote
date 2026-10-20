@@ -1,6 +1,8 @@
 #pragma once
 
+#if !defined(_WIN32)
 #define VK_USE_PLATFORM_WAYLAND_KHR
+#endif
 
 // Per-connection session state and the opcode -> handler dispatch table.
 //
@@ -142,13 +144,27 @@ struct Session {
     ObjectTables& tables;
     uint32_t& oneway_errors;
     Opcode opcode;
+    uint64_t request_id = 0;
+    std::mutex* reply_mutex = nullptr;
+    std::atomic<bool>* closing = nullptr;
+    bool replied = false;
     // Set by the Handshake handler on a digest mismatch: the original code
     // returned from Server::serve() immediately in that case, skipping the
     // "client disconnected" log and the error-counter cleanup at the bottom
     // of the loop, so serve() checks this and does the same.
     bool close_connection = false;
 
-    void reply() { send_message(fd, static_cast<uint32_t>(opcode), writer.data()); }
+    void reply() {
+        if (replied) return;
+        replied = true;
+        if (request_id == 0) return;
+        if (reply_mutex) {
+            std::lock_guard<std::mutex> lock(*reply_mutex);
+            send_message(fd, static_cast<uint32_t>(opcode), writer.data(), request_id);
+        } else {
+            send_message(fd, static_cast<uint32_t>(opcode), writer.data(), request_id);
+        }
+    }
     void reply_status(Status status) {
         writer.u32(static_cast<uint32_t>(status));
         reply();

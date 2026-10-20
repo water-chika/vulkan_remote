@@ -51,6 +51,43 @@ void report_oneway_errors(uint32_t count) {
             count);
 }
 
+struct DescriptorSlotCursor {
+    const std::vector<DescriptorBindingMetadata>* bindings = nullptr;
+    size_t binding_index = 0;
+    uint32_t element = 0;
+
+    bool current(uint64_t* key) const {
+        if (!bindings || binding_index >= bindings->size() ||
+            element >= (*bindings)[binding_index].descriptor_count) return false;
+        *key = descriptor_slot_key((*bindings)[binding_index].binding, element);
+        return true;
+    }
+
+    bool advance() {
+        if (!bindings || binding_index >= bindings->size()) return false;
+        if (++element < (*bindings)[binding_index].descriptor_count) return true;
+        element = 0;
+        do { ++binding_index; }
+        while (binding_index < bindings->size() &&
+               (*bindings)[binding_index].descriptor_count == 0);
+        return binding_index < bindings->size();
+    }
+};
+
+DescriptorSlotCursor descriptor_cursor(
+    const std::vector<DescriptorBindingMetadata>* bindings,
+    uint32_t binding, uint32_t element) {
+    DescriptorSlotCursor cursor{bindings, 0, element};
+    if (!bindings) return cursor;
+    while (cursor.binding_index < bindings->size() &&
+           (*bindings)[cursor.binding_index].binding < binding)
+        ++cursor.binding_index;
+    if (cursor.binding_index == bindings->size() ||
+        (*bindings)[cursor.binding_index].binding != binding)
+        cursor.bindings = nullptr;
+    return cursor;
+}
+
 void propagate_queue_writes_locked(RemoteDevice* device, uint64_t queue_id,
                                    uint64_t after_serial,
                                    const std::unordered_set<uint64_t>& writes) {
@@ -260,6 +297,7 @@ VKAPI_ATTR VkResult VKAPI_CALL QueueSubmit(VkQueue handle, uint32_t submitCount,
 
     RemoteQueue* queue = to_queue(handle);
     RemoteDevice* device = queue->device;
+    std::lock_guard<std::mutex> queue_lock(queue->mutex);
 
     Writer request;
     request.handle(queue->remote_id);
@@ -387,6 +425,7 @@ VKAPI_ATTR VkResult VKAPI_CALL QueueSubmit(VkQueue handle, uint32_t submitCount,
             planned_signals.push_back(std::move(signal));
         }
     }
+    metadata_lock.unlock();
     std::vector<char> reply;
     if (!device->instance->connection.round_trip(Opcode::vkQueueSubmit, request, &reply))
         return VK_ERROR_DEVICE_LOST;
@@ -396,6 +435,7 @@ VKAPI_ATTR VkResult VKAPI_CALL QueueSubmit(VkQueue handle, uint32_t submitCount,
     if (!r.ok() || r.remaining() != 0) return VK_ERROR_DEVICE_LOST;
     report_oneway_errors(oneway_errors);
     if (result != VK_SUCCESS) return result;
+    metadata_lock.lock();
     device->queue_writes[queue->remote_id] = next_queue_writes;
     for (const PlannedWait& planned : planned_waits)
         device->semaphores[planned.semaphore_id].pending_waits.push_back(planned.wait);
@@ -455,6 +495,7 @@ VKAPI_ATTR VkResult VKAPI_CALL QueueBindSparse(VkQueue handle, uint32_t bindInfo
                                                const VkBindSparseInfo* pBindInfo,
                                                VkFence fence) {
     RemoteQueue* queue = to_queue(handle); RemoteDevice* device = queue->device;
+    std::lock_guard<std::mutex> queue_lock(queue->mutex);
     if (bindInfoCount > kMaxArrayElements || (bindInfoCount && !pBindInfo))
         return VK_ERROR_INITIALIZATION_FAILED;
     Writer w; w.handle(queue->remote_id); w.handle(id_from_handle(fence)); w.u32(bindInfoCount);
@@ -469,11 +510,103 @@ VKAPI_ATTR VkResult VKAPI_CALL QueueBindSparse(VkQueue handle, uint32_t bindInfo
     }
     if (!device->publish_coherent_mapped()) return VK_ERROR_DEVICE_LOST;
     std::vector<char> reply; if(!device->instance->connection.round_trip(Opcode::vkQueueBindSparse,w,&reply))return VK_ERROR_DEVICE_LOST;
-    Reader r=payload_reader(reply);VkResult result=static_cast<VkResult>(r.i32());uint32_t errors=r.u32();report_oneway_errors(errors);if(!r.ok())return VK_ERROR_DEVICE_LOST;if(result!=VK_SUCCESS)return result;std::lock_guard<std::mutex>lock(device->metadata_mutex);uint64_t serial=device->next_submission_serial++;auto&writes=device->queue_writes[queue->remote_id];for(uint32_t i=0;i<bindInfoCount;++i){const auto&x=pBindInfo[i];const VkTimelineSemaphoreSubmitInfo*timeline=nullptr;for(const auto*node=static_cast<const VkBaseInStructure*>(x.pNext);node;node=node->pNext)if(node->sType==VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO)timeline=reinterpret_cast<const VkTimelineSemaphoreSubmitInfo*>(node);for(uint32_t j=0;j<x.waitSemaphoreCount;++j){uint64_t id=id_from_handle(x.pWaitSemaphores[j]);auto semaphore=device->semaphores.find(id);if(semaphore==device->semaphores.end())continue;if(semaphore->second.timeline&&timeline&&j<timeline->waitSemaphoreValueCount){for(const auto&signal:semaphore->second.timeline_writes)if(signal.value>=timeline->pWaitSemaphoreValues[j]){writes.insert(signal.memory_ids.begin(),signal.memory_ids.end());break;}}else if(!semaphore->second.timeline&&semaphore->second.binary_signaled){writes.insert(semaphore->second.binary_writes.begin(),semaphore->second.binary_writes.end());semaphore->second.binary_signaled=false;semaphore->second.binary_writes.clear();}}for(uint32_t j=0;j<x.signalSemaphoreCount;++j){uint64_t id=id_from_handle(x.pSignalSemaphores[j]);auto&semaphore=device->semaphores[id];if(semaphore.timeline&&timeline&&j<timeline->signalSemaphoreValueCount)semaphore.timeline_writes.push_back({timeline->pSignalSemaphoreValues[j],queue->remote_id,serial,writes});else if(!semaphore.timeline){semaphore.binary_signaled=true;semaphore.binary_queue_id=queue->remote_id;semaphore.binary_submission_serial=serial;semaphore.binary_writes=writes;}}}if(fence!=VK_NULL_HANDLE)device->fence_writes[id_from_handle(fence)]={queue->remote_id,serial,writes};return result;
+    Reader r = payload_reader(reply);
+    VkResult result = static_cast<VkResult>(r.i32());
+    uint32_t errors = r.u32();
+    report_oneway_errors(errors);
+    if (!r.ok()) return VK_ERROR_DEVICE_LOST;
+    if (result != VK_SUCCESS) return result;
+
+    std::lock_guard<std::mutex> lock(device->metadata_mutex);
+    const uint64_t serial = device->next_submission_serial++;
+    auto& writes = device->queue_writes[queue->remote_id];
+    for (uint32_t i = 0; i < bindInfoCount; ++i) {
+        const auto& info = pBindInfo[i];
+        const VkTimelineSemaphoreSubmitInfo* timeline = nullptr;
+        for (const auto* node = static_cast<const VkBaseInStructure*>(info.pNext);
+             node; node = node->pNext) {
+            if (node->sType == VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO)
+                timeline = reinterpret_cast<const VkTimelineSemaphoreSubmitInfo*>(node);
+        }
+        for (uint32_t j = 0; j < info.waitSemaphoreCount; ++j) {
+            const uint64_t id = id_from_handle(info.pWaitSemaphores[j]);
+            auto semaphore = device->semaphores.find(id);
+            if (semaphore == device->semaphores.end()) continue;
+            bool resolved = false;
+            if (semaphore->second.timeline && timeline &&
+                j < timeline->waitSemaphoreValueCount) {
+                for (const auto& signal : semaphore->second.timeline_writes) {
+                    if (signal.value < timeline->pWaitSemaphoreValues[j]) continue;
+                    writes.insert(signal.memory_ids.begin(), signal.memory_ids.end());
+                    resolved = true;
+                    break;
+                }
+            } else if (!semaphore->second.timeline && semaphore->second.binary_signaled) {
+                writes.insert(semaphore->second.binary_writes.begin(),
+                              semaphore->second.binary_writes.end());
+                semaphore->second.binary_signaled = false;
+                semaphore->second.binary_writes.clear();
+                resolved = true;
+            }
+            if (!resolved) {
+                const uint64_t value = semaphore->second.timeline && timeline &&
+                                       j < timeline->waitSemaphoreValueCount
+                    ? timeline->pWaitSemaphoreValues[j] : 0;
+                PendingSemaphoreWait wait{value, queue->remote_id, serial};
+                for (uint32_t k = 0; k < info.signalSemaphoreCount; ++k)
+                    wait.downstream_semaphores.push_back(
+                        id_from_handle(info.pSignalSemaphores[k]));
+                semaphore->second.pending_waits.push_back(std::move(wait));
+            }
+        }
+        for (uint32_t j = 0; j < info.signalSemaphoreCount; ++j) {
+            const uint64_t id = id_from_handle(info.pSignalSemaphores[j]);
+            auto& semaphore = device->semaphores[id];
+            uint64_t signal_value = 0;
+            if (semaphore.timeline && timeline && j < timeline->signalSemaphoreValueCount) {
+                signal_value = timeline->pSignalSemaphoreValues[j];
+                semaphore.timeline_writes.push_back(
+                    {signal_value, queue->remote_id, serial, writes});
+            } else if (!semaphore.timeline) {
+                semaphore.binary_signaled = true;
+                semaphore.binary_queue_id = queue->remote_id;
+                semaphore.binary_submission_serial = serial;
+                semaphore.binary_writes = writes;
+            }
+            for (const PendingSemaphoreWait& wait : semaphore.pending_waits) {
+                if (semaphore.timeline && signal_value < wait.value) continue;
+                propagate_queue_writes_locked(device, wait.queue_id,
+                                              wait.submission_serial, writes);
+                for (uint64_t downstream_id : wait.downstream_semaphores) {
+                    auto& downstream = device->semaphores[downstream_id];
+                    if (downstream.timeline) {
+                        for (auto& record : downstream.timeline_writes)
+                            if (record.queue_id == wait.queue_id &&
+                                record.submission_serial >= wait.submission_serial)
+                                record.memory_ids.insert(writes.begin(), writes.end());
+                    } else if (downstream.binary_signaled &&
+                               downstream.binary_queue_id == wait.queue_id &&
+                               downstream.binary_submission_serial >= wait.submission_serial) {
+                        downstream.binary_writes.insert(writes.begin(), writes.end());
+                    }
+                }
+            }
+            semaphore.pending_waits.erase(
+                std::remove_if(semaphore.pending_waits.begin(), semaphore.pending_waits.end(),
+                    [&semaphore, signal_value](const PendingSemaphoreWait& wait) {
+                        return !semaphore.timeline || signal_value >= wait.value;
+                    }), semaphore.pending_waits.end());
+        }
+    }
+    if (fence != VK_NULL_HANDLE)
+        device->fence_writes[id_from_handle(fence)] =
+            {queue->remote_id, serial, writes};
+    return result;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL QueueWaitIdle(VkQueue handle) {
     RemoteQueue* queue = to_queue(handle);
+    std::lock_guard<std::mutex> queue_lock(queue->mutex);
     Writer request;
     request.handle(queue->remote_id);
     std::vector<char> reply;
@@ -715,7 +848,7 @@ VKAPI_ATTR void VKAPI_CALL DestroySemaphore(VkDevice handle, VkSemaphore semapho
 
 VKAPI_ATTR VkResult VKAPI_CALL GetSemaphoreCounterValue(VkDevice handle,VkSemaphore semaphore,uint64_t*value){if(!value)return VK_ERROR_INITIALIZATION_FAILED;auto*d=to_device(handle);uint64_t id=id_from_handle(semaphore);Writer w;w.handle(d->remote_id);w.handle(id);std::vector<char>reply;if(!d->instance->connection.round_trip(Opcode::vkGetSemaphoreCounterValue,w,&reply))return VK_ERROR_DEVICE_LOST;Reader r=payload_reader(reply);VkResult result=static_cast<VkResult>(r.i32());uint64_t v=r.u64();if(!r.ok())return VK_ERROR_DEVICE_LOST;if(result==VK_SUCCESS){*value=v;if(!acquire_timeline_writes(d,id,v))return VK_ERROR_DEVICE_LOST;}return result;}
 VKAPI_ATTR VkResult VKAPI_CALL WaitSemaphores(VkDevice handle,const VkSemaphoreWaitInfo*info,uint64_t timeout){if(!info||info->pNext||info->semaphoreCount>kMaxArrayElements||(info->semaphoreCount&&(!info->pSemaphores||!info->pValues)))return VK_ERROR_INITIALIZATION_FAILED;auto*d=to_device(handle);Writer w;w.handle(d->remote_id);w.u32(info->flags);w.u32(info->semaphoreCount);for(uint32_t i=0;i<info->semaphoreCount;++i){w.handle(id_from_handle(info->pSemaphores[i]));w.u64(info->pValues[i]);}w.u64(timeout);std::vector<char>reply;if(!d->instance->connection.round_trip(Opcode::vkWaitSemaphores,w,&reply))return VK_ERROR_DEVICE_LOST;Reader r=payload_reader(reply);auto result=static_cast<VkResult>(r.i32());if(!r.ok())return VK_ERROR_DEVICE_LOST;if(result==VK_SUCCESS){for(uint32_t i=0;i<info->semaphoreCount;++i){uint64_t id=id_from_handle(info->pSemaphores[i]);uint64_t reached=info->pValues[i];if(info->flags&VK_SEMAPHORE_WAIT_ANY_BIT){VkResult query=GetSemaphoreCounterValue(handle,info->pSemaphores[i],&reached);if(query!=VK_SUCCESS||reached<info->pValues[i])continue;}if(!acquire_timeline_writes(d,id,reached))return VK_ERROR_DEVICE_LOST;}}return result;}
-VKAPI_ATTR VkResult VKAPI_CALL SignalSemaphore(VkDevice handle,const VkSemaphoreSignalInfo*info){if(!info||info->pNext)return VK_ERROR_INITIALIZATION_FAILED;auto*d=to_device(handle);uint64_t id=id_from_handle(info->semaphore);Writer w;w.handle(d->remote_id);w.handle(id);w.u64(info->value);std::vector<char>reply;if(!d->instance->connection.round_trip(Opcode::vkSignalSemaphore,w,&reply))return VK_ERROR_DEVICE_LOST;Reader r=payload_reader(reply);auto result=static_cast<VkResult>(r.i32());if(!r.ok())return VK_ERROR_DEVICE_LOST;if(result==VK_SUCCESS){std::lock_guard<std::mutex>lock(d->metadata_mutex);auto semaphore=d->semaphores.find(id);if(semaphore!=d->semaphores.end()){auto&waits=semaphore->second.pending_waits;waits.erase(std::remove_if(waits.begin(),waits.end(),[info](const PendingSemaphoreWait&wait){return wait.value<=info->value;}),waits.end());}}return result;}
+VKAPI_ATTR VkResult VKAPI_CALL SignalSemaphore(VkDevice handle,const VkSemaphoreSignalInfo*info){if(!info||info->pNext)return VK_ERROR_INITIALIZATION_FAILED;auto*d=to_device(handle);if(!d->publish_coherent_mapped())return VK_ERROR_DEVICE_LOST;uint64_t id=id_from_handle(info->semaphore);Writer w;w.handle(d->remote_id);w.handle(id);w.u64(info->value);std::vector<char>reply;if(!d->instance->connection.round_trip(Opcode::vkSignalSemaphore,w,&reply))return VK_ERROR_DEVICE_LOST;Reader r=payload_reader(reply);auto result=static_cast<VkResult>(r.i32());if(!r.ok())return VK_ERROR_DEVICE_LOST;if(result==VK_SUCCESS){std::lock_guard<std::mutex>lock(d->metadata_mutex);auto semaphore=d->semaphores.find(id);if(semaphore!=d->semaphores.end()){auto&waits=semaphore->second.pending_waits;waits.erase(std::remove_if(waits.begin(),waits.end(),[info](const PendingSemaphoreWait&wait){return wait.value<=info->value;}),waits.end());}}return result;}
 VKAPI_ATTR void VKAPI_CALL ResetQueryPool(VkDevice handle,VkQueryPool pool,uint32_t first,uint32_t count){auto*d=to_device(handle);Writer w;w.handle(d->remote_id);w.handle(id_from_handle(pool));w.u32(first);w.u32(count);d->instance->connection.send_oneway(Opcode::vkResetQueryPool,w);}
 VKAPI_ATTR VkDeviceAddress VKAPI_CALL GetBufferDeviceAddress(VkDevice,VkBufferDeviceAddressInfo const*){return 0;}
 VKAPI_ATTR uint64_t VKAPI_CALL GetBufferOpaqueCaptureAddress(VkDevice,VkBufferDeviceAddressInfo const*){return 0;}
@@ -826,11 +959,39 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateRenderPass2(VkDevice handle,
 }
 SIMPLE_DESTROY(DestroyRenderPass, VkRenderPass, vkDestroyRenderPass)
 
-SIMPLE_DESTROY(DestroyDescriptorSetLayout, VkDescriptorSetLayout, vkDestroyDescriptorSetLayout)
+VKAPI_ATTR void VKAPI_CALL DestroyDescriptorSetLayout(VkDevice handle,
+    VkDescriptorSetLayout layout, const VkAllocationCallbacks*) {
+    if (layout == VK_NULL_HANDLE) return;
+    RemoteDevice* device = to_device(handle);
+    const uint64_t id = id_from_handle(layout);
+    {
+        std::lock_guard<std::mutex> lock(device->metadata_mutex);
+        device->descriptor_layouts.erase(id);
+    }
+    Writer request; request.handle(device->remote_id); request.handle(id);
+    device->instance->connection.send_oneway(Opcode::vkDestroyDescriptorSetLayout, request);
+}
 
 SIMPLE_CREATE(CreateDescriptorPool, VkDescriptorPool, VkDescriptorPoolCreateInfo,
               write_DescriptorPoolCreateInfo, vkCreateDescriptorPool)
-SIMPLE_DESTROY(DestroyDescriptorPool, VkDescriptorPool, vkDestroyDescriptorPool)
+VKAPI_ATTR void VKAPI_CALL DestroyDescriptorPool(VkDevice handle, VkDescriptorPool pool,
+                                                  const VkAllocationCallbacks*) {
+    if (pool == VK_NULL_HANDLE) return;
+    RemoteDevice* device = to_device(handle);
+    const uint64_t pool_id = id_from_handle(pool);
+    {
+        std::lock_guard<std::mutex> lock(device->metadata_mutex);
+        for (auto it = device->descriptor_set_pools.begin();
+             it != device->descriptor_set_pools.end();) {
+            if (it->second != pool_id) { ++it; continue; }
+            device->descriptor_set_layouts.erase(it->first);
+            device->descriptor_resources.erase(it->first);
+            it = device->descriptor_set_pools.erase(it);
+        }
+    }
+    Writer request; request.handle(device->remote_id); request.handle(pool_id);
+    device->instance->connection.send_oneway(Opcode::vkDestroyDescriptorPool, request);
+}
 
 SIMPLE_CREATE(CreateCommandPool, VkCommandPool, VkCommandPoolCreateInfo,
               write_CommandPoolCreateInfo, vkCreateCommandPool)
@@ -1055,7 +1216,17 @@ VKAPI_ATTR VkResult VKAPI_CALL FreeDescriptorSets(VkDevice handle, VkDescriptorP
     if (!device->instance->connection.round_trip(Opcode::vkFreeDescriptorSets, request, &reply))
         return VK_ERROR_DEVICE_LOST;
     Reader r = payload_reader(reply); const VkResult result = static_cast<VkResult>(r.i32());
-    return r.ok() && r.remaining() == 0 ? result : VK_ERROR_DEVICE_LOST;
+    if (!r.ok() || r.remaining() != 0) return VK_ERROR_DEVICE_LOST;
+    if (result == VK_SUCCESS) {
+        std::lock_guard<std::mutex> lock(device->metadata_mutex);
+        for (uint32_t i = 0; i < count; ++i) {
+            const uint64_t id = id_from_handle(pSets[i]);
+            device->descriptor_set_layouts.erase(id);
+            device->descriptor_set_pools.erase(id);
+            device->descriptor_resources.erase(id);
+        }
+    }
+    return result;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL ResetDescriptorPool(VkDevice handle, VkDescriptorPool pool,
@@ -1067,7 +1238,19 @@ VKAPI_ATTR VkResult VKAPI_CALL ResetDescriptorPool(VkDevice handle, VkDescriptor
     if (!device->instance->connection.round_trip(Opcode::vkResetDescriptorPool, request, &reply))
         return VK_ERROR_DEVICE_LOST;
     Reader r = payload_reader(reply); const VkResult result = static_cast<VkResult>(r.i32());
-    return r.ok() && r.remaining() == 0 ? result : VK_ERROR_DEVICE_LOST;
+    if (!r.ok() || r.remaining() != 0) return VK_ERROR_DEVICE_LOST;
+    if (result == VK_SUCCESS) {
+        const uint64_t pool_id = id_from_handle(pool);
+        std::lock_guard<std::mutex> lock(device->metadata_mutex);
+        for (auto it = device->descriptor_set_pools.begin();
+             it != device->descriptor_set_pools.end();) {
+            if (it->second != pool_id) { ++it; continue; }
+            device->descriptor_set_layouts.erase(it->first);
+            device->descriptor_resources.erase(it->first);
+            it = device->descriptor_set_pools.erase(it);
+        }
+    }
+    return result;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL CreateGraphicsPipelines(
@@ -1157,8 +1340,15 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateDescriptorSetLayout(
     if (result == VK_SUCCESS) {
         *pLayout = handle_from_id<VkDescriptorSetLayout>(id);
         std::lock_guard<std::mutex> lock(device->metadata_mutex);
-        device->descriptor_layouts[id] = std::vector<VkDescriptorSetLayoutBinding>(
-            pCreateInfo->pBindings, pCreateInfo->pBindings + pCreateInfo->bindingCount);
+        auto& bindings = device->descriptor_layouts[id];
+        bindings.reserve(pCreateInfo->bindingCount);
+        for (uint32_t i = 0; i < pCreateInfo->bindingCount; ++i) {
+            bindings.push_back(
+                {pCreateInfo->pBindings[i].binding,
+                 pCreateInfo->pBindings[i].descriptorCount});
+        }
+        std::sort(bindings.begin(), bindings.end(),
+                  [](const auto& a, const auto& b) { return a.binding < b.binding; });
     }
     return result;
 }
@@ -1191,16 +1381,27 @@ VKAPI_ATTR VkResult VKAPI_CALL AllocateDescriptorSets(VkDevice handle,
         count > r.remaining() / sizeof(uint64_t)) {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
+    std::vector<std::pair<uint64_t, uint64_t>> allocated;
     for (uint32_t i = 0; i < count; ++i) {
         const uint64_t id = r.handle();
         pSets[i] = id ? handle_from_id<VkDescriptorSet>(id) : VK_NULL_HANDLE;
+        if (id) allocated.emplace_back(id, id_from_handle(pInfo->pSetLayouts[i]));
+    }
+    if (r.ok() && r.remaining() == 0 && result == VK_SUCCESS) {
+        std::lock_guard<std::mutex> lock(device->metadata_mutex);
+        for (const auto& item : allocated) {
+            const auto layout = device->descriptor_layouts.find(item.second);
+            if (layout != device->descriptor_layouts.end())
+                device->descriptor_set_layouts[item.first] = layout->second;
+            device->descriptor_set_pools[item.first] = id_from_handle(pInfo->descriptorPool);
+        }
     }
     return r.ok() && r.remaining() == 0 ? result : VK_ERROR_INITIALIZATION_FAILED;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL CreateDescriptorUpdateTemplate(VkDevice handle,const VkDescriptorUpdateTemplateCreateInfo* info,const VkAllocationCallbacks*,VkDescriptorUpdateTemplate* out){if(!info||!out)return VK_ERROR_INITIALIZATION_FAILED;RemoteDevice*d=to_device(handle);Writer w;w.handle(d->remote_id);if(!write_DescriptorUpdateTemplateCreateInfo(w,*info))return VK_ERROR_INITIALIZATION_FAILED;std::vector<char>reply;if(!d->instance->connection.round_trip(Opcode::vkCreateDescriptorUpdateTemplate,w,&reply))return VK_ERROR_INITIALIZATION_FAILED;Reader r=payload_reader(reply);VkResult result=static_cast<VkResult>(r.i32());uint64_t id=r.handle();if(result==VK_SUCCESS&&r.ok()){*out=handle_from_id<VkDescriptorUpdateTemplate>(id);std::lock_guard<std::mutex>lock(d->metadata_mutex);d->descriptor_templates[id]={info->templateType,std::vector<VkDescriptorUpdateTemplateEntry>(info->pDescriptorUpdateEntries,info->pDescriptorUpdateEntries+info->descriptorUpdateEntryCount)};}return result;}
 VKAPI_ATTR void VKAPI_CALL DestroyDescriptorUpdateTemplate(VkDevice handle,VkDescriptorUpdateTemplate object,const VkAllocationCallbacks*){if(!object)return;RemoteDevice*d=to_device(handle);uint64_t id=id_from_handle(object);{std::lock_guard<std::mutex>lock(d->metadata_mutex);d->descriptor_templates.erase(id);}Writer w;w.handle(d->remote_id);w.handle(id);d->instance->connection.send_oneway(Opcode::vkDestroyDescriptorUpdateTemplate,w);}
-VKAPI_ATTR void VKAPI_CALL UpdateDescriptorSetWithTemplate(VkDevice handle,VkDescriptorSet set,VkDescriptorUpdateTemplate object,const void* data){RemoteDevice*d=to_device(handle);if(!data)return;DescriptorTemplateMetadata metadata;{std::lock_guard<std::mutex>lock(d->metadata_mutex);auto it=d->descriptor_templates.find(id_from_handle(object));if(it==d->descriptor_templates.end())return;metadata=it->second;}Writer w;w.handle(d->remote_id);uint64_t set_id=id_from_handle(set);std::unordered_map<uint64_t,DescriptorResource> updates;w.handle(set_id);w.handle(id_from_handle(object));w.u32(static_cast<uint32_t>(metadata.entries.size()));for(const auto&e:metadata.entries){w.u32(e.descriptorCount);w.i32(e.descriptorType);for(uint32_t i=0;i<e.descriptorCount;++i){const char*p=static_cast<const char*>(data)+e.offset+i*e.stride;DescriptorResource resource;resource.type=e.descriptorType;switch(e.descriptorType){case VK_DESCRIPTOR_TYPE_SAMPLER:case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:{auto*x=reinterpret_cast<const VkDescriptorImageInfo*>(p);w.handle(id_from_handle(x->sampler));w.handle(id_from_handle(x->imageView));w.i32(x->imageLayout);if(e.descriptorType==VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)resource.resource_id=id_from_handle(x->imageView);break;}case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:{auto view=*reinterpret_cast<const VkBufferView*>(p);w.handle(id_from_handle(view));if(e.descriptorType==VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)resource.resource_id=id_from_handle(view);break;}default:{auto*x=reinterpret_cast<const VkDescriptorBufferInfo*>(p);w.handle(id_from_handle(x->buffer));w.u64(x->offset);w.u64(x->range);if(e.descriptorType==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER||e.descriptorType==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)resource.resource_id=id_from_handle(x->buffer);break;}}updates[descriptor_slot_key(e.dstBinding,e.dstArrayElement+i)]=resource;}}{std::lock_guard<std::mutex>lock(d->metadata_mutex);auto&resources=d->descriptor_resources[set_id];for(const auto&update:updates){if(update.second.resource_id)resources[update.first]=update.second;else resources.erase(update.first);}}d->instance->connection.send_oneway(Opcode::vkUpdateDescriptorSetWithTemplate,w);}
+VKAPI_ATTR void VKAPI_CALL UpdateDescriptorSetWithTemplate(VkDevice handle,VkDescriptorSet set,VkDescriptorUpdateTemplate object,const void* data){RemoteDevice*d=to_device(handle);if(!data)return;DescriptorTemplateMetadata metadata;std::vector<DescriptorBindingMetadata> layout;uint64_t set_id=id_from_handle(set);{std::lock_guard<std::mutex>lock(d->metadata_mutex);auto it=d->descriptor_templates.find(id_from_handle(object));if(it==d->descriptor_templates.end())return;metadata=it->second;auto set_layout=d->descriptor_set_layouts.find(set_id);if(set_layout!=d->descriptor_set_layouts.end())layout=set_layout->second;}Writer w;w.handle(d->remote_id);std::unordered_map<uint64_t,DescriptorResource> updates;w.handle(set_id);w.handle(id_from_handle(object));w.u32(static_cast<uint32_t>(metadata.entries.size()));for(const auto&e:metadata.entries){DescriptorSlotCursor cursor=descriptor_cursor(layout.empty()?nullptr:&layout,e.dstBinding,e.dstArrayElement);w.u32(e.descriptorCount);w.i32(e.descriptorType);for(uint32_t i=0;i<e.descriptorCount;++i){const char*p=static_cast<const char*>(data)+e.offset+i*e.stride;DescriptorResource resource;resource.type=e.descriptorType;switch(e.descriptorType){case VK_DESCRIPTOR_TYPE_SAMPLER:case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:{auto*x=reinterpret_cast<const VkDescriptorImageInfo*>(p);w.handle(id_from_handle(x->sampler));w.handle(id_from_handle(x->imageView));w.i32(x->imageLayout);if(e.descriptorType==VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)resource.resource_id=id_from_handle(x->imageView);break;}case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:{auto view=*reinterpret_cast<const VkBufferView*>(p);w.handle(id_from_handle(view));if(e.descriptorType==VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)resource.resource_id=id_from_handle(view);break;}default:{auto*x=reinterpret_cast<const VkDescriptorBufferInfo*>(p);w.handle(id_from_handle(x->buffer));w.u64(x->offset);w.u64(x->range);if(e.descriptorType==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER||e.descriptorType==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)resource.resource_id=id_from_handle(x->buffer);break;}}uint64_t key=descriptor_slot_key(e.dstBinding,e.dstArrayElement+i);cursor.current(&key);updates[key]=resource;cursor.advance();}}{std::lock_guard<std::mutex>lock(d->metadata_mutex);auto&resources=d->descriptor_resources[set_id];for(const auto&update:updates){if(update.second.resource_id)resources[update.first]=update.second;else resources.erase(update.first);}}d->instance->connection.send_oneway(Opcode::vkUpdateDescriptorSetWithTemplate,w);}
 VKAPI_ATTR void VKAPI_CALL GetDescriptorSetLayoutSupport(VkDevice handle,const VkDescriptorSetLayoutCreateInfo* info,VkDescriptorSetLayoutSupport* out){if(!info||!out)return;RemoteDevice*d=to_device(handle);Writer w;w.handle(d->remote_id);write_DescriptorSetLayoutCreateInfo(w,*info);std::vector<char>reply;if(!d->instance->connection.round_trip(Opcode::vkGetDescriptorSetLayoutSupport,w,&reply)){out->supported=VK_FALSE;return;}Reader r=payload_reader(reply);out->supported=r.u32();if(!r.ok())out->supported=VK_FALSE;}
 VKAPI_ATTR VkResult VKAPI_CALL CreateSamplerYcbcrConversion(VkDevice handle,const VkSamplerYcbcrConversionCreateInfo* info,const VkAllocationCallbacks*,VkSamplerYcbcrConversion*out){if(!info||!out||info->pNext)return VK_ERROR_INITIALIZATION_FAILED;RemoteDevice*d=to_device(handle);Writer w;w.handle(d->remote_id);write_SamplerYcbcrConversionCreateInfo(w,*info);std::vector<char>reply;if(!d->instance->connection.round_trip(Opcode::vkCreateSamplerYcbcrConversion,w,&reply))return VK_ERROR_INITIALIZATION_FAILED;Reader r=payload_reader(reply);auto result=static_cast<VkResult>(r.i32());uint64_t id=r.handle();if(result==VK_SUCCESS)*out=handle_from_id<VkSamplerYcbcrConversion>(id);return r.ok()?result:VK_ERROR_INITIALIZATION_FAILED;}
 VKAPI_ATTR void VKAPI_CALL DestroySamplerYcbcrConversion(VkDevice handle,VkSamplerYcbcrConversion object,const VkAllocationCallbacks*){if(!object)return;RemoteDevice*d=to_device(handle);Writer w;w.handle(d->remote_id);w.handle(id_from_handle(object));d->instance->connection.send_oneway(Opcode::vkDestroySamplerYcbcrConversion,w);}
@@ -1216,6 +1417,11 @@ VKAPI_ATTR void VKAPI_CALL UpdateDescriptorSets(VkDevice handle, uint32_t writeC
     }
     RemoteDevice* device = to_device(handle);
     Writer request;
+    std::unordered_map<uint64_t, std::vector<DescriptorBindingMetadata>> set_layouts;
+    {
+        std::lock_guard<std::mutex> lock(device->metadata_mutex);
+        set_layouts = device->descriptor_set_layouts;
+    }
     std::unordered_map<uint64_t,
         std::unordered_map<uint64_t, DescriptorResource>> touched_resources;
     request.handle(device->remote_id);
@@ -1223,7 +1429,12 @@ VKAPI_ATTR void VKAPI_CALL UpdateDescriptorSets(VkDevice handle, uint32_t writeC
     for (uint32_t i = 0; i < writeCount; ++i) {
         if (!write_WriteDescriptorSet(request, pWrites[i])) return;
         const VkWriteDescriptorSet& write = pWrites[i];
-        auto& resources = touched_resources[id_from_handle(write.dstSet)];
+        const uint64_t set_id = id_from_handle(write.dstSet);
+        auto& resources = touched_resources[set_id];
+        const auto layout = set_layouts.find(set_id);
+        DescriptorSlotCursor cursor = descriptor_cursor(
+            layout == set_layouts.end() ? nullptr : &layout->second,
+            write.dstBinding, write.dstArrayElement);
         for (uint32_t j = 0; j < write.descriptorCount; ++j) {
             DescriptorResource resource;
             resource.type = write.descriptorType;
@@ -1234,9 +1445,11 @@ VKAPI_ATTR void VKAPI_CALL UpdateDescriptorSets(VkDevice handle, uint32_t writeC
                 resource.resource_id = id_from_handle(write.pImageInfo[j].imageView);
             else if (write.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)
                 resource.resource_id = id_from_handle(write.pTexelBufferView[j]);
-            const uint64_t key = descriptor_slot_key(write.dstBinding,
-                                                     write.dstArrayElement + j);
+            uint64_t key = descriptor_slot_key(write.dstBinding,
+                                               write.dstArrayElement + j);
+            cursor.current(&key);
             resources[key] = resource;
+            cursor.advance();
         }
     }
     request.u32(copyCount);
@@ -1258,19 +1471,34 @@ VKAPI_ATTR void VKAPI_CALL UpdateDescriptorSets(VkDevice handle, uint32_t writeC
             }
         }
         const auto source = &source_snapshot;
+        const auto source_layout = set_layouts.find(source_id);
+        DescriptorSlotCursor source_cursor = descriptor_cursor(
+            source_layout == set_layouts.end()
+                ? nullptr : &source_layout->second,
+            copy.srcBinding, copy.srcArrayElement);
         std::vector<DescriptorResource> snapshot;
         snapshot.reserve(copy.descriptorCount);
         for (uint32_t j = 0; j < copy.descriptorCount; ++j) {
-            const auto resource = source->find(
-                descriptor_slot_key(copy.srcBinding, copy.srcArrayElement + j));
+            uint64_t key = descriptor_slot_key(copy.srcBinding, copy.srcArrayElement + j);
+            source_cursor.current(&key);
+            const auto resource = source->find(key);
             snapshot.push_back(resource == source->end() ? DescriptorResource{}
                                                                 : resource->second);
+            source_cursor.advance();
         }
-        auto& destination = touched_resources[id_from_handle(copy.dstSet)];
+        const uint64_t destination_id = id_from_handle(copy.dstSet);
+        auto& destination = touched_resources[destination_id];
+        const auto destination_layout = set_layouts.find(destination_id);
+        DescriptorSlotCursor destination_cursor = descriptor_cursor(
+            destination_layout == set_layouts.end()
+                ? nullptr : &destination_layout->second,
+            copy.dstBinding, copy.dstArrayElement);
         for (uint32_t j = 0; j < copy.descriptorCount; ++j) {
-            const uint64_t key = descriptor_slot_key(copy.dstBinding,
-                                                     copy.dstArrayElement + j);
+            uint64_t key = descriptor_slot_key(copy.dstBinding,
+                                               copy.dstArrayElement + j);
+            destination_cursor.current(&key);
             destination[key] = snapshot[j];
+            destination_cursor.advance();
         }
     }
     {

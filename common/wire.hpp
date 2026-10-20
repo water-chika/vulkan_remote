@@ -48,6 +48,7 @@ enum class Status : uint32_t {
 struct MessageHeader {
     uint32_t opcode;
     uint32_t payload_size;
+    uint64_t request_id;
 };
 
 // Serialises values little-endian. Vulkan handles are written as uint64 so the
@@ -148,7 +149,8 @@ class Reader {
 
 // Blocking whole-message send and receive. Return false on any short read or
 // peer disconnect; callers treat that as a dead connection.
-bool send_message(socket_t fd, uint32_t opcode, const std::vector<char>& payload);
+bool send_message(socket_t fd, uint32_t opcode, const std::vector<char>& payload,
+                  uint64_t request_id = 0);
 bool recv_message(socket_t fd, MessageHeader* header, std::vector<char>* payload);
 
 // Connects to host:port with TCP_NODELAY set, returning kInvalidSocket on

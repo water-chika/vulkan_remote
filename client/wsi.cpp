@@ -676,6 +676,7 @@ VKAPI_ATTR VkResult VKAPI_CALL QueuePresentKHR(VkQueue handle,
                                                const VkPresentInfoKHR* pPresentInfo) {
     RemoteQueue* queue = to_queue(handle);
     RemoteDevice* device = queue->device;
+    std::lock_guard<std::mutex> queue_lock(queue->mutex);
 
     Writer request;
     request.handle(queue->remote_id);

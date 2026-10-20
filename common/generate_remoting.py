@@ -47,12 +47,12 @@ def generate(registry_xml, output):
     # writes through a pointer, and those bytes have to be moved explicitly.
     # They are part of what the two peers must agree on, so they go into the
     # digest as well.
-    extras = ['FlushMappedMemory', 'DownloadMappedMemory', 'PollWindowEvents']
+    extras = ['FlushMappedMemory', 'DownloadMappedMemory', 'PollWindowEvents', 'Ping']
 
     # Include an explicit schema revision as well as opcode names. Handler or
     # marshalling changes can otherwise leave two wire-incompatible builds
     # presenting the same digest and accepting each other.
-    schema_revision = 'wire-v17-coherent-capabilities'
+    schema_revision = 'wire-v19-request-heartbeat'
     with open(registry_xml, 'rb') as registry_file:
         registry_sha256 = hashlib.sha256(registry_file.read()).hexdigest()
     digest = hashlib.sha256(

@@ -6,10 +6,12 @@
 #include <vulkan/vulkan.h>
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 #include <vector>
 
 #define VK_CHECK(call) do { VkResult result_ = (call); if (result_ != VK_SUCCESS) { \
@@ -284,6 +286,28 @@ int main(int argc, char** argv) {
     VK_CHECK(vkWaitForFences(device, 1, &timeline_fence, VK_TRUE, kTimeout));
     uint64_t counter = 0;
     VK_CHECK(vkGetSemaphoreCounterValue(device, timeline, &counter));
+    uint64_t completed_value = completion_value;
+    VkSemaphoreWaitInfo completed_wait{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
+    completed_wait.semaphoreCount = 1;
+    completed_wait.pSemaphores = &timeline;
+    completed_wait.pValues = &completed_value;
+    const VkResult zero_timeout_result = vkWaitSemaphores(device, &completed_wait, 0);
+
+    VkResult host_wait_result = VK_ERROR_UNKNOWN;
+    std::thread host_wait([&] {
+        uint64_t value = 4;
+        VkSemaphoreWaitInfo info{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
+        info.semaphoreCount = 1;
+        info.pSemaphores = &timeline;
+        info.pValues = &value;
+        host_wait_result = vkWaitSemaphores(device, &info, kTimeout);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    VkSemaphoreSignalInfo host_signal{VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO};
+    host_signal.semaphore = timeline;
+    host_signal.value = 4;
+    const VkResult host_signal_result = vkSignalSemaphore(device, &host_signal);
+    host_wait.join();
 
     vkDestroyFence(device, timeline_fence, nullptr);
     vkDestroySemaphore(device, timeline, nullptr);
@@ -308,6 +332,16 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "FAIL: timeline expected %llu, got %llu\n",
                      static_cast<unsigned long long>(completion_value),
                      static_cast<unsigned long long>(counter));
+        return 1;
+    }
+    if (zero_timeout_result != VK_SUCCESS) {
+        std::fprintf(stderr, "FAIL: completed zero-timeout timeline wait=%d\n",
+                     int(zero_timeout_result));
+        return 1;
+    }
+    if (host_signal_result != VK_SUCCESS || host_wait_result != VK_SUCCESS) {
+        std::fprintf(stderr, "FAIL: host timeline signal=%d wait=%d\n",
+                     int(host_signal_result), int(host_wait_result));
         return 1;
     }
     std::printf("PASS: queue-sync-chain identities=8 checksum=%08x timeline=%llu\n",

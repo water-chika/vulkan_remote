@@ -3,9 +3,13 @@
 // Client-side object model. Dispatchable handles are local loader-compatible
 // wrappers; non-dispatchable handles are server object ids.
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -29,12 +33,41 @@ inline uint64_t id_from_handle(H handle) {
 }
 
 struct Connection {
-    socket_t fd = kInvalidSocket;
-    std::mutex mutex;
+    struct Pending {
+        Opcode opcode = Opcode::Invalid;
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::vector<char> reply;
+        bool done = false;
+        bool ok = false;
+    };
 
+    socket_t fd = kInvalidSocket;
+    std::mutex send_mutex;
+    std::mutex pending_mutex;
+    std::unordered_map<uint64_t, std::shared_ptr<Pending>> pending;
+    uint64_t next_request_id = 1;
+    std::atomic<bool> failed{false};
+    bool receiver_started = false;
+    bool stopping = false;
+    bool heartbeat_enabled = false;
+    size_t application_pending = 0;
+    uint64_t heartbeat_id = 0;
+    std::condition_variable watchdog_cv;
+    std::thread receiver;
+    std::thread watchdog;
+
+    bool start_receiver();
+    void enable_heartbeat();
+    void shutdown();
     bool send_oneway(Opcode opcode, const Writer& request);
     bool round_trip(Opcode opcode, const Writer& request, std::vector<char>* reply);
     bool try_round_trip(Opcode opcode, const Writer& request, std::vector<char>* reply);
+
+   private:
+    void receive_loop();
+    void watchdog_loop();
+    void fail_all();
 };
 
 struct MemoryAllocation {
@@ -97,6 +130,11 @@ struct DescriptorResource {
     uint64_t resource_id = 0;
 };
 
+struct DescriptorBindingMetadata {
+    uint32_t binding = 0;
+    uint32_t descriptor_count = 0;
+};
+
 inline uint64_t descriptor_slot_key(uint32_t binding, uint32_t element) {
     return (static_cast<uint64_t>(binding) << 32) | element;
 }
@@ -155,7 +193,9 @@ struct RemoteDevice {
     std::unordered_map<uint64_t, MemoryAllocation> memories;
     std::unordered_map<uint64_t, ResourceBinding> buffer_bindings;
     std::unordered_map<uint64_t, ResourceBinding> image_bindings;
-    std::unordered_map<uint64_t, std::vector<VkDescriptorSetLayoutBinding>> descriptor_layouts;
+    std::unordered_map<uint64_t, std::vector<DescriptorBindingMetadata>> descriptor_layouts;
+    std::unordered_map<uint64_t, std::vector<DescriptorBindingMetadata>> descriptor_set_layouts;
+    std::unordered_map<uint64_t, uint64_t> descriptor_set_pools;
     std::unordered_map<uint64_t, std::unordered_map<uint64_t, DescriptorResource>> descriptor_resources;
     std::unordered_map<uint64_t, uint64_t> image_view_images;
     std::unordered_map<uint64_t, uint64_t> buffer_view_buffers;
@@ -180,6 +220,7 @@ struct RemoteQueue {
     VK_LOADER_DATA loader_data;
     RemoteDevice* device = nullptr;
     uint64_t remote_id = 0;
+    std::mutex mutex;
 };
 
 struct RemoteCommandBuffer {

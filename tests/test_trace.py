@@ -17,8 +17,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
     "remoting_trace", ROOT / "tools" / "remoting_trace.py")
+assert SPEC is not None and SPEC.loader is not None
 trace = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
 SPEC.loader.exec_module(trace)
 
 
@@ -269,8 +269,8 @@ class LoopbackTests(unittest.TestCase):
             client_proxy, upstream_proxy, timeout=2, max_payload=1024,
             max_records=10, max_trace_bytes=limit, initial_trace_bytes=overhead))
         try:
-            trace.send_wire_message(client_peer, 7, b"abc")
-            self.assertEqual(trace.recv_wire_message(upstream_peer, 1024), (7, b"abc"))
+            trace.send_wire_message(client_peer, 7, b"abc", 1)
+            self.assertEqual(trace.recv_wire_message(upstream_peer, 1024), (7, 1, b"abc"))
             trace.send_wire_message(client_peer, 8, b"x")
             client_peer.shutdown(socket.SHUT_WR)
             with self.assertRaisesRegex(trace.TraceError, "trace exceeds"):
@@ -280,8 +280,8 @@ class LoopbackTests(unittest.TestCase):
                 endpoint.close()
 
     def test_record_proxy_and_exact_replay(self):
-        requests = [(11, b"alpha"), (22, b"beta\x00gamma")]
-        responses = [(11, b"ALPHA"), (22, b"BETA\x00GAMMA")]
+        requests = [(11, b"alpha", 101), (22, b"beta\x00gamma", 102)]
+        responses = [(11, b"ALPHA", 101), (22, b"BETA\x00GAMMA", 102)]
         upstream_listener = listening_socket()
         proxy_listener = listening_socket()
         upstream_port = upstream_listener.getsockname()[1]
@@ -294,7 +294,9 @@ class LoopbackTests(unittest.TestCase):
                 with connection:
                     connection.settimeout(2)
                     for expected, response in zip(requests, responses):
-                        self.assertEqual(trace.recv_wire_message(connection, 1024), expected)
+                        self.assertEqual(
+                            trace.recv_wire_message(connection, 1024),
+                            (expected[0], expected[2], expected[1]))
                         trace.send_wire_message(connection, *response)
                     connection.shutdown(socket.SHUT_WR)
 
@@ -312,19 +314,22 @@ class LoopbackTests(unittest.TestCase):
             client.settimeout(2)
             for request, expected in zip(requests, responses):
                 trace.send_wire_message(client, *request)
-                self.assertEqual(trace.recv_wire_message(client, 1024), expected)
+                self.assertEqual(
+                    trace.recv_wire_message(client, 1024),
+                    (expected[0], expected[2], expected[1]))
             client.shutdown(socket.SHUT_WR)
             self.assertIsNone(trace.recv_wire_message(client, 1024))
         proxy_worker.join()
         upstream_worker.join()
 
         self.assertEqual(
-            [(record.direction, record.opcode, record.payload) for record in recorded],
+            [(record.direction, record.opcode, record.request_id, record.payload)
+             for record in recorded],
             [
-                (trace.CLIENT_TO_SERVER, 11, b"alpha"),
-                (trace.SERVER_TO_CLIENT, 11, b"ALPHA"),
-                (trace.CLIENT_TO_SERVER, 22, b"beta\x00gamma"),
-                (trace.SERVER_TO_CLIENT, 22, b"BETA\x00GAMMA"),
+                (trace.CLIENT_TO_SERVER, 11, 101, b"alpha"),
+                (trace.SERVER_TO_CLIENT, 11, 101, b"ALPHA"),
+                (trace.CLIENT_TO_SERVER, 22, 102, b"beta\x00gamma"),
+                (trace.SERVER_TO_CLIENT, 22, 102, b"BETA\x00GAMMA"),
             ],
         )
 
@@ -341,7 +346,9 @@ class LoopbackTests(unittest.TestCase):
                     with connection:
                         connection.settimeout(2)
                         for expected, response in zip(requests, responses):
-                            self.assertEqual(trace.recv_wire_message(connection, 1024), expected)
+                            self.assertEqual(
+                                trace.recv_wire_message(connection, 1024),
+                                (expected[0], expected[2], expected[1]))
                             trace.send_wire_message(connection, *response)
                         connection.shutdown(socket.SHUT_WR)
 
@@ -393,9 +400,10 @@ class LoopbackTests(unittest.TestCase):
 
     def test_replay_preserves_oneway_request_order(self):
         records = [
-            trace.Record(0, trace.CLIENT_TO_SERVER, 40, b"oneway"),
-            trace.Record(1, trace.CLIENT_TO_SERVER, 41, b"sync"),
-            trace.Record(2, trace.SERVER_TO_CLIENT, 41, struct.pack("<I", 0) + b"reply"),
+            trace.Record(0, trace.CLIENT_TO_SERVER, 40, b"oneway", 0),
+            trace.Record(1, trace.CLIENT_TO_SERVER, 41, b"sync", 77),
+            trace.Record(2, trace.SERVER_TO_CLIENT, 41,
+                         struct.pack("<I", 0) + b"reply", 77),
         ]
         with tempfile.TemporaryDirectory(prefix="remoting-oneway-test-") as directory:
             path = os.path.join(directory, "flow.vrt")
@@ -413,7 +421,7 @@ class LoopbackTests(unittest.TestCase):
                         received.append(trace.recv_wire_message(connection, 1024))
                         received.append(trace.recv_wire_message(connection, 1024))
                         trace.send_wire_message(
-                            connection, 41, struct.pack("<I", 0) + b"different-body")
+                            connection, 41, struct.pack("<I", 0) + b"different-body", 77)
                         connection.shutdown(socket.SHUT_WR)
 
             worker = ThreadResult(target)
@@ -423,12 +431,12 @@ class LoopbackTests(unittest.TestCase):
             ])
             worker.join()
             self.assertEqual(result, 0)
-            self.assertEqual(received, [(40, b"oneway"), (41, b"sync")])
+            self.assertEqual(received, [(40, 0, b"oneway"), (41, 77, b"sync")])
 
     def test_replay_detects_response_mismatch(self):
         records = [
-            trace.Record(0, trace.CLIENT_TO_SERVER, 7, b"request"),
-            trace.Record(1, trace.SERVER_TO_CLIENT, 7, b"expected"),
+            trace.Record(0, trace.CLIENT_TO_SERVER, 7, b"request", 88),
+            trace.Record(1, trace.SERVER_TO_CLIENT, 7, b"expected", 88),
         ]
         with tempfile.TemporaryDirectory(prefix="remoting-mismatch-test-") as directory:
             path = os.path.join(directory, "flow.vrt")
@@ -443,7 +451,7 @@ class LoopbackTests(unittest.TestCase):
                     with connection:
                         connection.settimeout(2)
                         trace.recv_wire_message(connection, 1024)
-                        trace.send_wire_message(connection, 7, b"different")
+                        trace.send_wire_message(connection, 7, b"different", 88)
 
             worker = ThreadResult(target)
             error = io.StringIO()

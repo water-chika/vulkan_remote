@@ -193,7 +193,8 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo* pCreat
     }
 
     auto* instance = new RemoteInstance();
-    instance->requested_api_version = pCreateInfo->pApplicationInfo
+    instance->requested_api_version = pCreateInfo->pApplicationInfo &&
+        pCreateInfo->pApplicationInfo->apiVersion != 0
         ? pCreateInfo->pApplicationInfo->apiVersion : VK_API_VERSION_1_0;
     // Required of every dispatchable handle an ICD creates.
     set_loader_magic_value(instance);
@@ -201,6 +202,12 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo* pCreat
     instance->connection.fd = remoting::connect_to(host, port);
     if (instance->connection.fd == remoting::kInvalidSocket) {
         fprintf(stderr, "vulkan-remoting: no server at %s:%u\n", host, static_cast<unsigned>(port));
+        delete instance;
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    if (!instance->connection.start_receiver()) {
+        instance->connection.shutdown();
         delete instance;
         return VK_ERROR_INITIALIZATION_FAILED;
     }
@@ -226,7 +233,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo* pCreat
                     "command set differs (ours: schema=%s registry=%s ABI=%s commands=%s)\n",
                     remoting::kWireSchemaRevision, remoting::kRegistrySha256,
                     remoting::kWireAbi, remoting::kCommandSetDigest);
-            remoting::close_socket(instance->connection.fd);
+            instance->connection.shutdown();
             delete instance;
             return VK_ERROR_INCOMPATIBLE_DRIVER;
         }
@@ -240,13 +247,14 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo* pCreat
         if (!negotiated.ok() || negotiated.remaining() != 0 ||
             digest != remoting::kCommandSetDigest ||
             (instance->capabilities & ~supported_capabilities) != 0) {
-            remoting::close_socket(instance->connection.fd);
+            instance->connection.shutdown();
             delete instance;
             return VK_ERROR_INCOMPATIBLE_DRIVER;
         }
         instance->negotiated_api_version = (std::min)(
             (std::min)(instance->requested_api_version, instance->server_loader_api_version),
             VK_API_VERSION_1_2);
+        instance->connection.enable_heartbeat();
     }
 
     for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; ++i) {
@@ -259,9 +267,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo* pCreat
 VKAPI_ATTR void VKAPI_CALL DestroyInstance(VkInstance handle, const VkAllocationCallbacks*) {
     if (handle == VK_NULL_HANDLE) return;
     RemoteInstance* instance = to_instance(handle);
-    if (instance->connection.fd != remoting::kInvalidSocket) {
-        remoting::close_socket(instance->connection.fd);
-    }
+    instance->connection.shutdown();
     for (auto* device : instance->physical_devices) delete device;
     delete instance;
 }

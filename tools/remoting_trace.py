@@ -23,13 +23,13 @@ import zlib
 from dataclasses import dataclass
 from typing import BinaryIO, Iterable
 
-WIRE_HEADER = struct.Struct("<II")
+WIRE_HEADER = struct.Struct("<IIQ")
 FILE_HEADER = struct.Struct("<8sII")
-RECORD_HEADER = struct.Struct("<4sQB3xIII")
+RECORD_HEADER = struct.Struct("<4sQB3xIIQI")
 TRAILER = struct.Struct("<4sQ32s")
 
 MAGIC = b"VRTRACE\0"
-VERSION = 1
+VERSION = 2
 RECORD_TAG = b"RECD"
 TRAILER_TAG = b"DONE"
 CLIENT_TO_SERVER = 0
@@ -63,6 +63,7 @@ class Record:
     direction: int
     opcode: int
     payload: bytes
+    request_id: int = 0
 
 
 def validate_metadata(metadata: dict) -> None:
@@ -186,7 +187,7 @@ def write_trace(path: str, metadata: dict, records: Iterable[Record], *,
                         f"record {count} payload exceeds {max_payload} bytes")
                 header = RECORD_HEADER.pack(
                     RECORD_TAG, count, record.direction, record.opcode, len(payload),
-                    zlib.crc32(payload) & 0xFFFFFFFF,
+                    record.request_id, zlib.crc32(payload) & 0xFFFFFFFF,
                 )
                 emit(handle, header)
                 emit(handle, payload)
@@ -269,7 +270,7 @@ def read_trace(path: str, *, max_metadata: int = DEFAULT_MAX_METADATA,
                 if raw_header[13:16] != b"\0\0\0":
                     raise TraceError(
                         f"record {expected_sequence} has non-zero reserved bytes")
-                _, sequence, direction, opcode, payload_size, expected_crc = (
+                _, sequence, direction, opcode, payload_size, request_id, expected_crc = (
                     RECORD_HEADER.unpack(raw_header))
                 if sequence != expected_sequence:
                     raise TraceError(
@@ -286,7 +287,7 @@ def read_trace(path: str, *, max_metadata: int = DEFAULT_MAX_METADATA,
                     raise TraceError(
                         f"record {sequence} CRC mismatch: expected {expected_crc:08x}, "
                         f"got {actual_crc:08x}")
-                records.append(Record(sequence, direction, opcode, payload))
+                records.append(Record(sequence, direction, opcode, payload, request_id))
                 expected_sequence += 1
     except OSError as error:
         raise TraceError(f"cannot read trace: {error}") from error
@@ -311,21 +312,22 @@ def recv_exact(sock: socket.socket, size: int, what: str, *, allow_eof: bool = F
     return b"".join(chunks)
 
 
-def recv_wire_message(sock: socket.socket, max_payload: int) -> tuple[int, bytes] | None:
+def recv_wire_message(sock: socket.socket, max_payload: int) -> tuple[int, int, bytes] | None:
     header = recv_exact(sock, WIRE_HEADER.size, "wire header", allow_eof=True)
     if header is None:
         return None
-    opcode, payload_size = WIRE_HEADER.unpack(header)
+    opcode, payload_size, request_id = WIRE_HEADER.unpack(header)
     if payload_size > max_payload:
         raise TraceError(f"wire payload {payload_size} exceeds {max_payload} bytes")
     payload = recv_exact(sock, payload_size, "wire payload")
     assert payload is not None
-    return opcode, payload
+    return opcode, request_id, payload
 
 
-def send_wire_message(sock: socket.socket, opcode: int, payload: bytes) -> None:
+def send_wire_message(sock: socket.socket, opcode: int, payload: bytes,
+                      request_id: int = 0) -> None:
     try:
-        sock.sendall(WIRE_HEADER.pack(opcode, len(payload)) + payload)
+        sock.sendall(WIRE_HEADER.pack(opcode, len(payload), request_id) + payload)
     except (socket.timeout, OSError) as error:
         raise TraceError(f"socket error sending opcode {opcode}: {error}") from error
 
@@ -358,7 +360,7 @@ def record_connection(client: socket.socket, upstream: socket.socket, *,
                     except OSError:
                         pass
                     return
-                opcode, payload = message
+                opcode, request_id, payload = message
                 with lock:
                     if len(records) >= max_records:
                         raise TraceError(f"connection exceeds {max_records} records")
@@ -366,12 +368,12 @@ def record_connection(client: socket.socket, upstream: socket.socket, *,
                     if encoded_size + record_size > max_trace_bytes:
                         raise TraceError(
                             f"connection trace exceeds {max_trace_bytes} bytes")
-                    record = Record(len(records), direction, opcode, payload)
+                    record = Record(len(records), direction, opcode, payload, request_id)
                     records.append(record)
                     encoded_size += record_size
                 # Never hold the ordering lock across network I/O: a full socket
                 # buffer must not prevent the reverse relay from draining data.
-                send_wire_message(destination, opcode, payload)
+                send_wire_message(destination, opcode, payload, request_id)
         except BaseException as error:  # Relay failures must wake and join the peer.
             with lock:
                 errors.append(error)
@@ -674,13 +676,17 @@ def run_replay(args: argparse.Namespace) -> None:
         compared = 0
         for record in records:
             if record.direction == CLIENT_TO_SERVER:
-                send_wire_message(connection, record.opcode, record.payload)
+                send_wire_message(connection, record.opcode, record.payload, record.request_id)
                 continue
             actual = recv_wire_message(connection, args.max_payload)
             if actual is None:
                 raise TraceError(
                     f"response {record.sequence}: target closed before opcode {record.opcode}")
-            actual_opcode, actual_payload = actual
+            actual_opcode, actual_request_id, actual_payload = actual
+            if actual_request_id != record.request_id:
+                raise TraceError(
+                    f"response {record.sequence}: request ID mismatch: expected "
+                    f"{record.request_id}, got {actual_request_id}")
             verify_response(
                 record, actual_opcode, actual_payload, args.verify,
                 metadata["command_digest"])
@@ -693,7 +699,7 @@ def run_replay(args: argparse.Namespace) -> None:
         if unexpected is not None:
             raise TraceError(
                 f"unexpected response after trace: opcode {unexpected[0]}, "
-                f"{len(unexpected[1])} bytes")
+                f"request ID {unexpected[1]}, {len(unexpected[2])} bytes")
     print(
         f"replay: verified {compared} responses across {len(records)} records "
         f"using {args.verify} mode")

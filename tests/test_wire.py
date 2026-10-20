@@ -21,7 +21,8 @@ import subprocess
 import sys
 import time
 
-HEADER = struct.Struct('<II')
+HEADER = struct.Struct('<IIQ')
+NEXT_REQUEST_ID = 1
 
 OPCODE_INVALID = 0
 OPCODE_HANDSHAKE = 1
@@ -112,25 +113,34 @@ def decode_string(payload, offset):
     return payload[offset:offset + size].decode('utf-8'), offset + size
 
 
-def send_message(sock, opcode, payload=b''):
-    sock.sendall(HEADER.pack(opcode, len(payload)) + payload)
+def send_message(sock, opcode, payload=b'', request_id=None):
+    global NEXT_REQUEST_ID
+    if request_id is None:
+        request_id = NEXT_REQUEST_ID
+        NEXT_REQUEST_ID += 1
+    sock.sendall(HEADER.pack(opcode, len(payload), request_id) + payload)
 
 
-def recv_message(sock):
+def recv_message_with_id(sock):
     header = b''
     while len(header) < HEADER.size:
         chunk = sock.recv(HEADER.size - len(header))
         if not chunk:
-            return None, None
+            return None, None, None
         header += chunk
-    opcode, size = HEADER.unpack(header)
+    opcode, size, request_id = HEADER.unpack(header)
 
     payload = b''
     while len(payload) < size:
         chunk = sock.recv(size - len(payload))
         if not chunk:
-            return None, None
+            return None, None, None
         payload += chunk
+    return opcode, request_id, payload
+
+
+def recv_message(sock):
+    opcode, _, payload = recv_message_with_id(sock)
     return opcode, payload
 
 
@@ -216,6 +226,44 @@ def test_handshake_accepts_matching_digest(server, build_dir):
             raise Failure('server rejected its own digest (status {})'.format(status))
 
 
+def test_ping_echoes_request_id(server, build_dir):
+    with connect(server.port) as sock:
+        if handshake(sock, read_digest(build_dir), build_dir) != STATUS_OK:
+            raise Failure('handshake failed before Ping')
+        ping = read_opcode(build_dir, 'Ping')
+        request_id = 0x1020304050607080
+        send_message(sock, ping, b'', request_id)
+        opcode, reply_id, response = recv_message_with_id(sock)
+        if (opcode, reply_id) != (ping, request_id):
+            raise Failure('Ping correlation was {!r}, expected {!r}'.format(
+                (opcode, reply_id), (ping, request_id)))
+        if decode_u32(response) != STATUS_OK:
+            raise Failure('valid Ping was rejected')
+        send_message(sock, ping, b'x', request_id + 1)
+        opcode, reply_id, response = recv_message_with_id(sock)
+        if (opcode, reply_id, decode_u32(response)) != (
+                ping, request_id + 1, STATUS_DECODE_ERROR):
+            raise Failure('malformed Ping did not return correlated DecodeError')
+
+
+def test_replies_echo_request_ids(server, build_dir):
+    with connect(server.port) as sock:
+        values = read_protocol_constants(build_dir)
+        payload = (encode_string(values['kWireSchemaRevision']) +
+                   encode_string(values['kRegistrySha256']) +
+                   encode_string(values['kWireAbi']) +
+                   encode_string(values['kCommandSetDigest']) +
+                   struct.pack('<II', 0, 0))
+        request_id = 0x123456789abcdef0
+        send_message(sock, OPCODE_HANDSHAKE, payload, request_id)
+        opcode, reply_id, response = recv_message_with_id(sock)
+        if (opcode, reply_id) != (OPCODE_HANDSHAKE, request_id):
+            raise Failure('reply correlation was opcode/id {!r}, expected {!r}'.format(
+                (opcode, reply_id), (OPCODE_HANDSHAKE, request_id)))
+        if decode_u32(response) != STATUS_OK:
+            raise Failure('correlated handshake was rejected')
+
+
 def assert_handshake_rejected_and_closed(sock, status, build_dir, description):
     if status == STATUS_OK:
         raise Failure('server accepted ' + description)
@@ -283,7 +331,7 @@ def test_reserved_opcode_zero_is_rejected(server, build_dir):
 def test_truncated_payload_does_not_hang(server, build_dir):
     """Announce more bytes than are sent, then disconnect."""
     sock = connect(server.port)
-    sock.sendall(HEADER.pack(read_opcode(build_dir, 'vkGetPhysicalDeviceProperties'), 64))
+    sock.sendall(HEADER.pack(read_opcode(build_dir, 'vkGetPhysicalDeviceProperties'), 64, 1))
     sock.sendall(b'\x01\x00')
     sock.close()
 
@@ -299,7 +347,7 @@ def test_oversized_payload_is_refused(server, build_dir):
     gigabytes and the server tries to allocate it.
     """
     sock = connect(server.port)
-    sock.sendall(HEADER.pack(read_opcode(build_dir, 'vkGetPhysicalDeviceProperties'), 0xFFFFFFFF))
+    sock.sendall(HEADER.pack(read_opcode(build_dir, 'vkGetPhysicalDeviceProperties'), 0xFFFFFFFF, 1))
     sock.close()
 
     time.sleep(0.5)
@@ -820,7 +868,7 @@ def test_mapped_transfer_chunks_are_bounded(server, build_dir):
 def test_abrupt_disconnect_is_survivable(server, build_dir):
     """Half a message, then vanish: the common case when a machine sleeps."""
     sock = connect(server.port)
-    sock.sendall(HEADER.pack(OPCODE_HANDSHAKE, 32)[:4])
+    sock.sendall(HEADER.pack(OPCODE_HANDSHAKE, 32, 1)[:4])
     sock.close()
 
     time.sleep(0.5)
@@ -927,6 +975,8 @@ def test_own_window_surface(server, build_dir):
 
 TESTS = [
     test_handshake_accepts_matching_digest,
+    test_replies_echo_request_ids,
+    test_ping_echoes_request_id,
     test_handshake_rejects_unknown_required_capability,
     test_handshake_rejects_foreign_digest,
     test_handshake_rejects_schema_mismatch,
