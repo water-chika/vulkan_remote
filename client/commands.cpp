@@ -702,6 +702,36 @@ VKAPI_ATTR void VKAPI_CALL CmdClearDepthStencilImage(VkCommandBuffer h,VkImage i
 VKAPI_ATTR void VKAPI_CALL CmdClearAttachments(VkCommandBuffer h,uint32_t attachmentCount,const VkClearAttachment* attachments,uint32_t rectCount,const VkClearRect* rects){auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);w.u32(attachmentCount);for(uint32_t i=0;i<attachmentCount;++i){w.u32(attachments[i].aspectMask);w.u32(attachments[i].colorAttachment);w.bytes(&attachments[i].clearValue,sizeof(VkClearValue));}w.u32(rectCount);for(uint32_t i=0;i<rectCount;++i){w.i32(rects[i].rect.offset.x);w.i32(rects[i].rect.offset.y);w.u32(rects[i].rect.extent.width);w.u32(rects[i].rect.extent.height);w.u32(rects[i].baseArrayLayer);w.u32(rects[i].layerCount);}cb->device->instance->connection.send_oneway(Opcode::vkCmdClearAttachments,w);}
 VKAPI_ATTR void VKAPI_CALL CmdWaitEvents(VkCommandBuffer h,uint32_t eventCount,const VkEvent* events,VkPipelineStageFlags src,VkPipelineStageFlags dst,uint32_t memoryCount,const VkMemoryBarrier* memory,uint32_t bufferCount,const VkBufferMemoryBarrier* buffers,uint32_t imageCount,const VkImageMemoryBarrier* images){auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);w.u32(eventCount);for(uint32_t i=0;i<eventCount;++i)w.handle(id_from_handle(events[i]));w.u32(src);w.u32(dst);w.u32(memoryCount);for(uint32_t i=0;i<memoryCount;++i)write_MemoryBarrier(w,memory[i]);w.u32(bufferCount);for(uint32_t i=0;i<bufferCount;++i)write_BufferMemoryBarrier(w,buffers[i]);w.u32(imageCount);for(uint32_t i=0;i<imageCount;++i)write_ImageMemoryBarrier(w,images[i]);if(dst&VK_PIPELINE_STAGE_HOST_BIT){const VkAccessFlags host=VK_ACCESS_HOST_READ_BIT|VK_ACCESS_HOST_WRITE_BIT;for(uint32_t i=0;i<memoryCount;++i)if(memory[i].dstAccessMask&host){cb->host_visible_writes.insert(cb->pending_writes.begin(),cb->pending_writes.end());cb->descriptor_writes_host_visible=true;}std::lock_guard<std::mutex>lock(cb->device->metadata_mutex);for(uint32_t i=0;i<bufferCount;++i)if(buffers[i].dstAccessMask&host){auto binding=cb->device->buffer_bindings.find(id_from_handle(buffers[i].buffer));if(binding!=cb->device->buffer_bindings.end()){uint64_t memory_id=binding->second.memory_id;if(cb->pending_writes.count(memory_id))cb->host_visible_writes.insert(memory_id);for(uint64_t set_id:cb->writable_descriptor_sets){auto resources=cb->device->descriptor_resources.find(set_id);if(resources==cb->device->descriptor_resources.end())continue;for(const auto&item:resources->second){const auto&resource=item.second;bool matches=(resource.type==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER||resource.type==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)&&resource.resource_id==id_from_handle(buffers[i].buffer);if(resource.type==VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER){auto view=cb->device->buffer_view_buffers.find(resource.resource_id);matches=view!=cb->device->buffer_view_buffers.end()&&view->second==id_from_handle(buffers[i].buffer);}if(matches)cb->host_visible_writes.insert(memory_id);}}}}for(uint32_t i=0;i<imageCount;++i)if(images[i].dstAccessMask&host){auto binding=cb->device->image_bindings.find(id_from_handle(images[i].image));if(binding!=cb->device->image_bindings.end()){uint64_t memory_id=binding->second.memory_id;if(cb->pending_writes.count(memory_id))cb->host_visible_writes.insert(memory_id);for(uint64_t set_id:cb->writable_descriptor_sets){auto resources=cb->device->descriptor_resources.find(set_id);if(resources==cb->device->descriptor_resources.end())continue;for(const auto&item:resources->second){const auto&resource=item.second;if(resource.type!=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)continue;auto view=cb->device->image_view_images.find(resource.resource_id);if(view!=cb->device->image_view_images.end()&&view->second==id_from_handle(images[i].image))cb->host_visible_writes.insert(memory_id);}}}}}cb->device->instance->connection.send_oneway(Opcode::vkCmdWaitEvents,w);}
 
+VKAPI_ATTR void VKAPI_CALL CmdPipelineBarrier2(VkCommandBuffer handle,
+                                                 const VkDependencyInfo* info) {
+    if (!info) return;
+    auto* cb = to_cmd(handle);
+    Writer request;
+    request.handle(cb->remote_id);
+    if (!write_DependencyInfo(request, *info)) return;
+    const VkPipelineStageFlags2 host_stage = VK_PIPELINE_STAGE_2_HOST_BIT;
+    const VkAccessFlags2 host_access = VK_ACCESS_2_HOST_READ_BIT | VK_ACCESS_2_HOST_WRITE_BIT;
+    bool general_host = false;
+    for (uint32_t i=0;i<info->memoryBarrierCount;++i)
+        general_host |= (info->pMemoryBarriers[i].dstStageMask & host_stage) &&
+                        (info->pMemoryBarriers[i].dstAccessMask & host_access);
+    if (general_host) {
+        cb->host_visible_writes.insert(cb->pending_writes.begin(), cb->pending_writes.end());
+        cb->descriptor_writes_host_visible = true;
+    }
+    {
+        std::lock_guard<std::mutex> lock(cb->device->metadata_mutex);
+        for(uint32_t i=0;i<info->bufferMemoryBarrierCount;++i){const auto&barrier=info->pBufferMemoryBarriers[i];if(!(barrier.dstStageMask&host_stage)||!(barrier.dstAccessMask&host_access))continue;auto binding=cb->device->buffer_bindings.find(id_from_handle(barrier.buffer));if(binding!=cb->device->buffer_bindings.end())cb->host_visible_writes.insert(binding->second.memory_id);}
+        for(uint32_t i=0;i<info->imageMemoryBarrierCount;++i){const auto&barrier=info->pImageMemoryBarriers[i];if(!(barrier.dstStageMask&host_stage)||!(barrier.dstAccessMask&host_access))continue;auto binding=cb->device->image_bindings.find(id_from_handle(barrier.image));if(binding!=cb->device->image_bindings.end())cb->host_visible_writes.insert(binding->second.memory_id);}
+    }
+    cb->device->instance->connection.send_oneway(Opcode::vkCmdPipelineBarrier2, request);
+}
+
+VKAPI_ATTR void VKAPI_CALL CmdSetEvent2(VkCommandBuffer h,VkEvent e,const VkDependencyInfo*info){if(!info)return;auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);w.handle(id_from_handle(e));if(!write_DependencyInfo(w,*info))return;cb->device->instance->connection.send_oneway(Opcode::vkCmdSetEvent2,w);}
+VKAPI_ATTR void VKAPI_CALL CmdResetEvent2(VkCommandBuffer h,VkEvent e,VkPipelineStageFlags2 stage){auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);w.handle(id_from_handle(e));w.u64(stage);cb->device->instance->connection.send_oneway(Opcode::vkCmdResetEvent2,w);}
+VKAPI_ATTR void VKAPI_CALL CmdWaitEvents2(VkCommandBuffer h,uint32_t count,const VkEvent*events,const VkDependencyInfo*infos){if(count>kMaxArrayElements||(count&&(!events||!infos)))return;auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);w.u32(count);for(uint32_t i=0;i<count;++i){w.handle(id_from_handle(events[i]));if(!write_DependencyInfo(w,infos[i]))return;const auto&d=infos[i];const VkPipelineStageFlags2 hs=VK_PIPELINE_STAGE_2_HOST_BIT;const VkAccessFlags2 ha=VK_ACCESS_2_HOST_READ_BIT|VK_ACCESS_2_HOST_WRITE_BIT;for(uint32_t j=0;j<d.memoryBarrierCount;++j)if((d.pMemoryBarriers[j].dstStageMask&hs)&&(d.pMemoryBarriers[j].dstAccessMask&ha)){cb->host_visible_writes.insert(cb->pending_writes.begin(),cb->pending_writes.end());cb->descriptor_writes_host_visible=true;}std::lock_guard<std::mutex>lock(cb->device->metadata_mutex);for(uint32_t j=0;j<d.bufferMemoryBarrierCount;++j){const auto&b=d.pBufferMemoryBarriers[j];if(!(b.dstStageMask&hs)||!(b.dstAccessMask&ha))continue;auto binding=cb->device->buffer_bindings.find(id_from_handle(b.buffer));if(binding!=cb->device->buffer_bindings.end())cb->host_visible_writes.insert(binding->second.memory_id);}for(uint32_t j=0;j<d.imageMemoryBarrierCount;++j){const auto&b=d.pImageMemoryBarriers[j];if(!(b.dstStageMask&hs)||!(b.dstAccessMask&ha))continue;auto binding=cb->device->image_bindings.find(id_from_handle(b.image));if(binding!=cb->device->image_bindings.end())cb->host_visible_writes.insert(binding->second.memory_id);}}cb->device->instance->connection.send_oneway(Opcode::vkCmdWaitEvents2,w);}
+VKAPI_ATTR void VKAPI_CALL CmdWriteTimestamp2(VkCommandBuffer h,VkPipelineStageFlags2 stage,VkQueryPool pool,uint32_t query){auto*cb=to_cmd(h);Writer w;w.handle(cb->remote_id);w.u64(stage);w.handle(id_from_handle(pool));w.u32(query);cb->device->instance->connection.send_oneway(Opcode::vkCmdWriteTimestamp2,w);}
+
 VKAPI_ATTR void VKAPI_CALL CmdPushConstants(VkCommandBuffer handle, VkPipelineLayout layout,
                                             VkShaderStageFlags stageFlags, uint32_t offset,
                                             uint32_t size, const void* pValues) {
@@ -778,6 +808,16 @@ const DeviceEntry* get_command_entries(size_t* count) {
         D(CmdSetStencilWriteMask),
         D(CmdSetStencilReference),
         D(CmdPipelineBarrier),
+        D(CmdPipelineBarrier2),
+        {"vkCmdPipelineBarrier2KHR", reinterpret_cast<PFN_vkVoidFunction>(CmdPipelineBarrier2)},
+        D(CmdSetEvent2),
+        {"vkCmdSetEvent2KHR", reinterpret_cast<PFN_vkVoidFunction>(CmdSetEvent2)},
+        D(CmdResetEvent2),
+        {"vkCmdResetEvent2KHR", reinterpret_cast<PFN_vkVoidFunction>(CmdResetEvent2)},
+        D(CmdWaitEvents2),
+        {"vkCmdWaitEvents2KHR", reinterpret_cast<PFN_vkVoidFunction>(CmdWaitEvents2)},
+        D(CmdWriteTimestamp2),
+        {"vkCmdWriteTimestamp2KHR", reinterpret_cast<PFN_vkVoidFunction>(CmdWriteTimestamp2)},
         D(CmdCopyBuffer),
         D(CmdCopyBufferToImage),
         D(CmdCopyImageToBuffer),

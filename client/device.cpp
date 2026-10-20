@@ -179,6 +179,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice handle,
         if(node->sType==VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES&&!remoting::vulkan12_requested_features_supported(*reinterpret_cast<const VkPhysicalDeviceVulkan12Features*>(node)))return VK_ERROR_FEATURE_NOT_PRESENT;
         if(node->sType==VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES){const auto&f=*reinterpret_cast<const VkPhysicalDeviceBufferDeviceAddressFeatures*>(node);if(f.bufferDeviceAddress||f.bufferDeviceAddressCaptureReplay||f.bufferDeviceAddressMultiDevice)return VK_ERROR_FEATURE_NOT_PRESENT;}
         if(node->sType==VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES){const auto&f=*reinterpret_cast<const VkPhysicalDeviceDescriptorIndexingFeatures*>(node);VkPhysicalDeviceDescriptorIndexingFeatures z{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES};if(std::memcmp(reinterpret_cast<const char*>(&f)+offsetof(VkPhysicalDeviceDescriptorIndexingFeatures,shaderInputAttachmentArrayDynamicIndexing),reinterpret_cast<const char*>(&z)+offsetof(VkPhysicalDeviceDescriptorIndexingFeatures,shaderInputAttachmentArrayDynamicIndexing),sizeof(f)-offsetof(VkPhysicalDeviceDescriptorIndexingFeatures,shaderInputAttachmentArrayDynamicIndexing))!=0)return VK_ERROR_FEATURE_NOT_PRESENT;}
+        if(node->sType==VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES&&reinterpret_cast<const VkPhysicalDeviceSynchronization2Features*>(node)->synchronization2&&!extension_enabled(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME))return VK_ERROR_FEATURE_NOT_PRESENT;
     }
     auto* pd = reinterpret_cast<struct RemotePhysicalDevice*>(handle);
     const bool properties2_enabled = pd->instance->enabled_extensions.count(
@@ -188,9 +189,11 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice handle,
             ? pCreateInfo->ppEnabledExtensionNames[i] : nullptr;
         if (requested == nullptr ||
             (strcmp(requested, VK_KHR_SWAPCHAIN_EXTENSION_NAME) != 0 &&
+             strcmp(requested, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME) != 0 &&
              !remoting::is_required_device_extension(requested)) ||
-            (remoting::is_required_device_extension(requested) &&
-             pd->api_version < VK_API_VERSION_1_2 &&
+            ((remoting::is_required_device_extension(requested) ||
+              strcmp(requested, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME) == 0) &&
+             pd->api_version < VK_API_VERSION_1_1 &&
              !remoting::device_extension_dependencies_satisfied(
                  requested, extension_enabled, properties2_enabled))) {
             return VK_ERROR_EXTENSION_NOT_PRESENT;
@@ -511,6 +514,140 @@ VKAPI_ATTR VkResult VKAPI_CALL QueueSubmit(VkQueue handle, uint32_t submitCount,
             PendingCoherentWrites{queue->remote_id,
                                   submitCount ? submission_serial - 1 : first_submission_serial,
                                   next_queue_writes};
+    return result;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL QueueSubmit2(VkQueue handle, uint32_t submitCount,
+                                             const VkSubmitInfo2* submits, VkFence fence) {
+    if (handle == VK_NULL_HANDLE || submitCount > kMaxArrayElements ||
+        (submitCount && !submits)) return VK_ERROR_INITIALIZATION_FAILED;
+    for (uint32_t i=0;i<submitCount;++i) {
+        const auto& submit=submits[i];
+        for(uint32_t j=0;j<submit.waitSemaphoreInfoCount;++j)
+            if(submit.pWaitSemaphoreInfos[j].semaphore==VK_NULL_HANDLE)
+                return VK_ERROR_INITIALIZATION_FAILED;
+        for(uint32_t j=0;j<submit.commandBufferInfoCount;++j)
+            if(submit.pCommandBufferInfos[j].commandBuffer==VK_NULL_HANDLE)
+                return VK_ERROR_INITIALIZATION_FAILED;
+        for(uint32_t j=0;j<submit.signalSemaphoreInfoCount;++j)
+            if(submit.pSignalSemaphoreInfos[j].semaphore==VK_NULL_HANDLE)
+                return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    RemoteQueue* queue = to_queue(handle);
+    RemoteDevice* device = queue->device;
+    std::lock_guard<std::mutex> queue_lock(queue->mutex);
+    Writer request;
+    request.handle(queue->remote_id);
+    request.handle(id_from_handle(fence));
+    request.u32(submitCount);
+    const auto command_buffer_id = [](VkCommandBuffer handle) -> uint64_t {
+        return handle ? to_cmd(handle)->remote_id : 0;
+    };
+    for (uint32_t i = 0; i < submitCount; ++i)
+        if (!write_SubmitInfo2(request, submits[i], command_buffer_id))
+            return VK_ERROR_FEATURE_NOT_PRESENT;
+    if (!device->publish_coherent_mapped()) return VK_ERROR_DEVICE_LOST;
+
+    struct PlannedWait { uint64_t semaphore_id; PendingSemaphoreWait wait; };
+    struct PlannedSignal { uint64_t semaphore_id; bool timeline; uint64_t value;
+                           uint64_t serial; std::unordered_set<uint64_t> writes; };
+    std::vector<PlannedWait> planned_waits;
+    std::vector<PlannedSignal> planned_signals;
+    std::unordered_set<uint64_t> consumed_binary;
+    std::unique_lock<std::mutex> lock(device->metadata_mutex);
+    const uint64_t first_serial = device->next_submission_serial;
+    device->next_submission_serial += submitCount ? submitCount : 1;
+    uint64_t serial = first_serial;
+    auto next_writes = device->queue_writes[queue->remote_id];
+    for (uint32_t i = 0; i < submitCount; ++i, ++serial) {
+        const VkSubmitInfo2& submit = submits[i];
+        std::unordered_set<uint64_t> writes;
+        for (uint32_t j = 0; j < submit.commandBufferInfoCount; ++j) {
+            auto* cb = to_cmd(submit.pCommandBufferInfos[j].commandBuffer);
+            writes.insert(cb->host_visible_writes.begin(), cb->host_visible_writes.end());
+            if (!cb->descriptor_writes_host_visible) continue;
+            for (uint64_t set_id : cb->writable_descriptor_sets) {
+                const auto resources = device->descriptor_resources.find(set_id);
+                if (resources == device->descriptor_resources.end()) continue;
+                for (const auto& item : resources->second) {
+                    const DescriptorResource& resource = item.second;
+                    uint64_t memory_id = 0;
+                    if (resource.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ||
+                        resource.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC) {
+                        const auto binding = device->buffer_bindings.find(resource.resource_id);
+                        if (binding != device->buffer_bindings.end()) memory_id = binding->second.memory_id;
+                    } else if (resource.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
+                        const auto view = device->image_view_images.find(resource.resource_id);
+                        if (view != device->image_view_images.end()) {
+                            const auto binding = device->image_bindings.find(view->second);
+                            if (binding != device->image_bindings.end()) memory_id = binding->second.memory_id;
+                        }
+                    } else if (resource.type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) {
+                        const auto view = device->buffer_view_buffers.find(resource.resource_id);
+                        if (view != device->buffer_view_buffers.end()) {
+                            const auto binding = device->buffer_bindings.find(view->second);
+                            if (binding != device->buffer_bindings.end()) memory_id = binding->second.memory_id;
+                        }
+                    }
+                    if (memory_id) writes.insert(memory_id);
+                }
+            }
+        }
+        for (uint32_t j = 0; j < submit.waitSemaphoreInfoCount; ++j) {
+            const auto& wait_info = submit.pWaitSemaphoreInfos[j];
+            const uint64_t id = id_from_handle(wait_info.semaphore);
+            auto found = device->semaphores.find(id);
+            if (found == device->semaphores.end()) continue;
+            auto& semaphore = found->second;
+            bool resolved = false;
+            if (semaphore.timeline) {
+                writes.insert(semaphore.acquired_timeline_writes.begin(),
+                              semaphore.acquired_timeline_writes.end());
+                resolved = semaphore.acquired_timeline_value >= wait_info.value;
+                for (const auto& signal : semaphore.timeline_writes) {
+                    if (resolved || signal.value < wait_info.value) continue;
+                    writes.insert(signal.memory_ids.begin(), signal.memory_ids.end());
+                    resolved = true;
+                }
+            } else {
+                writes.insert(semaphore.binary_writes.begin(), semaphore.binary_writes.end());
+                resolved = semaphore.binary_signaled;
+                consumed_binary.insert(id);
+            }
+            if (!resolved) {
+                PendingSemaphoreWait wait{wait_info.value, queue->remote_id, serial};
+                for (uint32_t k=0;k<submit.signalSemaphoreInfoCount;++k)
+                    wait.downstream_semaphores.push_back(
+                        id_from_handle(submit.pSignalSemaphoreInfos[k].semaphore));
+                planned_waits.push_back({id, std::move(wait)});
+            }
+        }
+        next_writes.insert(writes.begin(), writes.end());
+        for (uint32_t j=0;j<submit.signalSemaphoreInfoCount;++j) {
+            const auto& info=submit.pSignalSemaphoreInfos[j];
+            const uint64_t id=id_from_handle(info.semaphore);
+            const auto found=device->semaphores.find(id);
+            const bool timeline=found!=device->semaphores.end()&&found->second.timeline;
+            planned_signals.push_back({id,timeline,timeline?info.value:0,serial,next_writes});
+        }
+    }
+    lock.unlock();
+    std::vector<char> reply;
+    if (!device->instance->connection.round_trip(Opcode::vkQueueSubmit2,request,&reply))
+        return VK_ERROR_DEVICE_LOST;
+    Reader reader=payload_reader(reply);
+    VkResult result=static_cast<VkResult>(reader.i32());
+    uint32_t errors=reader.u32();
+    report_oneway_errors(errors);
+    if(!reader.ok()||reader.remaining()!=0)return VK_ERROR_DEVICE_LOST;
+    if(result!=VK_SUCCESS)return result;
+    lock.lock();
+    device->queue_writes[queue->remote_id]=next_writes;
+    for(const auto&wait:planned_waits)
+        device->semaphores[wait.semaphore_id].pending_waits.push_back(wait.wait);
+    for(uint64_t id:consumed_binary){auto&s=device->semaphores[id];s.binary_writes.clear();s.binary_signaled=false;s.binary_queue_id=0;s.binary_submission_serial=0;}
+    for(const auto&signal:planned_signals){auto&s=device->semaphores[signal.semaphore_id];if(signal.timeline)s.timeline_writes.push_back({signal.value,queue->remote_id,signal.serial,signal.writes});else{s.binary_signaled=true;s.binary_queue_id=queue->remote_id;s.binary_submission_serial=signal.serial;s.binary_writes=signal.writes;}for(const auto&wait:s.pending_waits){if(signal.timeline&&signal.value<wait.value)continue;propagate_queue_writes_locked(device,wait.queue_id,wait.submission_serial,signal.writes);for(uint64_t downstream_id:wait.downstream_semaphores){auto&downstream=device->semaphores[downstream_id];if(downstream.timeline){for(auto&record:downstream.timeline_writes)if(record.queue_id==wait.queue_id&&record.submission_serial>=wait.submission_serial)record.memory_ids.insert(signal.writes.begin(),signal.writes.end());}else if(downstream.binary_signaled&&downstream.binary_queue_id==wait.queue_id&&downstream.binary_submission_serial>=wait.submission_serial)downstream.binary_writes.insert(signal.writes.begin(),signal.writes.end());}}s.pending_waits.erase(std::remove_if(s.pending_waits.begin(),s.pending_waits.end(),[&signal](const PendingSemaphoreWait&wait){return !signal.timeline||signal.value>=wait.value;}),s.pending_waits.end());}
+    if(fence!=VK_NULL_HANDLE)device->fence_writes[id_from_handle(fence)]={queue->remote_id,submitCount?serial-1:first_serial,next_writes};
     return result;
 }
 
@@ -1554,6 +1691,8 @@ const DeviceEntry* get_device_core_entries(size_t* count) {
         D(GetDeviceGroupPeerMemoryFeatures),
         {"vkGetDeviceGroupPeerMemoryFeaturesKHR", reinterpret_cast<PFN_vkVoidFunction>(GetDeviceGroupPeerMemoryFeatures)},
         D(QueueSubmit),
+        D(QueueSubmit2),
+        {"vkQueueSubmit2KHR", reinterpret_cast<PFN_vkVoidFunction>(QueueSubmit2)},
         D(QueueBindSparse),
         D(QueueWaitIdle),
         D(DeviceWaitIdle),

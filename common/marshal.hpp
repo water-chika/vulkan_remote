@@ -247,6 +247,14 @@ bool read_BufferMemoryBarrier(Reader& r, Arena& arena, const HandleResolver& hr,
                                VkBufferMemoryBarrier* out);
 
 void write_MemoryBarrier(Writer& w, const VkMemoryBarrier& s);
+
+bool write_DependencyInfo(Writer& w, const VkDependencyInfo& s);
+bool read_DependencyInfo(Reader& r, Arena& arena, const HandleResolver& hr,
+                         VkDependencyInfo* out);
+bool write_SubmitInfo2(Writer& w, const VkSubmitInfo2& s,
+                       uint64_t (*command_buffer_id)(VkCommandBuffer));
+bool read_SubmitInfo2(Reader& r, Arena& arena, const HandleResolver& hr,
+                      VkSubmitInfo2* out);
 bool read_MemoryBarrier(Reader& r, Arena& arena, const HandleResolver& hr, VkMemoryBarrier* out);
 
 // Group B: raw-copy structs. VkBufferCreateInfo/VkImageCreateInfo carry a

@@ -43,6 +43,9 @@ bool is_swapchain_command(const char* name) {
 }
 
 uint32_t core_version_for_command(const char* name) {
+    static const char* const v13[] = {
+        "vkCmdPipelineBarrier2","vkCmdResetEvent2","vkCmdSetEvent2",
+        "vkCmdWaitEvents2","vkCmdWriteTimestamp2","vkQueueSubmit2"};
     static const char* const v12[] = {
         "vkCmdBeginRenderPass2","vkCmdDrawIndexedIndirectCount","vkCmdDrawIndirectCount",
         "vkCmdEndRenderPass2","vkCmdNextSubpass2","vkCreateRenderPass2",
@@ -56,6 +59,7 @@ uint32_t core_version_for_command(const char* name) {
         "vkGetBufferMemoryRequirements2","vkGetDescriptorSetLayoutSupport",
         "vkGetDeviceGroupPeerMemoryFeatures","vkGetDeviceQueue2","vkGetImageMemoryRequirements2",
         "vkGetImageSparseMemoryRequirements2","vkTrimCommandPool","vkUpdateDescriptorSetWithTemplate"};
+    for (const char* command : v13) if (strcmp(name, command) == 0) return VK_API_VERSION_1_3;
     for (const char* command : v12) if (strcmp(name, command) == 0) return VK_API_VERSION_1_2;
     for (const char* command : v11) if (strcmp(name, command) == 0) return VK_API_VERSION_1_1;
     return VK_API_VERSION_1_0;

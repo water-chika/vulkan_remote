@@ -13,6 +13,11 @@ inline constexpr ExtensionContractEntry kProperties2InstanceExtension = {
     VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_SPEC_VERSION,
 };
 
+inline constexpr ExtensionContractEntry kSynchronization2DeviceExtension = {
+    VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
+    VK_KHR_SYNCHRONIZATION_2_SPEC_VERSION,
+};
+
 inline constexpr ExtensionContractEntry kRequiredDeviceExtensions[] = {
     {VK_KHR_MULTIVIEW_EXTENSION_NAME, VK_KHR_MULTIVIEW_SPEC_VERSION},
     {VK_KHR_MAINTENANCE_2_EXTENSION_NAME, VK_KHR_MAINTENANCE_2_SPEC_VERSION},
@@ -34,7 +39,8 @@ inline bool device_extension_dependencies_satisfied(const char* name,
                                                      const Contains& enabled,
                                                      bool properties2_enabled) {
     if (name == nullptr) return false;
-    if (std::strcmp(name, VK_KHR_MULTIVIEW_EXTENSION_NAME) == 0)
+    if (std::strcmp(name, VK_KHR_MULTIVIEW_EXTENSION_NAME) == 0 ||
+        std::strcmp(name, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME) == 0)
         return properties2_enabled;
     if (std::strcmp(name, VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME) == 0)
         return enabled(VK_KHR_MULTIVIEW_EXTENSION_NAME) &&
@@ -56,6 +62,13 @@ inline const char* device_extension_for_command(const char* name) {
         return VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME;
     if (std::strcmp(name, "vkCmdSetFragmentShadingRateKHR") == 0)
         return VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME;
+    if (std::strcmp(name, "vkQueueSubmit2KHR") == 0 ||
+        std::strcmp(name, "vkCmdPipelineBarrier2KHR") == 0 ||
+        std::strcmp(name, "vkCmdSetEvent2KHR") == 0 ||
+        std::strcmp(name, "vkCmdResetEvent2KHR") == 0 ||
+        std::strcmp(name, "vkCmdWaitEvents2KHR") == 0 ||
+        std::strcmp(name, "vkCmdWriteTimestamp2KHR") == 0)
+        return VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME;
     return nullptr;
 }
 

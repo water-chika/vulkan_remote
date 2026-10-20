@@ -80,6 +80,30 @@ void handle_WaitSemaphores(Session& c){VkDevice d=c.tables.devices.get(c.reader.
 void handle_SignalSemaphore(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());VkSemaphoreSignalInfo info{VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO};info.semaphore=c.tables.semaphore(c.reader.handle());info.value=c.reader.u64();if(!c.reader.ok()||!d||!info.semaphore){c.reply_status(Status::DecodeError);return;}auto fn=reinterpret_cast<PFN_vkSignalSemaphore>(vkGetDeviceProcAddr(d,"vkSignalSemaphore"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.i32(fn(d,&info));c.reply();}
 void handle_ResetQueryPool(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());VkQueryPool pool=c.tables.query_pool(c.reader.handle());uint32_t first=c.reader.u32(),count=c.reader.u32();if(!c.reader.ok()||!d||!pool){mark_oneway_error(c);return;}auto fn=reinterpret_cast<PFN_vkResetQueryPool>(vkGetDeviceProcAddr(d,"vkResetQueryPool"));if(!fn){mark_oneway_error(c);return;}fn(d,pool,first,count);}
 
+void handle_QueueSubmit2(Session& c) {
+    const uint64_t queue_id = c.reader.handle();
+    VkQueue queue = c.tables.queues.get(queue_id);
+    const uint64_t fence_id = c.reader.handle();
+    VkFence fence = c.tables.fence(fence_id);
+    const uint32_t count = c.reader.u32();
+    if (!queue || (fence_id && !fence) || count > remoting::kMaxArrayElements ||
+        !count_fits(c.reader, count, 16)) {
+        c.reply_status(Status::DecodeError); return;
+    }
+    Arena arena;
+    std::vector<VkSubmitInfo2> infos(count);
+    bool ok = true;
+    for (uint32_t i=0;i<count&&ok;++i)
+        ok = remoting::read_SubmitInfo2(c.reader, arena, c.tables, &infos[i]);
+    if (!ok || !c.reader.ok() || c.reader.remaining()!=0) { c.reply_status(Status::DecodeError); return; }
+    VkDevice owner = c.tables.queues.owner(queue_id);
+    auto fn = owner ? reinterpret_cast<PFN_vkQueueSubmit2KHR>(
+        vkGetDeviceProcAddr(owner,"vkQueueSubmit2KHR")) : nullptr;
+    if (!fn) { c.reply_status(Status::UnsupportedCommand); return; }
+    VkResult result=fn(queue,count,infos.data(),fence);
+    c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.i32(result);c.writer.u32(c.oneway_errors);c.oneway_errors=0;c.reply();
+}
+
 void handle_QueueSubmit(Session& c) {
     const uint64_t queue_id = c.reader.handle();
     VkQueue queue = c.tables.queues.get(queue_id);
@@ -800,6 +824,7 @@ REGISTER_HANDLER(vkGetDeviceQueue, handle_GetDeviceQueue);
 REGISTER_HANDLER(vkGetDeviceQueue2, handle_GetDeviceQueue2);
 REGISTER_HANDLER(vkGetDeviceGroupPeerMemoryFeatures, handle_GetDeviceGroupPeerMemoryFeatures);
 REGISTER_HANDLER(vkQueueSubmit, handle_QueueSubmit);
+REGISTER_HANDLER(vkQueueSubmit2, handle_QueueSubmit2);
 REGISTER_HANDLER(vkQueueBindSparse, handle_QueueBindSparse);
 REGISTER_HANDLER(vkQueueWaitIdle, handle_QueueWaitIdle);
 REGISTER_HANDLER(vkDeviceWaitIdle, handle_DeviceWaitIdle);

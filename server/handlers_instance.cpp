@@ -435,6 +435,14 @@ void handle_vkEnumerateDeviceExtensionProperties(Session& s) {
     };
     if (const auto* swapchain = find_extension(VK_KHR_SWAPCHAIN_EXTENSION_NAME))
         supported.push_back(*swapchain);
+    if (const auto* sync2 = find_extension(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME)) {
+        VkExtensionProperties property{};
+        strncpy(property.extensionName, remoting::kSynchronization2DeviceExtension.name,
+                VK_MAX_EXTENSION_NAME_SIZE - 1);
+        property.specVersion = (std::min)(
+            sync2->specVersion, remoting::kSynchronization2DeviceExtension.spec_version);
+        supported.push_back(property);
+    }
 
     // The reviewed device contract is a dependency-closed unit. Advertising a
     // subset would let applications request an unusable FSR/renderpass2 graph,

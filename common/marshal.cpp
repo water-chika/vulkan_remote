@@ -259,6 +259,7 @@ bool pnext_allowed(PNextContext context, VkStructureType type) {
                    type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES ||
                    type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES ||
                    type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES ||
                    type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES ||
                    type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES ||
                    type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SEPARATE_DEPTH_STENCIL_LAYOUTS_FEATURES ||
@@ -288,6 +289,7 @@ bool pnext_allowed(PNextContext context, VkStructureType type) {
                    type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES ||
                    type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES ||
                    type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES ||
+                   type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES ||
                    type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES ||
                    type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES ||
                    type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SEPARATE_DEPTH_STENCIL_LAYOUTS_FEATURES ||
@@ -352,6 +354,8 @@ size_t pnext_node_size(VkStructureType type) {
             return sizeof(VkPhysicalDeviceHostQueryResetFeatures);
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES:
             return sizeof(VkPhysicalDeviceTimelineSemaphoreFeatures);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES:
+            return sizeof(VkPhysicalDeviceSynchronization2Features);
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_PROPERTIES:
             return sizeof(VkPhysicalDeviceTimelineSemaphoreProperties);
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES:
@@ -496,6 +500,7 @@ bool write_node_fields(Writer& w, PNextContext context, const VkBaseInStructure*
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES:{auto f=*reinterpret_cast<const VkPhysicalDeviceVulkan12Features*>(base);remoting::apply_vulkan12_feature_policy(&f);const auto*v=reinterpret_cast<const VkBool32*>(&f.samplerMirrorClampToEdge);constexpr size_t n=(sizeof(f)-offsetof(VkPhysicalDeviceVulkan12Features,samplerMirrorClampToEdge))/sizeof(VkBool32);for(size_t i=0;i<n;++i)w.u32(v[i]);return true;}
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES:w.u32(reinterpret_cast<const VkPhysicalDeviceHostQueryResetFeatures*>(base)->hostQueryReset);return true;
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES:w.u32(reinterpret_cast<const VkPhysicalDeviceTimelineSemaphoreFeatures*>(base)->timelineSemaphore);return true;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES:w.u32(reinterpret_cast<const VkPhysicalDeviceSynchronization2Features*>(base)->synchronization2);return true;
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES:{auto f=*reinterpret_cast<const VkPhysicalDeviceBufferDeviceAddressFeatures*>(base);remoting::apply_buffer_address_feature_policy(&f);w.u32(f.bufferDeviceAddress);w.u32(f.bufferDeviceAddressCaptureReplay);w.u32(f.bufferDeviceAddressMultiDevice);return true;}
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES:{auto f=*reinterpret_cast<const VkPhysicalDeviceDescriptorIndexingFeatures*>(base);remoting::apply_descriptor_indexing_feature_policy(&f);const auto*v=reinterpret_cast<const VkBool32*>(&f.shaderInputAttachmentArrayDynamicIndexing);constexpr size_t n=(sizeof(f)-offsetof(VkPhysicalDeviceDescriptorIndexingFeatures,shaderInputAttachmentArrayDynamicIndexing))/sizeof(VkBool32);for(size_t i=0;i<n;++i)w.u32(v[i]);return true;}
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SEPARATE_DEPTH_STENCIL_LAYOUTS_FEATURES:w.u32(reinterpret_cast<const VkPhysicalDeviceSeparateDepthStencilLayoutsFeatures*>(base)->separateDepthStencilLayouts);return true;
@@ -652,6 +657,7 @@ bool read_node_fields(Reader& r, Arena& arena, const HandleResolver& hr,
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES:{auto&f=*static_cast<VkPhysicalDeviceVulkan12Features*>(storage);auto*v=reinterpret_cast<VkBool32*>(&f.samplerMirrorClampToEdge);constexpr size_t n=(sizeof(f)-offsetof(VkPhysicalDeviceVulkan12Features,samplerMirrorClampToEdge))/sizeof(VkBool32);for(size_t i=0;i<n;++i)v[i]=r.u32();break;}
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES:static_cast<VkPhysicalDeviceHostQueryResetFeatures*>(storage)->hostQueryReset=r.u32();break;
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES:static_cast<VkPhysicalDeviceTimelineSemaphoreFeatures*>(storage)->timelineSemaphore=r.u32();break;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES:static_cast<VkPhysicalDeviceSynchronization2Features*>(storage)->synchronization2=r.u32();break;
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES:{auto&f=*static_cast<VkPhysicalDeviceBufferDeviceAddressFeatures*>(storage);f.bufferDeviceAddress=r.u32();f.bufferDeviceAddressCaptureReplay=r.u32();f.bufferDeviceAddressMultiDevice=r.u32();break;}
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES:{auto&f=*static_cast<VkPhysicalDeviceDescriptorIndexingFeatures*>(storage);auto*v=reinterpret_cast<VkBool32*>(&f.shaderInputAttachmentArrayDynamicIndexing);constexpr size_t n=(sizeof(f)-offsetof(VkPhysicalDeviceDescriptorIndexingFeatures,shaderInputAttachmentArrayDynamicIndexing))/sizeof(VkBool32);for(size_t i=0;i<n;++i)v[i]=r.u32();break;}
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SEPARATE_DEPTH_STENCIL_LAYOUTS_FEATURES:static_cast<VkPhysicalDeviceSeparateDepthStencilLayoutsFeatures*>(storage)->separateDepthStencilLayouts=r.u32();break;
@@ -857,6 +863,7 @@ bool apply_pnext_output_values(Reader& r, PNextContext context, void* caller_hea
             case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES:COPY_OUTPUT(VkPhysicalDeviceVulkan12Features);break;
             case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES:COPY_OUTPUT(VkPhysicalDeviceHostQueryResetFeatures);break;
             case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES:COPY_OUTPUT(VkPhysicalDeviceTimelineSemaphoreFeatures);break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES:COPY_OUTPUT(VkPhysicalDeviceSynchronization2Features);break;
             case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES:COPY_OUTPUT(VkPhysicalDeviceBufferDeviceAddressFeatures);break;
             case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES:COPY_OUTPUT(VkPhysicalDeviceDescriptorIndexingFeatures);break;
             case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SEPARATE_DEPTH_STENCIL_LAYOUTS_FEATURES:COPY_OUTPUT(VkPhysicalDeviceSeparateDepthStencilLayoutsFeatures);break;
@@ -1971,6 +1978,30 @@ void write_MemoryBarrier(Writer& w, const VkMemoryBarrier& s) {
 bool read_MemoryBarrier(Reader& r, Arena&, const HandleResolver&, VkMemoryBarrier* out) {
     return read_raw(r, out);
 }
+
+bool write_DependencyInfo(Writer& w, const VkDependencyInfo& s) {
+    if (s.sType != VK_STRUCTURE_TYPE_DEPENDENCY_INFO || s.pNext ||
+        s.memoryBarrierCount > kMaxArrayElements ||
+        s.bufferMemoryBarrierCount > kMaxArrayElements ||
+        s.imageMemoryBarrierCount > kMaxArrayElements ||
+        (s.memoryBarrierCount && !s.pMemoryBarriers) ||
+        (s.bufferMemoryBarrierCount && !s.pBufferMemoryBarriers) ||
+        (s.imageMemoryBarrierCount && !s.pImageMemoryBarriers)) return false;
+    w.u32(s.dependencyFlags);
+    w.u32(s.memoryBarrierCount);
+    for (uint32_t i=0;i<s.memoryBarrierCount;++i){const auto&b=s.pMemoryBarriers[i];if(b.sType!=VK_STRUCTURE_TYPE_MEMORY_BARRIER_2||b.pNext)return false;w.u64(b.srcStageMask);w.u64(b.srcAccessMask);w.u64(b.dstStageMask);w.u64(b.dstAccessMask);}
+    w.u32(s.bufferMemoryBarrierCount);
+    for(uint32_t i=0;i<s.bufferMemoryBarrierCount;++i){const auto&b=s.pBufferMemoryBarriers[i];if(b.sType!=VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2||b.pNext)return false;w.u64(b.srcStageMask);w.u64(b.srcAccessMask);w.u64(b.dstStageMask);w.u64(b.dstAccessMask);w.u32(b.srcQueueFamilyIndex);w.u32(b.dstQueueFamilyIndex);w.handle(id_of(b.buffer));w.u64(b.offset);w.u64(b.size);}
+    w.u32(s.imageMemoryBarrierCount);
+    for(uint32_t i=0;i<s.imageMemoryBarrierCount;++i){const auto&b=s.pImageMemoryBarriers[i];if(b.sType!=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2||b.pNext)return false;w.u64(b.srcStageMask);w.u64(b.srcAccessMask);w.u64(b.dstStageMask);w.u64(b.dstAccessMask);w.i32(b.oldLayout);w.i32(b.newLayout);w.u32(b.srcQueueFamilyIndex);w.u32(b.dstQueueFamilyIndex);w.handle(id_of(b.image));w.u32(b.subresourceRange.aspectMask);w.u32(b.subresourceRange.baseMipLevel);w.u32(b.subresourceRange.levelCount);w.u32(b.subresourceRange.baseArrayLayer);w.u32(b.subresourceRange.layerCount);}
+    return true;
+}
+
+bool read_DependencyInfo(Reader& r,Arena& arena,const HandleResolver&hr,VkDependencyInfo*out){*out={VK_STRUCTURE_TYPE_DEPENDENCY_INFO};out->dependencyFlags=r.u32();uint32_t mn=r.u32();if(mn>kMaxArrayElements||mn>r.remaining()/32)return false;auto*m=arena.array<VkMemoryBarrier2>(mn);for(uint32_t i=0;i<mn;++i){m[i]={VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};m[i].srcStageMask=r.u64();m[i].srcAccessMask=r.u64();m[i].dstStageMask=r.u64();m[i].dstAccessMask=r.u64();}out->memoryBarrierCount=mn;out->pMemoryBarriers=m;uint32_t bn=r.u32();if(bn>kMaxArrayElements||bn>r.remaining()/72)return false;auto*b=arena.array<VkBufferMemoryBarrier2>(bn);for(uint32_t i=0;i<bn;++i){b[i]={VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};b[i].srcStageMask=r.u64();b[i].srcAccessMask=r.u64();b[i].dstStageMask=r.u64();b[i].dstAccessMask=r.u64();b[i].srcQueueFamilyIndex=r.u32();b[i].dstQueueFamilyIndex=r.u32();uint64_t id=r.handle();b[i].buffer=hr.buffer(id);b[i].offset=r.u64();b[i].size=r.u64();if(id&&!b[i].buffer)return false;}out->bufferMemoryBarrierCount=bn;out->pBufferMemoryBarriers=b;uint32_t in=r.u32();if(in>kMaxArrayElements||in>r.remaining()/88)return false;auto*im=arena.array<VkImageMemoryBarrier2>(in);for(uint32_t i=0;i<in;++i){im[i]={VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};im[i].srcStageMask=r.u64();im[i].srcAccessMask=r.u64();im[i].dstStageMask=r.u64();im[i].dstAccessMask=r.u64();im[i].oldLayout=static_cast<VkImageLayout>(r.i32());im[i].newLayout=static_cast<VkImageLayout>(r.i32());im[i].srcQueueFamilyIndex=r.u32();im[i].dstQueueFamilyIndex=r.u32();uint64_t id=r.handle();im[i].image=hr.image(id);im[i].subresourceRange.aspectMask=r.u32();im[i].subresourceRange.baseMipLevel=r.u32();im[i].subresourceRange.levelCount=r.u32();im[i].subresourceRange.baseArrayLayer=r.u32();im[i].subresourceRange.layerCount=r.u32();if(id&&!im[i].image)return false;}out->imageMemoryBarrierCount=in;out->pImageMemoryBarriers=im;return r.ok();}
+
+bool write_SubmitInfo2(Writer&w,const VkSubmitInfo2&s,uint64_t(*command_buffer_id)(VkCommandBuffer)){if(s.sType!=VK_STRUCTURE_TYPE_SUBMIT_INFO_2||s.pNext||s.waitSemaphoreInfoCount>kMaxArrayElements||s.commandBufferInfoCount>kMaxArrayElements||s.signalSemaphoreInfoCount>kMaxArrayElements||(s.waitSemaphoreInfoCount&&!s.pWaitSemaphoreInfos)||(s.commandBufferInfoCount&&!s.pCommandBufferInfos)||(s.signalSemaphoreInfoCount&&!s.pSignalSemaphoreInfos))return false;w.u32(s.flags);w.u32(s.waitSemaphoreInfoCount);for(uint32_t i=0;i<s.waitSemaphoreInfoCount;++i){const auto&x=s.pWaitSemaphoreInfos[i];if(x.sType!=VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO||x.pNext)return false;w.handle(id_of(x.semaphore));w.u64(x.value);w.u64(x.stageMask);w.u32(x.deviceIndex);}w.u32(s.commandBufferInfoCount);for(uint32_t i=0;i<s.commandBufferInfoCount;++i){const auto&x=s.pCommandBufferInfos[i];if(x.sType!=VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO||x.pNext)return false;w.handle(command_buffer_id?command_buffer_id(x.commandBuffer):id_of(x.commandBuffer));w.u32(x.deviceMask);}w.u32(s.signalSemaphoreInfoCount);for(uint32_t i=0;i<s.signalSemaphoreInfoCount;++i){const auto&x=s.pSignalSemaphoreInfos[i];if(x.sType!=VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO||x.pNext)return false;w.handle(id_of(x.semaphore));w.u64(x.value);w.u64(x.stageMask);w.u32(x.deviceIndex);}return true;}
+
+bool read_SubmitInfo2(Reader&r,Arena&arena,const HandleResolver&hr,VkSubmitInfo2*out){*out={VK_STRUCTURE_TYPE_SUBMIT_INFO_2};out->flags=r.u32();uint32_t wn=r.u32();if(wn>kMaxArrayElements||wn>r.remaining()/28)return false;auto*w=arena.array<VkSemaphoreSubmitInfo>(wn);for(uint32_t i=0;i<wn;++i){w[i]={VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};uint64_t id=r.handle();w[i].semaphore=hr.semaphore(id);w[i].value=r.u64();w[i].stageMask=r.u64();w[i].deviceIndex=r.u32();if(id&&!w[i].semaphore)return false;}out->waitSemaphoreInfoCount=wn;out->pWaitSemaphoreInfos=w;uint32_t cn=r.u32();if(cn>kMaxArrayElements||cn>r.remaining()/12)return false;auto*c=arena.array<VkCommandBufferSubmitInfo>(cn);for(uint32_t i=0;i<cn;++i){c[i]={VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};uint64_t id=r.handle();c[i].commandBuffer=hr.command_buffer(id);c[i].deviceMask=r.u32();if(id&&!c[i].commandBuffer)return false;}out->commandBufferInfoCount=cn;out->pCommandBufferInfos=c;uint32_t sn=r.u32();if(sn>kMaxArrayElements||sn>r.remaining()/28)return false;auto*s=arena.array<VkSemaphoreSubmitInfo>(sn);for(uint32_t i=0;i<sn;++i){s[i]={VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};uint64_t id=r.handle();s[i].semaphore=hr.semaphore(id);s[i].value=r.u64();s[i].stageMask=r.u64();s[i].deviceIndex=r.u32();if(id&&!s[i].semaphore)return false;}out->signalSemaphoreInfoCount=sn;out->pSignalSemaphoreInfos=s;return r.ok();}
 
 // ---------------------------------------------------------------------------
 // Group B

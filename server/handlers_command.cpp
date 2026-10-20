@@ -415,6 +415,26 @@ void handle_CmdDrawIndexed(Session& c) {
     vkCmdDrawIndexed(cb, index_count, instance_count, first_index, vertex_offset, first_instance);
 }
 
+void handle_CmdPipelineBarrier2(Session& c) {
+    VkCommandBuffer cb = c.tables.command_buffer(c.reader.handle());
+    Arena arena;
+    VkDependencyInfo info{};
+    if (!cb || !remoting::read_DependencyInfo(c.reader, arena, c.tables, &info) ||
+        !c.reader.ok() || c.reader.remaining() != 0) {
+        mark_oneway_error(c);
+        return;
+    }
+    auto fn = reinterpret_cast<PFN_vkCmdPipelineBarrier2KHR>(
+        vkGetDeviceProcAddr(c.tables.command_buffer_devices[cb], "vkCmdPipelineBarrier2KHR"));
+    if (!fn) { mark_oneway_error(c); return; }
+    fn(cb, &info);
+}
+
+void handle_CmdSetEvent2(Session& c){VkCommandBuffer cb=c.tables.command_buffer(c.reader.handle());VkEvent event=c.tables.event(c.reader.handle());Arena arena;VkDependencyInfo info{};if(!cb||!event||!remoting::read_DependencyInfo(c.reader,arena,c.tables,&info)||!c.reader.ok()||c.reader.remaining()!=0){mark_oneway_error(c);return;}auto fn=reinterpret_cast<PFN_vkCmdSetEvent2KHR>(vkGetDeviceProcAddr(c.tables.command_buffer_devices[cb],"vkCmdSetEvent2KHR"));if(!fn){mark_oneway_error(c);return;}fn(cb,event,&info);}
+void handle_CmdResetEvent2(Session& c){VkCommandBuffer cb=c.tables.command_buffer(c.reader.handle());VkEvent event=c.tables.event(c.reader.handle());VkPipelineStageFlags2 stage=c.reader.u64();if(!cb||!event||!c.reader.ok()||c.reader.remaining()!=0){mark_oneway_error(c);return;}auto fn=reinterpret_cast<PFN_vkCmdResetEvent2KHR>(vkGetDeviceProcAddr(c.tables.command_buffer_devices[cb],"vkCmdResetEvent2KHR"));if(!fn){mark_oneway_error(c);return;}fn(cb,event,stage);}
+void handle_CmdWaitEvents2(Session& c){VkCommandBuffer cb=c.tables.command_buffer(c.reader.handle());uint32_t count=c.reader.u32();if(!cb||count>remoting::kMaxArrayElements||!count_fits(c.reader,count,12)){mark_oneway_error(c);return;}std::vector<VkEvent>events(count);std::vector<VkDependencyInfo>infos(count);Arena arena;bool ok=true;for(uint32_t i=0;i<count&&ok;++i){events[i]=c.tables.event(c.reader.handle());ok=events[i]&&remoting::read_DependencyInfo(c.reader,arena,c.tables,&infos[i]);}auto fn=reinterpret_cast<PFN_vkCmdWaitEvents2KHR>(vkGetDeviceProcAddr(c.tables.command_buffer_devices[cb],"vkCmdWaitEvents2KHR"));if(!ok||!fn||!c.reader.ok()||c.reader.remaining()!=0){mark_oneway_error(c);return;}fn(cb,count,events.data(),infos.data());}
+void handle_CmdWriteTimestamp2(Session& c){VkCommandBuffer cb=c.tables.command_buffer(c.reader.handle());VkPipelineStageFlags2 stage=c.reader.u64();VkQueryPool pool=c.tables.query_pool(c.reader.handle());uint32_t query=c.reader.u32();auto fn=cb?reinterpret_cast<PFN_vkCmdWriteTimestamp2KHR>(vkGetDeviceProcAddr(c.tables.command_buffer_devices[cb],"vkCmdWriteTimestamp2KHR")):nullptr;if(!fn||!pool||!c.reader.ok()||c.reader.remaining()!=0){mark_oneway_error(c);return;}fn(cb,stage,pool,query);}
+
 void handle_CmdPipelineBarrier(Session& c) {
     VkCommandBuffer cb = c.tables.command_buffer(c.reader.handle());
     const uint32_t src_stage = c.reader.u32();
@@ -732,6 +752,11 @@ REGISTER_HANDLER(vkCmdSetStencilCompareMask, handle_CmdSetStencilCompareMask);
 REGISTER_HANDLER(vkCmdSetStencilWriteMask, handle_CmdSetStencilWriteMask);
 REGISTER_HANDLER(vkCmdSetStencilReference, handle_CmdSetStencilReference);
 REGISTER_HANDLER(vkCmdPipelineBarrier, handle_CmdPipelineBarrier);
+REGISTER_HANDLER(vkCmdPipelineBarrier2, handle_CmdPipelineBarrier2);
+REGISTER_HANDLER(vkCmdSetEvent2, handle_CmdSetEvent2);
+REGISTER_HANDLER(vkCmdResetEvent2, handle_CmdResetEvent2);
+REGISTER_HANDLER(vkCmdWaitEvents2, handle_CmdWaitEvents2);
+REGISTER_HANDLER(vkCmdWriteTimestamp2, handle_CmdWriteTimestamp2);
 REGISTER_HANDLER(vkCmdCopyBuffer, handle_CmdCopyBuffer);
 REGISTER_HANDLER(vkCmdCopyBufferToImage, handle_CmdCopyBufferToImage);
 REGISTER_HANDLER(vkCmdCopyImageToBuffer, handle_CmdCopyImageToBuffer);
