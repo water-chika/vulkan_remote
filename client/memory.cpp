@@ -253,7 +253,7 @@ VKAPI_ATTR VkResult VKAPI_CALL BindBufferMemory(VkDevice handle, VkBuffer buffer
     Reader r = payload_reader(reply);
     const VkResult result = static_cast<VkResult>(r.i32());
     if (r.ok() && result == VK_SUCCESS) {
-        std::lock_guard<std::mutex> lock(device->mapped_mutex);
+        std::lock_guard<std::mutex> lock(device->metadata_mutex);
         device->buffer_bindings[id_from_handle(buffer)] = {id_from_handle(memory), offset};
     }
     return r.ok() ? result : VK_ERROR_DEVICE_LOST;
@@ -272,7 +272,7 @@ VKAPI_ATTR VkResult VKAPI_CALL BindImageMemory(VkDevice handle, VkImage image,
     Reader r = payload_reader(reply);
     const VkResult result = static_cast<VkResult>(r.i32());
     if (r.ok() && result == VK_SUCCESS) {
-        std::lock_guard<std::mutex> lock(device->mapped_mutex);
+        std::lock_guard<std::mutex> lock(device->metadata_mutex);
         device->image_bindings[id_from_handle(image)] = {id_from_handle(memory), offset};
     }
     return r.ok() ? result : VK_ERROR_DEVICE_LOST;
@@ -301,12 +301,12 @@ VKAPI_ATTR void VKAPI_CALL GetImageMemoryRequirements(VkDevice handle, VkImage i
 VKAPI_ATTR VkResult VKAPI_CALL BindBufferMemory2(VkDevice handle,uint32_t count,const VkBindBufferMemoryInfo* infos){
     if(count>kMaxArrayElements||(count&&!infos))return VK_ERROR_INITIALIZATION_FAILED;RemoteDevice* d=to_device(handle);Writer w;w.handle(d->remote_id);w.u32(count);
     for(uint32_t i=0;i<count;++i){if(infos[i].sType!=VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO||infos[i].pNext)return VK_ERROR_FEATURE_NOT_PRESENT;w.handle(id_from_handle(infos[i].buffer));w.handle(id_from_handle(infos[i].memory));w.u64(infos[i].memoryOffset);}
-    std::vector<char> reply;if(!d->instance->connection.round_trip(Opcode::vkBindBufferMemory2,w,&reply))return VK_ERROR_DEVICE_LOST;Reader r=payload_reader(reply);auto result=static_cast<VkResult>(r.i32());if(r.ok()&&result==VK_SUCCESS){std::lock_guard<std::mutex>lock(d->mapped_mutex);for(uint32_t i=0;i<count;++i)d->buffer_bindings[id_from_handle(infos[i].buffer)]={id_from_handle(infos[i].memory),infos[i].memoryOffset};}return r.ok()?result:VK_ERROR_DEVICE_LOST;
+    std::vector<char> reply;if(!d->instance->connection.round_trip(Opcode::vkBindBufferMemory2,w,&reply))return VK_ERROR_DEVICE_LOST;Reader r=payload_reader(reply);auto result=static_cast<VkResult>(r.i32());if(r.ok()&&result==VK_SUCCESS){std::lock_guard<std::mutex>lock(d->metadata_mutex);for(uint32_t i=0;i<count;++i)d->buffer_bindings[id_from_handle(infos[i].buffer)]={id_from_handle(infos[i].memory),infos[i].memoryOffset};}return r.ok()?result:VK_ERROR_DEVICE_LOST;
 }
 VKAPI_ATTR VkResult VKAPI_CALL BindImageMemory2(VkDevice handle,uint32_t count,const VkBindImageMemoryInfo* infos){
     if(count>kMaxArrayElements||(count&&!infos))return VK_ERROR_INITIALIZATION_FAILED;RemoteDevice* d=to_device(handle);Writer w;w.handle(d->remote_id);w.u32(count);
     for(uint32_t i=0;i<count;++i){if(infos[i].sType!=VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO)return VK_ERROR_INITIALIZATION_FAILED;w.handle(id_from_handle(infos[i].image));w.handle(id_from_handle(infos[i].memory));w.u64(infos[i].memoryOffset);if(!write_pnext_chain(w,PNextContext::BindImageMemory2,infos[i].pNext))return VK_ERROR_FEATURE_NOT_PRESENT;}
-    std::vector<char> reply;if(!d->instance->connection.round_trip(Opcode::vkBindImageMemory2,w,&reply))return VK_ERROR_DEVICE_LOST;Reader r=payload_reader(reply);auto result=static_cast<VkResult>(r.i32());if(r.ok()&&result==VK_SUCCESS){std::lock_guard<std::mutex>lock(d->mapped_mutex);for(uint32_t i=0;i<count;++i)d->image_bindings[id_from_handle(infos[i].image)]={id_from_handle(infos[i].memory),infos[i].memoryOffset};}return r.ok()?result:VK_ERROR_DEVICE_LOST;
+    std::vector<char> reply;if(!d->instance->connection.round_trip(Opcode::vkBindImageMemory2,w,&reply))return VK_ERROR_DEVICE_LOST;Reader r=payload_reader(reply);auto result=static_cast<VkResult>(r.i32());if(r.ok()&&result==VK_SUCCESS){std::lock_guard<std::mutex>lock(d->metadata_mutex);for(uint32_t i=0;i<count;++i)d->image_bindings[id_from_handle(infos[i].image)]={id_from_handle(infos[i].memory),infos[i].memoryOffset};}return r.ok()?result:VK_ERROR_DEVICE_LOST;
 }
 VKAPI_ATTR void VKAPI_CALL GetBufferMemoryRequirements2(VkDevice handle,const VkBufferMemoryRequirementsInfo2* info,VkMemoryRequirements2* out){
     if(!info||!out)return;RemoteDevice*d=to_device(handle);Writer w;w.handle(d->remote_id);w.handle(id_from_handle(info->buffer));if(!write_pnext_output_topology(w,PNextContext::MemoryRequirements2,out->pNext))return;std::vector<char>reply;if(!d->instance->connection.round_trip(Opcode::vkGetBufferMemoryRequirements2,w,&reply))return;Reader r=payload_reader(reply);read_memory_requirements(r,&out->memoryRequirements);apply_pnext_output_values(r,PNextContext::MemoryRequirements2,out->pNext);

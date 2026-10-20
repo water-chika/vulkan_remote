@@ -68,11 +68,11 @@ void handle_GetDeviceQueue(Session& c) {
     VkQueue queue = VK_NULL_HANDLE;
     vkGetDeviceQueue(device, family, index, &queue);
     c.writer.u32(static_cast<uint32_t>(Status::Ok));
-    c.writer.handle(c.tables.queues.add(queue, device));
+    c.writer.handle(c.tables.queues.add_unique(queue, device));
     c.reply();
 }
 
-void handle_GetDeviceQueue2(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());VkDeviceQueueInfo2 info{VK_STRUCTURE_TYPE_DEVICE_QUEUE_INFO_2};info.flags=c.reader.u32();info.queueFamilyIndex=c.reader.u32();info.queueIndex=c.reader.u32();if(!c.reader.ok()||!d){c.reply_status(Status::DecodeError);return;}auto fn=reinterpret_cast<PFN_vkGetDeviceQueue2>(vkGetDeviceProcAddr(d,"vkGetDeviceQueue2"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}VkQueue q=VK_NULL_HANDLE;fn(d,&info,&q);c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.handle(q?c.tables.queues.add(q, d):0);c.reply();}
+void handle_GetDeviceQueue2(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());VkDeviceQueueInfo2 info{VK_STRUCTURE_TYPE_DEVICE_QUEUE_INFO_2};info.flags=c.reader.u32();info.queueFamilyIndex=c.reader.u32();info.queueIndex=c.reader.u32();if(!c.reader.ok()||!d){c.reply_status(Status::DecodeError);return;}auto fn=reinterpret_cast<PFN_vkGetDeviceQueue2>(vkGetDeviceProcAddr(d,"vkGetDeviceQueue2"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}VkQueue q=VK_NULL_HANDLE;fn(d,&info,&q);c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.handle(q?c.tables.queues.add_unique(q, d):0);c.reply();}
 void handle_GetDeviceGroupPeerMemoryFeatures(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());uint32_t heap=c.reader.u32(),local=c.reader.u32(),remote=c.reader.u32();if(!c.reader.ok()||!d){c.reply_status(Status::DecodeError);return;}auto fn=reinterpret_cast<PFN_vkGetDeviceGroupPeerMemoryFeatures>(vkGetDeviceProcAddr(d,"vkGetDeviceGroupPeerMemoryFeatures"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}VkPeerMemoryFeatureFlags flags=0;fn(d,heap,local,remote,&flags);c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.u32(flags);c.reply();}
 
 void handle_GetSemaphoreCounterValue(Session& c){VkDevice d=c.tables.devices.get(c.reader.handle());VkSemaphore sem=c.tables.semaphore(c.reader.handle());if(!c.reader.ok()||!d||!sem){c.reply_status(Status::DecodeError);return;}auto fn=reinterpret_cast<PFN_vkGetSemaphoreCounterValue>(vkGetDeviceProcAddr(d,"vkGetSemaphoreCounterValue"));if(!fn){c.reply_status(Status::UnsupportedCommand);return;}uint64_t value=0;VkResult result=fn(d,sem,&value);c.writer.u32(static_cast<uint32_t>(Status::Ok));c.writer.i32(result);c.writer.u64(value);c.reply();}

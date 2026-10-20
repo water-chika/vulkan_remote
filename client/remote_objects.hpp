@@ -107,7 +107,8 @@ struct ResourceBinding {
 };
 
 struct PendingCoherentWrites {
-    struct RemoteQueue* queue = nullptr;
+    uint64_t queue_id = 0;
+    uint64_t submission_serial = 0;
     std::unordered_set<uint64_t> memory_ids;
 };
 
@@ -118,7 +119,26 @@ struct FramebufferMetadata {
 
 struct TimelineSignalWrites {
     uint64_t value = 0;
+    uint64_t queue_id = 0;
+    uint64_t submission_serial = 0;
     std::unordered_set<uint64_t> memory_ids;
+};
+
+struct PendingSemaphoreWait {
+    uint64_t value = 0;
+    uint64_t queue_id = 0;
+    uint64_t submission_serial = 0;
+    std::vector<uint64_t> downstream_semaphores;
+};
+
+struct SemaphoreProvenance {
+    bool timeline = false;
+    bool binary_signaled = false;
+    uint64_t binary_queue_id = 0;
+    uint64_t binary_submission_serial = 0;
+    std::unordered_set<uint64_t> binary_writes;
+    std::vector<TimelineSignalWrites> timeline_writes;
+    std::vector<PendingSemaphoreWait> pending_waits;
 };
 
 struct RemoteDevice {
@@ -131,6 +151,7 @@ struct RemoteDevice {
     std::vector<struct RemoteCommandBuffer*> command_buffers;
     std::vector<MappedRange> mapped;
     std::mutex mapped_mutex;
+    std::mutex metadata_mutex;
     std::unordered_map<uint64_t, MemoryAllocation> memories;
     std::unordered_map<uint64_t, ResourceBinding> buffer_bindings;
     std::unordered_map<uint64_t, ResourceBinding> image_bindings;
@@ -139,8 +160,9 @@ struct RemoteDevice {
     std::unordered_map<uint64_t, uint64_t> image_view_images;
     std::unordered_map<uint64_t, uint64_t> buffer_view_buffers;
     std::unordered_map<uint64_t, FramebufferMetadata> framebuffers;
-    std::unordered_map<uint64_t, bool> timeline_semaphores;
-    std::unordered_map<uint64_t, std::vector<TimelineSignalWrites>> timeline_writes;
+    std::unordered_map<uint64_t, SemaphoreProvenance> semaphores;
+    uint64_t next_submission_serial = 1;
+    std::unordered_map<uint64_t, std::unordered_set<uint64_t>> queue_writes;
     std::unordered_map<uint64_t, PendingCoherentWrites> fence_writes;
     std::unordered_map<uint64_t, DescriptorTemplateMetadata> descriptor_templates;
     VkDeviceSize map_alignment = 1;
@@ -158,7 +180,6 @@ struct RemoteQueue {
     VK_LOADER_DATA loader_data;
     RemoteDevice* device = nullptr;
     uint64_t remote_id = 0;
-    std::unordered_set<uint64_t> host_visible_writes;
 };
 
 struct RemoteCommandBuffer {
@@ -168,7 +189,8 @@ struct RemoteCommandBuffer {
     uint64_t command_pool_id = 0;
     std::unordered_map<uint32_t, uint64_t> bound_graphics_sets;
     std::unordered_map<uint32_t, uint64_t> bound_compute_sets;
-    std::unordered_set<uint64_t> bound_writable_memories;
+    std::unordered_set<uint64_t> writable_descriptor_sets;
+    bool descriptor_writes_host_visible = false;
     std::unordered_set<uint64_t> host_visible_writes;
     std::unordered_set<uint64_t> pending_writes;
 };

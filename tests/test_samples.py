@@ -49,6 +49,9 @@ TEXT_SAMPLES = {
         "PASS: coherent-memory checksum=c3349e45 bytes=128 epochs=2",
         "SKIP: coherent host-visible memory unavailable",
     ),
+    "vulkan_remoting_queue_sync_chain": (
+        "PASS: queue-sync-chain identities=8 checksum=7f184285 timeline=3",
+    ),
 }
 SAMPLES = GRAPHICS_SAMPLES + tuple(TEXT_SAMPLES)
 def experimental_coherent_enabled():
@@ -96,10 +99,13 @@ def clean_driver_env(data_root):
     return env
 
 
-def start_server(binary, port, loader_data_root):
+def start_server(binary, port, loader_data_root, extra_env=None):
+    server_env = clean_driver_env(loader_data_root)
+    if extra_env:
+        server_env.update(extra_env)
     process = subprocess.Popen(
         [binary, "--address", "127.0.0.1", "--port", str(port)],
-        env=clean_driver_env(loader_data_root),
+        env=server_env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -187,7 +193,9 @@ def test_sample(build_dir, sample_name, temporary_dir, loader_data_root):
             validate=sample_name == "vulkan_remoting_indexed_draw")
 
     port = free_port()
-    server = start_server(server_binary, port, loader_data_root)
+    coherent_env = ({"VK_REMOTING_EXPERIMENTAL_COHERENT": "1"}
+                    if sample_name == "vulkan_remoting_queue_sync_chain" else None)
+    server = start_server(server_binary, port, loader_data_root, coherent_env)
     server_output = ""
     error = None
     try:
@@ -196,6 +204,8 @@ def test_sample(build_dir, sample_name, temporary_dir, loader_data_root):
         remote_env["VK_ICD_FILENAMES"] = manifest
         remote_env["VK_REMOTING_HOST"] = "127.0.0.1"
         remote_env["VK_REMOTING_PORT"] = str(port)
+        if coherent_env:
+            remote_env.update(coherent_env)
         if sample_name in TEXT_SAMPLES:
             if sample_name == "vulkan_remoting_noncoherent_memory":
                 extra_args = (() if experimental_coherent_enabled()

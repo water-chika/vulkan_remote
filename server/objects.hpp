@@ -33,6 +33,14 @@ class Table {
         return static_cast<uint64_t>(m_slots.size());
     }
 
+    uint64_t add_unique(T value, VkDevice owner = VK_NULL_HANDLE) {
+        for (size_t i = 0; i < m_slots.size(); ++i) {
+            if (m_slots[i] == value && m_owners[i] == owner)
+                return static_cast<uint64_t>(i + 1);
+        }
+        return add(value, owner);
+    }
+
     T get(uint64_t id) const {
         if (id == 0 || id > m_slots.size()) return VK_NULL_HANDLE;
         return m_slots[id - 1];

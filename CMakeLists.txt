@@ -206,6 +206,9 @@ target_link_libraries(vulkan_remoting_noncoherent_memory PRIVATE Vulkan::Vulkan)
 add_executable(vulkan_remoting_coherent_memory tools/coherent_memory.cpp)
 target_link_libraries(vulkan_remoting_coherent_memory PRIVATE Vulkan::Vulkan)
 
+add_executable(vulkan_remoting_queue_sync_chain tools/queue_sync_chain.cpp)
+target_link_libraries(vulkan_remoting_queue_sync_chain PRIVATE Vulkan::Vulkan)
+
 add_executable(vulkan_remoting_renderpass2_fsr tools/renderpass2_fragment_shading_rate.cpp)
 target_link_libraries(vulkan_remoting_renderpass2_fsr PRIVATE Vulkan::Vulkan)
 
