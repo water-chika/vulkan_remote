@@ -677,6 +677,67 @@ void test_vulkan12_policy_and_timeline_round_trip() {
     auto* to=static_cast<const VkTimelineSemaphoreSubmitInfo*>(tchain);assert(to->waitSemaphoreValueCount==2&&to->pWaitSemaphoreValues[1]==4&&to->pSignalSemaphoreValues[0]==8);
 }
 
+struct Sync2Resolver final : NullResolver {
+    VkBuffer buffer(uint64_t id) const override {
+        return id == 0x11 ? reinterpret_cast<VkBuffer>(uintptr_t{0x11}) : VK_NULL_HANDLE;
+    }
+    VkImage image(uint64_t id) const override {
+        return id == 0x22 ? reinterpret_cast<VkImage>(uintptr_t{0x22}) : VK_NULL_HANDLE;
+    }
+    VkSemaphore semaphore(uint64_t id) const override {
+        return id == 0x33 ? reinterpret_cast<VkSemaphore>(uintptr_t{0x33}) : VK_NULL_HANDLE;
+    }
+    VkCommandBuffer command_buffer(uint64_t id) const override {
+        return id == 0x44 ? reinterpret_cast<VkCommandBuffer>(uintptr_t{0x44}) : VK_NULL_HANDLE;
+    }
+};
+
+void test_synchronization2_dependency_info_wire_sizes() {
+    VkBufferMemoryBarrier2 buffer{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};
+    buffer.srcStageMask = 1ull << 40;
+    buffer.srcAccessMask = 1ull << 41;
+    buffer.dstStageMask = 1ull << 42;
+    buffer.dstAccessMask = 1ull << 43;
+    buffer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    buffer.dstQueueFamilyIndex = 0xdeadbeefu;
+    buffer.buffer = reinterpret_cast<VkBuffer>(uintptr_t{0x11});
+    buffer.offset = 7;
+    buffer.size = 19;
+    VkImageMemoryBarrier2 image{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+    image.srcStageMask = 1ull << 44;
+    image.dstStageMask = 1ull << 45;
+    image.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    image.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    image.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    image.dstQueueFamilyIndex = 3;
+    image.image = reinterpret_cast<VkImage>(uintptr_t{0x22});
+    image.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 2, 3, 4, 5};
+    VkDependencyInfo info{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    info.bufferMemoryBarrierCount = 1;
+    info.pBufferMemoryBarriers = &buffer;
+    info.imageMemoryBarrierCount = 1;
+    info.pImageMemoryBarriers = &image;
+    remoting::Writer writer;
+    assert(remoting::write_DependencyInfo(writer, info));
+    Sync2Resolver resolver;
+    remoting::Arena arena;
+    remoting::Reader reader(writer.data().data(), writer.data().size());
+    VkDependencyInfo decoded{};
+    assert(remoting::read_DependencyInfo(reader, arena, resolver, &decoded));
+    assert(reader.remaining() == 0);
+    assert(decoded.pBufferMemoryBarriers[0].srcStageMask == buffer.srcStageMask);
+    assert(decoded.pBufferMemoryBarriers[0].dstAccessMask == buffer.dstAccessMask);
+    assert(decoded.pBufferMemoryBarriers[0].dstQueueFamilyIndex == 0xdeadbeefu);
+    assert(decoded.pBufferMemoryBarriers[0].offset == 7);
+    assert(decoded.pImageMemoryBarriers[0].oldLayout == image.oldLayout);
+    assert(decoded.pImageMemoryBarriers[0].newLayout == image.newLayout);
+    assert(decoded.pImageMemoryBarriers[0].subresourceRange.baseArrayLayer == 4);
+    remoting::Reader truncated(writer.data().data(), writer.data().size() - 1);
+    remoting::Arena truncated_arena;
+    VkDependencyInfo rejected{};
+    assert(!remoting::read_DependencyInfo(truncated, truncated_arena, resolver, &rejected));
+}
+
 void test_owned_table_ids_never_revive() {
     remoting::Table<VkBuffer> table;
     const VkDevice first_device = reinterpret_cast<VkDevice>(uintptr_t{0x1000});
@@ -717,6 +778,7 @@ int main() {
     test_fsr_rate_count_capacity_and_incomplete();
     test_excessive_nested_count_is_rejected();
     test_vulkan12_policy_and_timeline_round_trip();
+    test_synchronization2_dependency_info_wire_sizes();
     test_owned_table_ids_never_revive();
     return 0;
 }
