@@ -664,7 +664,11 @@ void test_vulkan12_policy_and_timeline_round_trip() {
     assert(out->hostQueryReset&&out->timelineSemaphore&&out->drawIndirectCount);
     assert(out->bufferDeviceAddress);
     assert(!out->bufferDeviceAddressCaptureReplay&&!out->bufferDeviceAddressMultiDevice);
-    assert(!out->descriptorIndexing);
+    assert(out->descriptorIndexing);
+    assert(!out->descriptorBindingStorageBufferUpdateAfterBind);
+    assert(!out->descriptorBindingPartiallyBound);
+    assert(!out->descriptorBindingVariableDescriptorCount);
+    assert(!out->runtimeDescriptorArray);
 
     VkSemaphoreTypeCreateInfo type{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};type.semaphoreType=VK_SEMAPHORE_TYPE_TIMELINE;type.initialValue=7;
     remoting::Writer sw;assert(remoting::write_pnext_chain(sw,remoting::PNextContext::SemaphoreCreate,&type));

@@ -186,6 +186,8 @@ add_executable(vulkan_remoting_compute tools/compute.cpp)
 target_link_libraries(vulkan_remoting_compute PRIVATE Vulkan::Vulkan)
 add_executable(vulkan_remoting_buffer_device_address tools/buffer_device_address.cpp)
 target_link_libraries(vulkan_remoting_buffer_device_address PRIVATE Vulkan::Vulkan)
+add_executable(vulkan_remoting_descriptor_indexing_compute tools/descriptor_indexing_compute.cpp)
+target_link_libraries(vulkan_remoting_descriptor_indexing_compute PRIVATE Vulkan::Vulkan)
 
 add_executable(vulkan_remoting_push_descriptor_compute tools/push_descriptor_compute.cpp)
 target_link_libraries(vulkan_remoting_push_descriptor_compute PRIVATE Vulkan::Vulkan)

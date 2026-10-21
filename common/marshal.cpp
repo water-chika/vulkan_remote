@@ -1646,6 +1646,7 @@ bool read_SubpassEndInfo(Reader& r, Arena& arena, const HandleResolver& hr,
 }
 
 void write_DescriptorSetLayoutCreateInfo(Writer& w, const VkDescriptorSetLayoutCreateInfo& s) {
+    if (s.pNext || (s.flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT)) return;
     VkDescriptorSetLayoutCreateInfo tmp = s;
     tmp.pNext = nullptr;
     tmp.pBindings = nullptr;
@@ -1734,6 +1735,7 @@ bool read_SamplerYcbcrConversionCreateInfo(Reader& r, Arena&, const HandleResolv
 }
 
 void write_DescriptorPoolCreateInfo(Writer& w, const VkDescriptorPoolCreateInfo& s) {
+    if (s.pNext || (s.flags & VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT)) return;
     VkDescriptorPoolCreateInfo tmp = s;
     tmp.pNext = nullptr;
     tmp.pPoolSizes = nullptr;
@@ -1749,6 +1751,7 @@ bool read_DescriptorPoolCreateInfo(Reader& r, Arena& arena, const HandleResolver
 }
 
 void write_DescriptorSetAllocateInfo(Writer& w, const VkDescriptorSetAllocateInfo& s) {
+    if (s.pNext) return;
     VkDescriptorSetAllocateInfo tmp = s;
     tmp.pNext = nullptr;
     tmp.pSetLayouts = nullptr;

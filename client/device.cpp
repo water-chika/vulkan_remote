@@ -178,7 +178,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice handle,
         if(node->sType==VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_FEATURES&&reinterpret_cast<const VkPhysicalDeviceProtectedMemoryFeatures*>(node)->protectedMemory)return VK_ERROR_FEATURE_NOT_PRESENT;
         if(node->sType==VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES&&!remoting::vulkan12_requested_features_supported(*reinterpret_cast<const VkPhysicalDeviceVulkan12Features*>(node)))return VK_ERROR_FEATURE_NOT_PRESENT;
         if(node->sType==VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES){const auto&f=*reinterpret_cast<const VkPhysicalDeviceBufferDeviceAddressFeatures*>(node);if(f.bufferDeviceAddressCaptureReplay||f.bufferDeviceAddressMultiDevice)return VK_ERROR_FEATURE_NOT_PRESENT;}
-        if(node->sType==VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES){const auto&f=*reinterpret_cast<const VkPhysicalDeviceDescriptorIndexingFeatures*>(node);VkPhysicalDeviceDescriptorIndexingFeatures z{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES};if(std::memcmp(reinterpret_cast<const char*>(&f)+offsetof(VkPhysicalDeviceDescriptorIndexingFeatures,shaderInputAttachmentArrayDynamicIndexing),reinterpret_cast<const char*>(&z)+offsetof(VkPhysicalDeviceDescriptorIndexingFeatures,shaderInputAttachmentArrayDynamicIndexing),sizeof(f)-offsetof(VkPhysicalDeviceDescriptorIndexingFeatures,shaderInputAttachmentArrayDynamicIndexing))!=0)return VK_ERROR_FEATURE_NOT_PRESENT;}
+        if(node->sType==VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES){const auto&f=*reinterpret_cast<const VkPhysicalDeviceDescriptorIndexingFeatures*>(node);auto allowed=f;remoting::apply_descriptor_indexing_feature_policy(&allowed);const auto*requested=reinterpret_cast<const VkBool32*>(&f.shaderInputAttachmentArrayDynamicIndexing);const auto*filtered=reinterpret_cast<const VkBool32*>(&allowed.shaderInputAttachmentArrayDynamicIndexing);constexpr size_t n=(sizeof(f)-offsetof(VkPhysicalDeviceDescriptorIndexingFeatures,shaderInputAttachmentArrayDynamicIndexing))/sizeof(VkBool32);for(size_t i=0;i<n;++i)if(requested[i]&&!filtered[i])return VK_ERROR_FEATURE_NOT_PRESENT;}
         if(node->sType==VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES&&reinterpret_cast<const VkPhysicalDeviceSynchronization2Features*>(node)->synchronization2&&!extension_enabled(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME))return VK_ERROR_FEATURE_NOT_PRESENT;
     }
     auto* pd = reinterpret_cast<struct RemotePhysicalDevice*>(handle);
@@ -191,10 +191,12 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice handle,
             (strcmp(requested, VK_KHR_SWAPCHAIN_EXTENSION_NAME) != 0 &&
              strcmp(requested, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME) != 0 &&
              strcmp(requested, VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) != 0 &&
+             strcmp(requested, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME) != 0 &&
              !remoting::is_required_device_extension(requested)) ||
             ((remoting::is_required_device_extension(requested) ||
               strcmp(requested, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME) == 0 ||
-              strcmp(requested, VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) == 0) &&
+              strcmp(requested, VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) == 0 ||
+              strcmp(requested, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME) == 0) &&
              pd->api_version < VK_API_VERSION_1_1 &&
              !remoting::device_extension_dependencies_satisfied(
                  requested, extension_enabled, properties2_enabled))) {
@@ -1492,6 +1494,9 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateComputePipelines(
 VKAPI_ATTR VkResult VKAPI_CALL CreateDescriptorSetLayout(
     VkDevice handle, const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
     const VkAllocationCallbacks*, VkDescriptorSetLayout* pLayout) {
+    if (!pCreateInfo || !pLayout || pCreateInfo->pNext ||
+        (pCreateInfo->flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT))
+        return VK_ERROR_FEATURE_NOT_PRESENT;
     RemoteDevice* device = to_device(handle);
     Writer request;
     request.handle(device->remote_id);

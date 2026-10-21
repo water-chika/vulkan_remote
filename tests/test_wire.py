@@ -774,7 +774,7 @@ def test_device_extension_advertisement_is_real_device_intersection(server, buil
                 sorted(advertised_contract)))
         unexpected = set(names) - contract - {
             'VK_KHR_swapchain', 'VK_KHR_synchronization2',
-            'VK_KHR_buffer_device_address'}
+            'VK_KHR_buffer_device_address', 'VK_EXT_descriptor_indexing'}
         if unexpected:
             raise Failure('server exposed unreviewed device extensions: {}'.format(
                 sorted(unexpected)))

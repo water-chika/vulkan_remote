@@ -435,6 +435,14 @@ void handle_vkEnumerateDeviceExtensionProperties(Session& s) {
     };
     if (const auto* swapchain = find_extension(VK_KHR_SWAPCHAIN_EXTENSION_NAME))
         supported.push_back(*swapchain);
+    if (const auto* indexing = find_extension(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME)) {
+        VkExtensionProperties property{};
+        strncpy(property.extensionName, remoting::kDescriptorIndexingDeviceExtension.name,
+                VK_MAX_EXTENSION_NAME_SIZE - 1);
+        property.specVersion = (std::min)(
+            indexing->specVersion, remoting::kDescriptorIndexingDeviceExtension.spec_version);
+        supported.push_back(property);
+    }
     if (const auto* bda = find_extension(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)) {
         VkExtensionProperties property{};
         strncpy(property.extensionName, remoting::kBufferDeviceAddressDeviceExtension.name,

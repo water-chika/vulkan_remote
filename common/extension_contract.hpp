@@ -13,6 +13,11 @@ inline constexpr ExtensionContractEntry kProperties2InstanceExtension = {
     VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_SPEC_VERSION,
 };
 
+inline constexpr ExtensionContractEntry kDescriptorIndexingDeviceExtension = {
+    VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,
+    VK_EXT_DESCRIPTOR_INDEXING_SPEC_VERSION,
+};
+
 inline constexpr ExtensionContractEntry kBufferDeviceAddressDeviceExtension = {
     VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
     VK_KHR_BUFFER_DEVICE_ADDRESS_SPEC_VERSION,
@@ -104,17 +109,9 @@ inline void apply_vulkan12_feature_policy(VkPhysicalDeviceVulkan12Features* f) {
     // and multi-device addresses cannot cross this remoting contract.
     f->bufferDeviceAddressCaptureReplay = VK_FALSE;
     f->bufferDeviceAddressMultiDevice = VK_FALSE;
-    f->descriptorIndexing = VK_FALSE;
-    f->shaderInputAttachmentArrayDynamicIndexing = VK_FALSE;
-    f->shaderUniformTexelBufferArrayDynamicIndexing = VK_FALSE;
-    f->shaderStorageTexelBufferArrayDynamicIndexing = VK_FALSE;
-    f->shaderUniformBufferArrayNonUniformIndexing = VK_FALSE;
-    f->shaderSampledImageArrayNonUniformIndexing = VK_FALSE;
-    f->shaderStorageBufferArrayNonUniformIndexing = VK_FALSE;
-    f->shaderStorageImageArrayNonUniformIndexing = VK_FALSE;
-    f->shaderInputAttachmentArrayNonUniformIndexing = VK_FALSE;
-    f->shaderUniformTexelBufferArrayNonUniformIndexing = VK_FALSE;
-    f->shaderStorageTexelBufferArrayNonUniformIndexing = VK_FALSE;
+    // Fixed-size descriptor arrays use the ordinary layout/update codecs. Keep
+    // their shader indexing features, but hide every feature that changes
+    // descriptor cardinality or permits mutation while descriptors are in use.
     f->descriptorBindingUniformBufferUpdateAfterBind = VK_FALSE;
     f->descriptorBindingSampledImageUpdateAfterBind = VK_FALSE;
     f->descriptorBindingStorageImageUpdateAfterBind = VK_FALSE;
@@ -129,11 +126,16 @@ inline void apply_vulkan12_feature_policy(VkPhysicalDeviceVulkan12Features* f) {
 
 inline void apply_descriptor_indexing_feature_policy(VkPhysicalDeviceDescriptorIndexingFeatures* f) {
     if (!f) return;
-    const VkStructureType type = f->sType;
-    void* next = f->pNext;
-    std::memset(f, 0, sizeof(*f));
-    f->sType = type;
-    f->pNext = next;
+    f->descriptorBindingUniformBufferUpdateAfterBind = VK_FALSE;
+    f->descriptorBindingSampledImageUpdateAfterBind = VK_FALSE;
+    f->descriptorBindingStorageImageUpdateAfterBind = VK_FALSE;
+    f->descriptorBindingStorageBufferUpdateAfterBind = VK_FALSE;
+    f->descriptorBindingUniformTexelBufferUpdateAfterBind = VK_FALSE;
+    f->descriptorBindingStorageTexelBufferUpdateAfterBind = VK_FALSE;
+    f->descriptorBindingUpdateUnusedWhilePending = VK_FALSE;
+    f->descriptorBindingPartiallyBound = VK_FALSE;
+    f->descriptorBindingVariableDescriptorCount = VK_FALSE;
+    f->runtimeDescriptorArray = VK_FALSE;
 }
 
 inline void apply_buffer_address_feature_policy(VkPhysicalDeviceBufferDeviceAddressFeatures* f) {

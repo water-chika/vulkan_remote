@@ -30,6 +30,9 @@ TEXT_SAMPLES = {
     "vulkan_remoting_buffer_device_address": (
         "PASS: buffer-device-address checksum=ead71172 elements=64",
     ),
+    "vulkan_remoting_descriptor_indexing_compute": (
+        "PASS: descriptor-indexing-compute checksum=a5f30bb1 elements=64",
+    ),
     "vulkan_remoting_push_descriptor_compute": (
         "PASS: push-descriptor-compute checksum=f2abf38a elements=64",
     ),
