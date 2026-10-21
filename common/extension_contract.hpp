@@ -13,6 +13,11 @@ inline constexpr ExtensionContractEntry kProperties2InstanceExtension = {
     VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_SPEC_VERSION,
 };
 
+inline constexpr ExtensionContractEntry kBufferDeviceAddressDeviceExtension = {
+    VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
+    VK_KHR_BUFFER_DEVICE_ADDRESS_SPEC_VERSION,
+};
+
 inline constexpr ExtensionContractEntry kSynchronization2DeviceExtension = {
     VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
     VK_KHR_SYNCHRONIZATION_2_SPEC_VERSION,
@@ -62,6 +67,10 @@ inline const char* device_extension_for_command(const char* name) {
         return VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME;
     if (std::strcmp(name, "vkCmdSetFragmentShadingRateKHR") == 0)
         return VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME;
+    if (std::strcmp(name, "vkGetBufferDeviceAddressKHR") == 0 ||
+        std::strcmp(name, "vkGetBufferOpaqueCaptureAddressKHR") == 0 ||
+        std::strcmp(name, "vkGetDeviceMemoryOpaqueCaptureAddressKHR") == 0)
+        return VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME;
     if (std::strcmp(name, "vkQueueSubmit2KHR") == 0 ||
         std::strcmp(name, "vkCmdPipelineBarrier2KHR") == 0 ||
         std::strcmp(name, "vkCmdSetEvent2KHR") == 0 ||
@@ -91,10 +100,8 @@ inline VkResult copy_fragment_shading_rates(
 
 inline void apply_vulkan12_feature_policy(VkPhysicalDeviceVulkan12Features* f) {
     if (!f) return;
-    // Remote addresses have no meaning in the client process, capture/replay
-    // tokens cannot cross it, and descriptor-indexing update/variable-count
-    // semantics have not been implemented by the object codecs.
-    f->bufferDeviceAddress = VK_FALSE;
+    // Server-native addresses remain opaque shader data; capture/replay tokens
+    // and multi-device addresses cannot cross this remoting contract.
     f->bufferDeviceAddressCaptureReplay = VK_FALSE;
     f->bufferDeviceAddressMultiDevice = VK_FALSE;
     f->descriptorIndexing = VK_FALSE;
@@ -131,7 +138,6 @@ inline void apply_descriptor_indexing_feature_policy(VkPhysicalDeviceDescriptorI
 
 inline void apply_buffer_address_feature_policy(VkPhysicalDeviceBufferDeviceAddressFeatures* f) {
     if (!f) return;
-    f->bufferDeviceAddress = VK_FALSE;
     f->bufferDeviceAddressCaptureReplay = VK_FALSE;
     f->bufferDeviceAddressMultiDevice = VK_FALSE;
 }

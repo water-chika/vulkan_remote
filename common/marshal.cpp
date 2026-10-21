@@ -331,7 +331,7 @@ bool pnext_allowed(PNextContext context, VkStructureType type) {
         case PNextContext::BufferCreate:
             return type == VK_STRUCTURE_TYPE_BUFFER_OPAQUE_CAPTURE_ADDRESS_CREATE_INFO;
         case PNextContext::MemoryAllocate:
-            return type == VK_STRUCTURE_TYPE_MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO;
+            return type == VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
         case PNextContext::ShaderModule:
             return false;
     }
@@ -426,8 +426,8 @@ size_t pnext_node_size(VkStructureType type) {
             return sizeof(VkTimelineSemaphoreSubmitInfo);
         case VK_STRUCTURE_TYPE_BUFFER_OPAQUE_CAPTURE_ADDRESS_CREATE_INFO:
             return sizeof(VkBufferOpaqueCaptureAddressCreateInfo);
-        case VK_STRUCTURE_TYPE_MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO:
-            return sizeof(VkMemoryOpaqueCaptureAddressAllocateInfo);
+        case VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO:
+            return sizeof(VkMemoryAllocateFlagsInfo);
         default:
             return 0;
     }
@@ -634,7 +634,7 @@ bool write_node_fields(Writer& w, PNextContext context, const VkBaseInStructure*
         case VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO:{const auto&x=*reinterpret_cast<const VkSemaphoreTypeCreateInfo*>(base);w.i32(x.semaphoreType);w.u64(x.initialValue);return true;}
         case VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO:{const auto&x=*reinterpret_cast<const VkTimelineSemaphoreSubmitInfo*>(base);if(!valid_count(x.waitSemaphoreValueCount,sizeof(uint64_t))||!valid_count(x.signalSemaphoreValueCount,sizeof(uint64_t))||(x.waitSemaphoreValueCount&&!x.pWaitSemaphoreValues)||(x.signalSemaphoreValueCount&&!x.pSignalSemaphoreValues))return false;w.u32(x.waitSemaphoreValueCount);for(uint32_t i=0;i<x.waitSemaphoreValueCount;++i)w.u64(x.pWaitSemaphoreValues[i]);w.u32(x.signalSemaphoreValueCount);for(uint32_t i=0;i<x.signalSemaphoreValueCount;++i)w.u64(x.pSignalSemaphoreValues[i]);return true;}
         case VK_STRUCTURE_TYPE_BUFFER_OPAQUE_CAPTURE_ADDRESS_CREATE_INFO:w.u64(reinterpret_cast<const VkBufferOpaqueCaptureAddressCreateInfo*>(base)->opaqueCaptureAddress);return true;
-        case VK_STRUCTURE_TYPE_MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO:w.u64(reinterpret_cast<const VkMemoryOpaqueCaptureAddressAllocateInfo*>(base)->opaqueCaptureAddress);return true;
+        case VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO:{const auto&x=*reinterpret_cast<const VkMemoryAllocateFlagsInfo*>(base);if((x.flags&~VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT)!=0||x.deviceMask!=0)return false;w.u32(x.flags);w.u32(x.deviceMask);return true;}
         case VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO: {
             const auto& s = *reinterpret_cast<const VkRenderPassAttachmentBeginInfo*>(base);
             if (!valid_count(s.attachmentCount,sizeof(VkImageView)) || (s.attachmentCount && !s.pAttachments)) return false;
@@ -748,7 +748,7 @@ bool read_node_fields(Reader& r, Arena& arena, const HandleResolver& hr,
         case VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO:{auto&x=*static_cast<VkSemaphoreTypeCreateInfo*>(storage);x.semaphoreType=static_cast<VkSemaphoreType>(r.i32());x.initialValue=r.u64();break;}
         case VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO:{auto&x=*static_cast<VkTimelineSemaphoreSubmitInfo*>(storage);x.waitSemaphoreValueCount=r.u32();if(!r.ok()||!valid_count(x.waitSemaphoreValueCount,sizeof(uint64_t)))return false;auto*w=x.waitSemaphoreValueCount?arena.array<uint64_t>(x.waitSemaphoreValueCount):nullptr;for(uint32_t i=0;i<x.waitSemaphoreValueCount;++i)w[i]=r.u64();x.pWaitSemaphoreValues=w;x.signalSemaphoreValueCount=r.u32();if(!r.ok()||!valid_count(x.signalSemaphoreValueCount,sizeof(uint64_t)))return false;auto*v=x.signalSemaphoreValueCount?arena.array<uint64_t>(x.signalSemaphoreValueCount):nullptr;for(uint32_t i=0;i<x.signalSemaphoreValueCount;++i)v[i]=r.u64();x.pSignalSemaphoreValues=v;break;}
         case VK_STRUCTURE_TYPE_BUFFER_OPAQUE_CAPTURE_ADDRESS_CREATE_INFO:static_cast<VkBufferOpaqueCaptureAddressCreateInfo*>(storage)->opaqueCaptureAddress=r.u64();break;
-        case VK_STRUCTURE_TYPE_MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO:static_cast<VkMemoryOpaqueCaptureAddressAllocateInfo*>(storage)->opaqueCaptureAddress=r.u64();break;
+        case VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO:{auto&x=*static_cast<VkMemoryAllocateFlagsInfo*>(storage);x.flags=r.u32();x.deviceMask=r.u32();if((x.flags&~VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT)!=0||x.deviceMask!=0)return false;break;}
         case VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO: {
             auto& s=*static_cast<VkRenderPassAttachmentBeginInfo*>(storage);s.attachmentCount=r.u32();if(!r.ok()||!valid_count(s.attachmentCount,sizeof(VkImageView)))return false;VkImageView* p=nullptr;if(!read_handle_array(r,arena,s.attachmentCount,[&](uint64_t id){return hr.image_view(id);},&p))return false;s.pAttachments=p;break;
         }
